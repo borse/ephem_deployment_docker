@@ -16,11 +16,10 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
 - [Installation](#installation)
   - [Step 1 — Install Docker](#step-1--install-docker)
   - [Step 2 — Download the Deployment Files](#step-2--download-the-deployment-files)
-  - [Step 3 — Download the ePHEM Modules](#step-3--download-the-ephem-modules)
-  - [Step 4 — Configure Your Settings](#step-4--configure-your-settings)
-  - [Step 5 — Start the System](#step-5--start-the-system)
-  - [Step 6 — Set Up SSL (HTTPS)](#step-6--set-up-ssl-https)
-  - [Step 7 — Open ePHEM in Your Browser](#step-7--open-ephem-in-your-browser)
+  - [Step 3 — Configure Your Settings](#step-3--configure-your-settings)
+  - [Step 4 — Run the Setup Script](#step-4--run-the-setup-script)
+  - [Step 5 — Set Up SSL (HTTPS)](#step-5--set-up-ssl-https)
+  - [Step 6 — Open ePHEM in Your Browser](#step-6--open-ephem-in-your-browser)
 - [Updating ePHEM](#updating-ephem)
 - [Multiple Databases](#multiple-databases)
 - [Backups](#backups)
@@ -152,19 +151,7 @@ cd ephem-deploy
 > ```
 > Then run the `git clone` command again.
 
-### Step 3 — Download the ePHEM Modules
-
-```bash
-rm -rf custom-addons
-```
-
-```bash
-git clone https://github.com/borse/ePHEM.git custom-addons
-```
-
-> The first command removes the placeholder folder. The second downloads the ePHEM modules.
-
-### Step 4 — Configure Your Settings
+### Step 3 — Configure Your Settings
 
 ```bash
 cp .env.example .env
@@ -192,13 +179,29 @@ Replace `ephem.health.gov.xx` with your actual domain. Replace `CHANGE_ME` with 
 
 **Save the file:** Press `Ctrl+O`, then `Enter`, then `Ctrl+X`.
 
-### Step 5 — Start the System
+### Step 4 — Run the Setup Script
+
+This script checks everything, downloads the ePHEM modules, and starts the system — all in one command:
 
 ```bash
-docker compose up -d
+chmod +x setup.sh
 ```
 
-> **First time:** This takes 2–5 minutes to download the software (~1 GB). Future starts are almost instant.
+```bash
+./setup.sh
+```
+
+The script will:
+
+- Verify Docker is installed
+- Check your `.env` file has real passwords (not `CHANGE_ME`)
+- Download the ePHEM modules into `custom-addons/` automatically
+- Verify the NGINX config file exists
+- Start all containers
+
+If something is wrong, it tells you exactly what to fix.
+
+> **First time:** Takes 2–5 minutes to download the software (~1 GB). Future starts are almost instant.
 
 Check everything is running:
 
@@ -214,7 +217,7 @@ If something shows **Exited** or **Restarting**, check what went wrong:
 docker compose logs
 ```
 
-### Step 6 — Set Up SSL (HTTPS)
+### Step 5 — Set Up SSL (HTTPS)
 
 Replace `ephem.health.gov.xx` and `admin@health.gov.xx` with your actual domain and email:
 
@@ -236,7 +239,7 @@ docker compose restart nginx
 >   sudo ufw allow 443
 >   ```
 
-### Step 7 — Open ePHEM in Your Browser
+### Step 6 — Open ePHEM in Your Browser
 
 Go to:
 
@@ -500,7 +503,7 @@ sudo ufw allow 80
 sudo ufw allow 443
 ```
 
-Re-run the Certbot command from [Step 6](#step-6--set-up-ssl-https).
+Re-run the Certbot command from [Step 5](#step-5--set-up-ssl-https).
 
 ### Start completely fresh
 
@@ -524,9 +527,10 @@ ephem-deploy/
 ├── docker-compose.yml       ← Defines the containers
 ├── .env.example             ← Settings template — copy to .env
 ├── .env                     ← Your settings (never share this)
+├── setup.sh                 ← Run once — checks everything and starts the system
 │
 ├── nginx/
-│   └── default.conf         ← Web server configuration
+│   └── default.conf         ← NGINX config (editable per country)
 │
 ├── custom-addons/           ← ePHEM modules (from github.com/borse/ePHEM)
 │
