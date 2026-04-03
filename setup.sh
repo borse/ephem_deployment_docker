@@ -67,7 +67,7 @@ if [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v REA
 else
     echo -e "${YELLOW}!${NC} custom-addons/ is empty — cloning ePHEM modules..."
     rm -rf custom-addons
-    git clone git@github.com:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons
+    git clone https://github.com/borse/ePHEM.git custom-addons
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else
@@ -97,23 +97,74 @@ if [ $ERRORS -gt 0 ]; then
     echo -e "${RED}✗ $ERRORS issue(s) found. Fix them and run this script again.${NC}"
     echo ""
     exit 1
-else
-    echo -e "${GREEN}✓ Everything looks good!${NC}"
-    echo ""
-    echo "Starting ePHEM..."
-    echo ""
-    docker compose up -d
-    echo ""
-    echo "========================================="
-    echo ""
-    docker compose ps
-    echo ""
-    echo "========================================="
-    echo -e "${GREEN}ePHEM is running!${NC}"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
-    echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
-    echo "  2. Open in browser: http://YOUR_DOMAIN"
-    echo ""
 fi
+
+echo -e "${GREEN}✓ Everything looks good!${NC}"
+echo ""
+echo "Starting ePHEM..."
+echo ""
+
+# ── Start containers ─────────────────────────
+docker compose up -d
+echo ""
+
+# ── Wait for database to be ready ────────────
+echo "Waiting for database..."
+for i in $(seq 1 30); do
+    if docker compose exec -T db pg_isready -U odoo -q 2>/dev/null; then
+        echo -e "${GREEN}✓${NC} Database is ready"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo -e "${RED}✗${NC} Database did not start in time. Run: docker compose logs db"
+        exit 1
+    fi
+    sleep 2
+done
+
+# ── Check if Odoo can connect to the database ─
+echo "Checking database connection..."
+sleep 5
+
+ODOO_LOG=$(docker compose logs --tail=5 odoo 2>&1)
+if echo "$ODOO_LOG" | grep -q "password authentication failed"; then
+    echo ""
+    echo -e "${YELLOW}! Database password mismatch detected.${NC}"
+    echo "  This happens when POSTGRES_PASSWORD in .env was changed after the"
+    echo "  database was first created. Fixing automatically..."
+    echo ""
+
+    # Read the password from .env
+    ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2-)
+
+    # Try to update the password using the default PostgreSQL auth
+    docker compose exec -T db psql -U odoo -d postgres -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" 2>/dev/null && {
+        echo -e "${GREEN}✓${NC} Password synced. Restarting Odoo..."
+        docker compose restart odoo
+        sleep 5
+    } || {
+        echo -e "${RED}✗${NC} Could not fix automatically."
+        echo ""
+        echo "  To fix manually, reset the database:"
+        echo "    docker compose down -v"
+        echo "    docker compose up -d"
+        echo ""
+        echo "  WARNING: This deletes all data. Back up first if needed."
+        exit 1
+    }
+fi
+
+# ── Final status ─────────────────────────────
+echo ""
+echo "========================================="
+echo ""
+docker compose ps
+echo ""
+echo "========================================="
+echo -e "${GREEN}ePHEM is running!${NC}"
+echo ""
+echo "Next steps:"
+echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
+echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
+echo "  2. Open in browser: http://YOUR_DOMAIN"
+echo ""
