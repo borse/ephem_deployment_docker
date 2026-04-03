@@ -1,0 +1,80 @@
+services:
+
+  # ── PostgreSQL Database ────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: ephem-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-odoo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - ephem-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odoo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Odoo / ePHEM Application ───────────────────
+  odoo:
+    image: borrs/ephem:latest
+    container_name: ephem-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      HOST: db
+      PORT: 5432
+      USER: ${POSTGRES_USER:-odoo}
+      PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - odoo-data:/var/lib/odoo
+      - ./custom-addons:/mnt/extra-addons:ro
+    networks:
+      - ephem-internal
+    expose:
+      - "8069"
+      - "8072"
+
+  # ── NGINX Reverse Proxy ────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: ephem-nginx
+    restart: unless-stopped
+    depends_on:
+      - odoo
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/lib/letsencrypt
+    networks:
+      - ephem-internal
+
+  # ── Certbot (SSL auto-renewal) ─────────────────
+  certbot:
+    image: certbot/certbot
+    container_name: ephem-certbot
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/lib/letsencrypt
+    networks:
+      - ephem-internal
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done'"
+
+volumes:
+  postgres-data:
+  odoo-data:
+  certbot-etc:
+  certbot-var:
+
+networks:
+  ephem-internal:
+    driver: bridge

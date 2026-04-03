@@ -1,0 +1,16 @@
+# Passwords
+.env
+
+# Data (lives on the server, not in Git)
+postgres-data/
+odoo-data/
+backups/*.gz
+backups/*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
