@@ -37,7 +37,7 @@ done
 # Backup filestore
 echo "[$TIMESTAMP] Backing up filestore..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T odoo \
-    tar -czf - -C /var/lib/odoo/filestore . 2>/dev/null > "$BACKUP_DIR/filestore_${TIMESTAMP}.tar.gz" || true
+    tar -czf - -C /var/lib/odoo/.local/share/Odoo/filestore . 2>/dev/null > "$BACKUP_DIR/filestore_${TIMESTAMP}.tar.gz" || true
 echo "[$TIMESTAMP] Done: filestore"
 
 # Clean old backups
