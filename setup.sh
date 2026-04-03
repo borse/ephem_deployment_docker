@@ -113,6 +113,15 @@ if [ -f "scripts/ssl-setup.sh" ]; then
     echo -e "${GREEN}✓${NC} SSL setup script is ready"
 fi
 
+# ── Sync odoo.conf with .env passwords ──────
+if [ -f "odoo.conf" ] && [ -f ".env" ]; then
+    ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
+    if [ -n "$ADMIN_PASS" ]; then
+        sed -i "s|^admin_passwd.*|admin_passwd = $ADMIN_PASS|" odoo.conf
+        echo -e "${GREEN}✓${NC} Odoo master password synced from .env"
+    fi
+fi
+
 # ── Create backups directory ─────────────────
 mkdir -p backups
 echo -e "${GREEN}✓${NC} backups/ directory exists"

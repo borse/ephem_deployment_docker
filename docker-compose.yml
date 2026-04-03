@@ -35,6 +35,7 @@ services:
     volumes:
       - odoo-data:/var/lib/odoo
       - ./custom-addons:/mnt/extra-addons:ro
+      - ./odoo.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal
     expose:
