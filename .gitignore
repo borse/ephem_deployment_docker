@@ -6,6 +6,8 @@ postgres-data/
 odoo-data/
 backups/*.gz
 backups/*.log
+.env
+custom-addons/
 
 # OS / IDE
 .DS_Store
