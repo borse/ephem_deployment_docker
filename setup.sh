@@ -92,12 +92,30 @@ if [ -f "scripts/ssl-setup.sh" ]; then
     echo -e "${GREEN}✓${NC} SSL setup script is ready"
 fi
 
-# ── Sync odoo.conf with .env passwords ──────
+# ── Sync odoo.conf with .env settings ───────
 if [ -f "odoo.conf" ] && [ -f ".env" ]; then
     ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
     if [ -n "$ADMIN_PASS" ]; then
         sed -i "s|^admin_passwd.*|admin_passwd = $ADMIN_PASS|" odoo.conf
         echo -e "${GREEN}✓${NC} Odoo master password synced from .env"
+    fi
+
+    # Sync dbfilter
+    DB_FILTER=$(grep "^ODOO_DBFILTER=" .env | cut -d'=' -f2-)
+    if [ -n "$DB_FILTER" ]; then
+        if grep -q "^dbfilter" odoo.conf; then
+            sed -i "s|^dbfilter.*|dbfilter = $DB_FILTER|" odoo.conf
+        else
+            echo "dbfilter = $DB_FILTER" >> odoo.conf
+        fi
+        echo -e "${GREEN}✓${NC} Database filter synced from .env"
+    fi
+
+    # Sync list_db
+    LIST_DB=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2-)
+    if [ -n "$LIST_DB" ]; then
+        sed -i "s|^list_db.*|list_db = $LIST_DB|" odoo.conf
+        echo -e "${GREEN}✓${NC} Database listing synced from .env"
     fi
 fi
 
@@ -179,7 +197,7 @@ echo -e "${GREEN}ePHEM is running!${NC}"
 echo ""
 
 # Show smart next steps based on current state
-if grep -q "ssl_certificate" nginx/active.conf 2>/dev/null; then
+if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then
     # SSL is already configured
     DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
     echo "Your site is available at:"
