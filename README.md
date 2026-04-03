@@ -24,6 +24,10 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
   - [Adding a Single Domain](#adding-a-single-domain)
   - [Adding Multiple Domains at Once](#adding-multiple-domains-at-once)
   - [Creating Databases for New Domains](#creating-databases-for-new-domains)
+- [Duplicating Databases](#duplicating-databases)
+  - [Example: Setting Up Training Environments](#example-setting-up-training-environments)
+  - [Duplicating a Single Database](#duplicating-a-single-database)
+  - [Overwriting Existing Databases](#overwriting-existing-databases)
 - [Updating ePHEM](#updating-ephem)
   - [Update ePHEM Modules](#update-ephem-modules)
   - [Update the Deployment Configuration](#update-the-deployment-configuration)
@@ -329,6 +333,60 @@ ODOO_LIST_DB=False
 
 ---
 
+## Duplicating Databases
+
+Use this to create multiple copies of a configured database. This is useful when you need several identical environments — for example, setting up training rooms where each group gets their own database.
+
+### Example: Setting Up Training Environments
+
+Let's say you need 6 training databases (`training-01` through `training-06`), all identical.
+
+**1. Add all domains at once:**
+
+```bash
+./scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
+```
+
+**2. Create and configure `training-01`:**
+
+Go to `https://training-01.pheoc.com/web/database/manager`, create the `training-01` database, install the ePHEM modules, set up users, configure settings — everything you want all training environments to have.
+
+**3. Duplicate into all the others:**
+
+```bash
+./scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
+```
+
+That's it. All 6 databases are now identical copies — same modules, same users, same configuration. Each one is accessible at its own URL.
+
+### Duplicating a Single Database
+
+You can also duplicate just one:
+
+```bash
+./scripts/duplicate-db.sh production staging
+```
+
+This creates a `staging` database that's an exact copy of `production`.
+
+### Overwriting Existing Databases
+
+If any of the target databases already exist, the script will ask before overwriting:
+
+```
+! The following databases already exist:
+  - training-02
+  - training-03
+
+Overwrite them? This will DELETE their data. (y/n)
+```
+
+Type `y` to replace them with fresh copies, or `n` to cancel.
+
+> **Tip:** After duplicating, each database is completely independent. Changes to `training-01` will NOT affect `training-02` or any other copy.
+
+---
+
 ## Updating ePHEM
 
 ### Update ePHEM Modules
@@ -458,6 +516,7 @@ Run these from inside the `ephem-deploy` folder.
 | View all logs | `docker compose logs -f` |
 | Run a backup | `./scripts/backup.sh` |
 | Add a domain | `./scripts/add-domain.sh new.domain.com` |
+| Duplicate a database | `./scripts/duplicate-db.sh source-db target-db1 target-db2` |
 | Update ePHEM modules | `cd custom-addons && git pull && cd .. && docker compose restart odoo` |
 
 > Press `Ctrl+C` to stop watching logs.
@@ -589,7 +648,8 @@ ephem-deploy/
 ├── scripts/
 │   ├── backup.sh            ← Backup all databases and filestore
 │   ├── ssl-setup.sh         ← Set up SSL certificates (run once)
-│   └── add-domain.sh        ← Add new domains (training, simex, etc.)
+│   ├── add-domain.sh        ← Add new domains (training, simex, etc.)
+│   └── duplicate-db.sh      ← Copy a database into multiple new ones
 │
 └── backups/                 ← Backup files (git-ignored)
 ```
