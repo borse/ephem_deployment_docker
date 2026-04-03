@@ -54,37 +54,16 @@ else
 fi
 
 # ── Check nginx config ───────────────────────
-if [ -f "nginx/default.conf" ]; then
-    # Check if config references SSL certs that might not exist yet
-    if grep -q "ssl_certificate" "nginx/default.conf"; then
-        echo -e "${YELLOW}!${NC} nginx/default.conf has HTTPS enabled."
-        echo "  Checking if certificates exist..."
-
-        # Start just the db and certbot to check cert volume
-        docker compose up -d db certbot 2>/dev/null
-
-        # Check if the cert exists in the volume
-        CERT_EXISTS=$(docker compose run --rm --entrypoint "" certbot \
-            sh -c "test -f /etc/letsencrypt/live/*/fullchain.pem && echo yes || echo no" 2>/dev/null || echo "no")
-
-        if [ "$CERT_EXISTS" = "no" ]; then
-            echo -e "${YELLOW}!${NC} Certificates not found. Restoring HTTP-only config..."
-            if [ -f "nginx/default.http-only.conf" ]; then
-                cp nginx/default.http-only.conf nginx/default.conf
-            else
-                git checkout nginx/default.conf 2>/dev/null || true
-            fi
-            echo -e "${GREEN}✓${NC} nginx/default.conf restored to HTTP-only"
-            echo -e "${YELLOW}!${NC} Run ./scripts/ssl-setup.sh after setup to re-enable HTTPS"
-        else
-            echo -e "${GREEN}✓${NC} Certificates found. HTTPS config is valid."
-        fi
-    else
-        echo -e "${GREEN}✓${NC} nginx/default.conf exists"
-    fi
-else
-    echo -e "${RED}✗${NC} nginx/default.conf is missing. Re-clone the repo."
+if [ ! -f "nginx/default.conf" ]; then
+    echo -e "${RED}✗${NC} nginx/default.conf template is missing. Re-clone the repo."
     ERRORS=$((ERRORS + 1))
+elif [ -f "nginx/active.conf" ]; then
+    # active.conf exists — ssl-setup.sh created it previously
+    echo -e "${GREEN}✓${NC} nginx/active.conf exists (custom config)"
+else
+    # No active.conf yet — copy the HTTP-only template
+    cp nginx/default.conf nginx/active.conf
+    echo -e "${GREEN}✓${NC} nginx/active.conf created from template"
 fi
 
 # ── Check custom-addons ──────────────────────
@@ -200,9 +179,9 @@ echo -e "${GREEN}ePHEM is running!${NC}"
 echo ""
 
 # Show smart next steps based on current state
-if grep -q "ssl_certificate" nginx/default.conf 2>/dev/null; then
+if grep -q "ssl_certificate" nginx/active.conf 2>/dev/null; then
     # SSL is already configured
-    DOMAIN=$(grep "server_name" nginx/default.conf | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
+    DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
     echo "Your site is available at:"
     echo "  https://$DOMAIN"
 else
