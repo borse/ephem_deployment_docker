@@ -198,8 +198,17 @@ echo ""
 echo "========================================="
 echo -e "${GREEN}ePHEM is running!${NC}"
 echo ""
-echo "Next steps:"
-echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
-echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
-echo "  2. Open in browser: http://YOUR_DOMAIN"
+
+# Show smart next steps based on current state
+if grep -q "ssl_certificate" nginx/default.conf 2>/dev/null; then
+    # SSL is already configured
+    DOMAIN=$(grep "server_name" nginx/default.conf | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
+    echo "Your site is available at:"
+    echo "  https://$DOMAIN"
+else
+    echo "Next steps:"
+    echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
+    echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
+    echo "  2. Open in browser: http://YOUR_DOMAIN"
+fi
 echo ""
