@@ -1,193 +1,634 @@
-#!/bin/bash
-# ──────────────────────────────────────────────
-# ePHEM Setup Script
-# Run this once after cloning the repo.
-# It checks everything is in place, then starts the system.
-# ──────────────────────────────────────────────
+# ePHEM — Deployment Guide
 
-set -euo pipefail
+![Odoo](https://img.shields.io/badge/Odoo-18.0-714B67?logo=odoo&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![NGINX](https://img.shields.io/badge/NGINX-reverse--proxy-009639?logo=nginx&logoColor=white)
+![Let's Encrypt](https://img.shields.io/badge/SSL-Let's%20Encrypt-003A70?logo=letsencrypt&logoColor=white)
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+Deploy ePHEM on your server by following this guide step by step. No Docker experience required.
 
-echo ""
-echo "========================================="
-echo "  ePHEM Setup"
-echo "========================================="
-echo ""
+---
 
-ERRORS=0
+## Table of Contents
 
-# ── Check Docker ──────────────────────────────
-if command -v docker &> /dev/null; then
-    echo -e "${GREEN}✓${NC} Docker is installed"
-else
-    echo -e "${RED}✗${NC} Docker is not installed. Run: curl -fsSL https://get.docker.com | sh"
-    ERRORS=$((ERRORS + 1))
-fi
+- [How This Works](#how-this-works)
+- [What You Need Before Starting](#what-you-need-before-starting)
+- [Installation](#installation)
+  - [Step 1 — Install Docker](#step-1--install-docker)
+  - [Step 2 — Download the Deployment Files](#step-2--download-the-deployment-files)
+  - [Step 3 — Configure Your Settings](#step-3--configure-your-settings)
+  - [Step 4 — Run the Setup Script](#step-4--run-the-setup-script)
+  - [Step 5 — Set Up SSL (HTTPS)](#step-5--set-up-ssl-https)
+  - [Step 6 — Open ePHEM in Your Browser](#step-6--open-ephem-in-your-browser)
+- [Adding Domains](#adding-domains)
+  - [Adding a Single Domain](#adding-a-single-domain)
+  - [Adding Multiple Domains at Once](#adding-multiple-domains-at-once)
+  - [Creating Databases for New Domains](#creating-databases-for-new-domains)
+- [Updating ePHEM](#updating-ephem)
+  - [Update ePHEM Modules](#update-ephem-modules)
+  - [Update the Deployment Configuration](#update-the-deployment-configuration)
+  - [Update the Odoo Base Image](#update-the-odoo-base-image)
+- [Backups](#backups)
+  - [Manual Backup](#manual-backup)
+  - [Automatic Daily Backups](#automatic-daily-backups)
+  - [Restore a Backup](#restore-a-backup)
+- [Day-to-Day Commands](#day-to-day-commands)
+- [SSL Renewal](#ssl-renewal)
+- [Troubleshooting](#troubleshooting)
+- [File Structure](#file-structure)
+- [Security Notes](#security-notes)
+- [Need Help?](#need-help)
 
-if docker compose version &> /dev/null; then
-    echo -e "${GREEN}✓${NC} Docker Compose is available"
-else
-    echo -e "${RED}✗${NC} Docker Compose is not available. Update Docker."
-    ERRORS=$((ERRORS + 1))
-fi
+---
 
-# ── Check .env ────────────────────────────────
-if [ -f ".env" ]; then
-    echo -e "${GREEN}✓${NC} .env file exists"
+## How This Works
 
-    # Check if passwords were changed
-    if grep -q "CHANGE_ME" .env; then
-        echo -e "${RED}✗${NC} .env still has CHANGE_ME passwords. Edit .env and set real passwords."
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${GREEN}✓${NC} Passwords have been set"
-    fi
-else
-    echo -e "${YELLOW}!${NC} .env not found — creating from template..."
-    cp .env.example .env
-    echo -e "${RED}✗${NC} Edit .env now: nano .env (set your domain and passwords)"
-    ERRORS=$((ERRORS + 1))
-fi
+### What is Docker?
 
-# ── Check nginx config ───────────────────────
-if [ ! -f "nginx/default.conf" ]; then
-    echo -e "${RED}✗${NC} nginx/default.conf template is missing. Re-clone the repo."
-    ERRORS=$((ERRORS + 1))
-elif [ -f "nginx/active.conf" ]; then
-    # active.conf exists — ssl-setup.sh created it previously
-    echo -e "${GREEN}✓${NC} nginx/active.conf exists (custom config)"
-else
-    # No active.conf yet — copy the HTTP-only template
-    cp nginx/default.conf nginx/active.conf
-    echo -e "${GREEN}✓${NC} nginx/active.conf created from template"
-fi
+Docker runs software in **containers** — pre-packaged boxes that include everything an application needs. Instead of spending hours installing software manually, Docker does it in minutes with a single command.
 
-# ── Check custom-addons ──────────────────────
-if [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v README)" ]; then
-    echo -e "${GREEN}✓${NC} custom-addons/ has modules"
-else
-    echo -e "${YELLOW}!${NC} custom-addons/ is empty — cloning ePHEM modules..."
-    rm -rf custom-addons
-    git clone git@github.com:borse/ePHEM.git custom-addons
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
-    else
-        echo -e "${RED}✗${NC} Failed to clone ePHEM. Check your internet connection."
-        ERRORS=$((ERRORS + 1))
-    fi
-fi
+### What happens when you start ePHEM?
 
-# ── Check scripts ────────────────────────────
-if [ -f "scripts/backup.sh" ]; then
-    chmod +x scripts/backup.sh
-    echo -e "${GREEN}✓${NC} Backup script is ready"
-fi
+Docker starts **three containers** that work together:
 
-if [ -f "scripts/ssl-setup.sh" ]; then
-    chmod +x scripts/ssl-setup.sh
-    echo -e "${GREEN}✓${NC} SSL setup script is ready"
-fi
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Your Server                                                 │
+│                                                              │
+│  ┌──────────┐     ┌──────────────┐     ┌──────────────────┐  │
+│  │  NGINX   │────▶│  Odoo 18     │────▶│  PostgreSQL 16   │  │
+│  │  (door)  │     │  (ePHEM app) │     │  (database)      │  │
+│  └──────────┘     └──────────────┘     └──────────────────┘  │
+│     ▲                    ▲                                   │
+│  open to             reads from                              │
+│  the internet        custom-addons/                          │
+│  (ports 80,443)      (ePHEM modules)                         │
+└──────┼───────────────────────────────────────────────────────┘
+       │
+    Users open ePHEM in their browser
+```
 
-# ── Sync odoo.conf with .env passwords ──────
-if [ -f "odoo.conf" ] && [ -f ".env" ]; then
-    ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
-    if [ -n "$ADMIN_PASS" ]; then
-        sed -i "s|^admin_passwd.*|admin_passwd = $ADMIN_PASS|" odoo.conf
-        echo -e "${GREEN}✓${NC} Odoo master password synced from .env"
-    fi
-fi
+| Container | What it does |
+|-----------|-------------|
+| **NGINX** | The front door. Handles HTTPS and forwards traffic to Odoo. Only part visible from the internet. |
+| **Odoo** | The ePHEM application. Uses a **pre-built image** — nothing to install manually. |
+| **PostgreSQL** | The database. Stores all data. Hidden from the internet. |
 
-# ── Create backups directory ─────────────────
-mkdir -p backups
-echo -e "${GREEN}✓${NC} backups/ directory exists"
+### Where does the software come from?
 
-# ── Summary ──────────────────────────────────
-echo ""
-if [ $ERRORS -gt 0 ]; then
-    echo -e "${RED}✗ $ERRORS issue(s) found. Fix them and run this script again.${NC}"
-    echo ""
-    exit 1
-fi
+| What | Where it comes from | What you do |
+|------|-------------------|-------------|
+| **Odoo 18 + system packages** | Pre-built Docker image published by the ePHEM team. | Nothing — Docker downloads it automatically. |
+| **ePHEM modules** | [github.com/borse/ePHEM](https://github.com/borse/ePHEM) | Downloaded automatically by the setup script. Update with `git pull`. |
+| **Deployment files** | [github.com/borse/ephem_deployment_docker](https://github.com/borse/ephem_deployment_docker) — this repo | Download once. Update with `git pull`. |
 
-echo -e "${GREEN}✓ Everything looks good!${NC}"
-echo ""
-echo "Starting ePHEM..."
-echo ""
+---
 
-# ── Start containers ─────────────────────────
-docker compose up -d
-echo ""
+## What You Need Before Starting
 
-# ── Wait for database to be ready ────────────
-echo "Waiting for database..."
-for i in $(seq 1 30); do
-    if docker compose exec -T db pg_isready -U odoo -q 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} Database is ready"
-        break
-    fi
-    if [ $i -eq 30 ]; then
-        echo -e "${RED}✗${NC} Database did not start in time. Run: docker compose logs db"
-        exit 1
-    fi
-    sleep 2
-done
+- **A Linux server** — Ubuntu 22.04 or newer, with at least 2 GB RAM
+- **A domain name** pointed at your server's IP address (ask your IT team to create a DNS A record)
+- **SSH access** to the server (PuTTY on Windows, Terminal on Mac/Linux)
 
-# ── Check if Odoo can connect to the database ─
-echo "Checking database connection..."
-sleep 5
+> **Check if your domain is set up correctly:**
+> ```bash
+> ping ephem.health.gov.xx
+> ```
+> If it shows your server's IP address, you're ready.
 
-ODOO_LOG=$(docker compose logs --tail=5 odoo 2>&1)
-if echo "$ODOO_LOG" | grep -q "password authentication failed"; then
-    echo ""
-    echo -e "${YELLOW}! Database password mismatch detected.${NC}"
-    echo "  This happens when POSTGRES_PASSWORD in .env was changed after the"
-    echo "  database was first created. Fixing automatically..."
-    echo ""
+---
 
-    # Read the password from .env
-    ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2-)
+## Installation
 
-    # Try to update the password using the default PostgreSQL auth
-    docker compose exec -T db psql -U odoo -d postgres -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" 2>/dev/null && {
-        echo -e "${GREEN}✓${NC} Password synced. Restarting Odoo..."
-        docker compose restart odoo
-        sleep 5
-    } || {
-        echo -e "${RED}✗${NC} Could not fix automatically."
-        echo ""
-        echo "  To fix manually, reset the database:"
-        echo "    docker compose down -v"
-        echo "    docker compose up -d"
-        echo ""
-        echo "  WARNING: This deletes all data. Back up first if needed."
-        exit 1
-    }
-fi
+Connect to your server via SSH. Run all commands on the server.
 
-# ── Final status ─────────────────────────────
-echo ""
-echo "========================================="
-echo ""
+### Step 1 — Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sh
+```
+
+```bash
+sudo usermod -aG docker $USER
+```
+
+Log out and back in:
+
+```bash
+exit
+```
+
+Reconnect via SSH, then verify:
+
+```bash
+docker --version
+```
+
+You should see `Docker version 27.x.x` or similar.
+
+### Step 2 — Download the Deployment Files
+
+```bash
+git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
+```
+
+```bash
+cd ephem-deploy
+```
+
+> **If you see "git: command not found":**
+> ```bash
+> sudo apt install -y git
+> ```
+
+### Step 3 — Configure Your Settings
+
+```bash
+cp .env.example .env
+```
+
+```bash
+nano .env
+```
+
+**Change these values:**
+
+```env
+# Your domain (no www, no https)
+DOMAIN=ephem.health.gov.xx
+
+# Database password
+POSTGRES_PASSWORD=CHANGE_ME
+
+# Odoo master password (for database management page)
+ODOO_ADMIN_PASSWORD=CHANGE_ME
+
+# Email for SSL certificate
+SSL_EMAIL=admin@health.gov.xx
+```
+
+> **Generate strong passwords:**
+> ```bash
+> openssl rand -base64 24
+> ```
+
+**Save:** `Ctrl+O`, `Enter`, `Ctrl+X`
+
+### Step 4 — Run the Setup Script
+
+```bash
+./setup.sh
+```
+
+This script will:
+
+- Verify Docker is installed
+- Check your passwords are set
+- Download the ePHEM modules automatically
+- Sync settings from `.env` into the Odoo config
+- Start all containers
+
+> **First time:** Takes 2–5 minutes to download (~1 GB). Future starts are instant.
+
+Check everything is running:
+
+```bash
 docker compose ps
-echo ""
-echo "========================================="
-echo -e "${GREEN}ePHEM is running!${NC}"
-echo ""
+```
 
-# Show smart next steps based on current state
-if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then
-    # SSL is already configured
-    DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
-    echo "Your site is available at:"
-    echo "  https://$DOMAIN"
-else
-    echo "Next steps:"
-    echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
-    echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
-    echo "  2. Open in browser: http://YOUR_DOMAIN"
-fi
-echo ""
+All containers should show **Up**.
+
+### Step 5 — Set Up SSL (HTTPS)
+
+```bash
+./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
+```
+
+Replace with your actual domain and email. This will:
+
+- Request an SSL certificate from Let's Encrypt
+- Configure NGINX for HTTPS
+- Set up HTTP → HTTPS redirect
+
+### Step 6 — Open ePHEM in Your Browser
+
+Go to:
+
+```
+https://ephem.health.gov.xx
+```
+
+Fill in the database creation form:
+
+| Field | What to enter |
+|-------|--------------|
+| **Master Password** | The `ODOO_ADMIN_PASSWORD` from your `.env` |
+| **Database Name** | Use your subdomain name (e.g. `ephem`) |
+| **Email** | Your admin email |
+| **Password** | Choose a password for the admin user |
+| **Language** | Your language |
+| **Country** | Your country |
+
+Click **Create Database** (takes 1–2 minutes).
+
+After login, go to **Apps → Update Apps List** and install the ePHEM modules.
+
+🎉 **ePHEM is running!**
+
+---
+
+## Adding Domains
+
+You can run multiple databases on the same server — for example production, training, and simulation exercises. Each domain points to its own independent database.
+
+| URL | Database |
+|-----|----------|
+| `ephem.health.gov.xx` | `ephem` |
+| `training.health.gov.xx` | `training` |
+| `simex.health.gov.xx` | `simex` |
+
+### Before Adding a Domain
+
+Ask your IT team to create a **DNS A record** for the new domain pointing to the same server IP. Verify it works:
+
+```bash
+dig +short training.health.gov.xx
+```
+
+It should show your server's IP address.
+
+### Adding a Single Domain
+
+```bash
+./scripts/add-domain.sh training.health.gov.xx
+```
+
+The script will:
+
+1. Check DNS is set up correctly
+2. Expand the SSL certificate to include the new domain
+3. Update the NGINX config
+4. Restart NGINX
+
+### Adding Multiple Domains at Once
+
+```bash
+./scripts/add-domain.sh training.health.gov.xx simex.health.gov.xx staging.health.gov.xx
+```
+
+All domains are processed in one go — one certificate expansion, one NGINX restart.
+
+### Creating Databases for New Domains
+
+After adding a domain, you need to create a database for it.
+
+**Option A — Create a fresh database:**
+
+Go to:
+
+```
+https://training.health.gov.xx/web/database/manager
+```
+
+Enter the master password and click **Create Database**.
+
+> **Important:** The database name must match the subdomain. For `training.health.gov.xx`, name the database `training`.
+
+**Option B — Duplicate an existing database:**
+
+If you want the new database to be a copy of an existing one (e.g. copy production as a starting point for training):
+
+1. Go to `https://ephem.health.gov.xx/web/database/manager`
+2. Click **Duplicate** next to your existing database
+3. Name the copy to match the new subdomain (e.g. `training`)
+
+**Option C — Restore from a backup:**
+
+1. Go to `https://training.health.gov.xx/web/database/manager`
+2. Click **Restore Database**
+3. Upload a `.zip` backup file
+4. Name it to match the subdomain
+
+### Disable Database Manager After Setup
+
+Once all databases are created, disable the database manager page to prevent unauthorized access:
+
+```bash
+nano .env
+```
+
+Change:
+
+```env
+ODOO_LIST_DB=False
+```
+
+```bash
+./setup.sh
+```
+
+---
+
+## Updating ePHEM
+
+### Update ePHEM Modules
+
+When the ePHEM team releases new features or fixes:
+
+```bash
+cd ~/ephem-deploy/custom-addons
+```
+
+```bash
+git pull
+```
+
+```bash
+cd ..
+```
+
+```bash
+docker compose restart odoo
+```
+
+Then in your browser, go to **Apps → Update Apps List** and upgrade the ePHEM modules.
+
+### Update the Deployment Configuration
+
+When the deployment repo is updated (new scripts, config changes):
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+git pull
+```
+
+```bash
+./setup.sh
+```
+
+> **Note:** `git pull` will never overwrite your `.env`, `nginx/active.conf`, or `odoo.conf` — these are either git-ignored or only modified by the setup scripts.
+
+### Update the Odoo Base Image
+
+When the ePHEM team announces a system update (security patches, new dependencies):
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+./scripts/backup.sh
+```
+
+```bash
+docker compose pull
+```
+
+```bash
+docker compose up -d
+```
+
+> **Always back up before updating the base image.**
+
+---
+
+## Backups
+
+### Manual Backup
+
+```bash
+./scripts/backup.sh
+```
+
+Backups are saved in the `backups/` folder with timestamps.
+
+### Automatic Daily Backups
+
+```bash
+crontab -e
+```
+
+Add this line (replace the path):
+
+```
+0 2 * * * /home/YOUR_USERNAME/ephem-deploy/scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
+```
+
+> **Find your path:** Run `pwd` inside the `ephem-deploy` folder.
+
+Backups older than 14 days are automatically deleted.
+
+> **Important:** Copy backups to a different location (USB drive, another server, cloud storage). If this server fails, local backups are lost too.
+
+### Restore a Backup
+
+```bash
+docker compose stop odoo
+```
+
+```bash
+gunzip < backups/production_20260402_020000.sql.gz | docker compose exec -T db psql -U odoo -d production
+```
+
+```bash
+tar -xzf backups/filestore_production_20260402_020000.tar.gz -C ./odoo-data/filestore/
+```
+
+```bash
+docker compose start odoo
+```
+
+---
+
+## Day-to-Day Commands
+
+Run these from inside the `ephem-deploy` folder.
+
+| What you want to do | Command |
+|---------------------|---------|
+| Start the system | `docker compose up -d` |
+| Stop the system | `docker compose down` |
+| Restart Odoo | `docker compose restart odoo` |
+| Restart everything | `docker compose restart` |
+| Check status | `docker compose ps` |
+| View Odoo logs | `docker compose logs -f odoo` |
+| View all logs | `docker compose logs -f` |
+| Run a backup | `./scripts/backup.sh` |
+| Add a domain | `./scripts/add-domain.sh new.domain.com` |
+| Update ePHEM modules | `cd custom-addons && git pull && cd .. && docker compose restart odoo` |
+
+> Press `Ctrl+C` to stop watching logs.
+
+---
+
+## SSL Renewal
+
+Certificates renew automatically via the Certbot container.
+
+To test:
+
+```bash
+docker compose run --rm --entrypoint "" certbot certbot renew --dry-run
+```
+
+---
+
+## Troubleshooting
+
+### Nothing loads in the browser
+
+```bash
+docker compose ps
+```
+
+If containers are down:
+
+```bash
+docker compose up -d
+```
+
+Check your domain points to the server:
+
+```bash
+dig +short ephem.health.gov.xx
+```
+
+### Odoo errors or blank pages
+
+```bash
+docker compose logs --tail=30 odoo
+```
+
+Look for lines with `ERROR` or `ValueError`.
+
+### Database errors
+
+```bash
+docker compose exec db pg_isready -U odoo
+```
+
+### New domain shows wrong database
+
+Make sure `ODOO_DBFILTER=^%d$` is set in `.env`, and the database name **exactly matches** the subdomain:
+
+- `training.health.gov.xx` → database must be named `training`
+- `simex.health.gov.xx` → database must be named `simex`
+
+```bash
+./setup.sh
+```
+
+### Custom modules not showing in Apps
+
+```bash
+ls custom-addons/
+```
+
+```bash
+chmod -R 755 custom-addons/
+```
+
+```bash
+docker compose restart odoo
+```
+
+Go to **Apps → Update Apps List**.
+
+### SSL not working
+
+```bash
+sudo ufw allow 80
+```
+
+```bash
+sudo ufw allow 443
+```
+
+Re-run `./scripts/ssl-setup.sh`.
+
+### Need to start completely fresh
+
+> **Warning:** This deletes ALL data.
+
+```bash
+docker compose down -v
+```
+
+```bash
+rm -f nginx/active.conf
+```
+
+```bash
+./setup.sh
+```
+
+Then re-run `./scripts/ssl-setup.sh`.
+
+---
+
+## File Structure
+
+```
+ephem-deploy/
+│
+├── docker-compose.yml       ← Defines the containers
+├── .env.example             ← Settings template — copy to .env
+├── .env                     ← Your settings (passwords, domain) — never shared
+├── odoo.conf                ← Odoo config (synced from .env by setup.sh)
+├── setup.sh                 ← Run once to start, run again after updates
+│
+├── nginx/
+│   ├── default.conf         ← HTTP-only template (in Git, never modified)
+│   └── active.conf          ← Active NGINX config (git-ignored, created by scripts)
+│
+├── custom-addons/           ← ePHEM modules (from github.com/borse/ePHEM)
+│
+├── scripts/
+│   ├── backup.sh            ← Backup all databases and filestore
+│   ├── ssl-setup.sh         ← Set up SSL certificates (run once)
+│   └── add-domain.sh        ← Add new domains (training, simex, etc.)
+│
+└── backups/                 ← Backup files (git-ignored)
+```
+
+**Created automatically by Docker:**
+
+```
+postgres-data/               ← Database files
+odoo-data/                   ← Uploaded documents and images
+```
+
+---
+
+## Security Notes
+
+Built-in security:
+
+- PostgreSQL and Odoo are **hidden from the internet** — only NGINX is exposed
+- All traffic is **encrypted with HTTPS** (TLS 1.2+)
+- **Security headers** protect against common web attacks
+- **Rate limiting** prevents abuse
+- Containers run on a **private Docker network**
+- SSL certificates **renew automatically**
+
+**Recommended after installation:**
+
+- Disable password-based SSH login (use SSH keys only)
+- Install fail2ban:
+  ```bash
+  sudo apt install -y fail2ban
+  ```
+- Copy backups to a different location regularly
+- Enable **two-factor authentication** for admin users (Settings → General Settings → Permissions)
+- Disable the database manager after setup (set `ODOO_LIST_DB=False` in `.env`)
+
+---
+
+## Need Help?
+
+1. Check [Troubleshooting](#troubleshooting) above
+2. Run `docker compose logs` and share the output with the ePHEM team
+3. Open an issue: [github.com/borse/ephem_deployment_docker/issues](https://github.com/borse/ephem_deployment_docker/issues)
