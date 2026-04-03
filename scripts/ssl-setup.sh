@@ -92,7 +92,7 @@ docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm --entrypoint "" cert
     --agree-tos \
     --no-eff-email \
     --non-interactive \
-    --force-renewal
+    --keep-until-expiring
 
 if [ $? -ne 0 ]; then
     echo ""
