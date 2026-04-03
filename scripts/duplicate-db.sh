@@ -136,9 +136,10 @@ for TARGET_DB in "${TARGET_DBS[@]}"; do
     echo -n "Copying filestore for '$TARGET_DB'... "
 
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T odoo \
-        bash -c "
+        sh -c "
             if [ -d /var/lib/odoo/filestore/$SOURCE_DB ]; then
-                cp -r /var/lib/odoo/filestore/$SOURCE_DB /var/lib/odoo/filestore/$TARGET_DB 2>/dev/null
+                rm -rf /var/lib/odoo/filestore/$TARGET_DB
+                cp -a /var/lib/odoo/filestore/$SOURCE_DB /var/lib/odoo/filestore/$TARGET_DB
                 echo 'done'
             else
                 echo 'no filestore to copy'
