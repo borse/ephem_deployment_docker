@@ -1,11 +1,12 @@
 #!/bin/bash
 # ──────────────────────────────────────────────
 # ePHEM Add Domain Script
-# Adds a new domain to the existing setup.
-# Creates the database, expands the SSL cert,
-# and updates the NGINX config.
+# Adds one or more new domains to the existing setup.
+# Expands the SSL cert and updates the NGINX config.
 #
-# Usage: ./scripts/add-domain.sh training-server.pheoc.com
+# Usage:
+#   ./scripts/add-domain.sh training-server.pheoc.com
+#   ./scripts/add-domain.sh training-server.pheoc.com simex.pheoc.com staging.pheoc.com
 # ──────────────────────────────────────────────
 
 set -euo pipefail
@@ -17,26 +18,26 @@ NC='\033[0m'
 
 if [ $# -lt 1 ]; then
     echo ""
-    echo "Usage: ./scripts/add-domain.sh NEW_DOMAIN"
+    echo "Usage: ./scripts/add-domain.sh DOMAIN [DOMAIN2] [DOMAIN3] ..."
     echo ""
     echo "Examples:"
     echo "  ./scripts/add-domain.sh training-server.pheoc.com"
-    echo "  ./scripts/add-domain.sh simex.pheoc.com"
+    echo "  ./scripts/add-domain.sh training-server.pheoc.com simex.pheoc.com"
     echo ""
     exit 1
 fi
 
-NEW_DOMAIN="$1"
+NEW_DOMAINS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NGINX_ACTIVE="$SCRIPT_DIR/nginx/active.conf"
 ENV_FILE="$SCRIPT_DIR/.env"
 
 echo ""
 echo "========================================="
-echo "  ePHEM — Add Domain"
+echo "  ePHEM — Add Domain(s)"
 echo "========================================="
 echo ""
-echo "New domain: $NEW_DOMAIN"
+echo "New domain(s): ${NEW_DOMAINS[*]}"
 echo ""
 
 # ── Step 1: Check prerequisites ──────────────
@@ -50,41 +51,67 @@ if ! grep -v "^#" "$NGINX_ACTIVE" | grep -q "ssl_certificate"; then
     exit 1
 fi
 
-# ── Step 2: Check DNS ────────────────────────
-echo "Checking DNS for $NEW_DOMAIN..."
-RESOLVED_IP=$(dig +short "$NEW_DOMAIN" 2>/dev/null | head -1)
+# ── Step 2: Check DNS for each domain ────────
 SERVER_IP=$(hostname -I | awk '{print $1}')
+DOMAINS_TO_ADD=()
 
-if [ -z "$RESOLVED_IP" ]; then
-    echo -e "${RED}✗${NC} $NEW_DOMAIN does not resolve. Ask your IT team to create a DNS A record."
-    exit 1
-elif [ "$RESOLVED_IP" != "$SERVER_IP" ]; then
-    echo -e "${YELLOW}!${NC} $NEW_DOMAIN resolves to $RESOLVED_IP but this server is $SERVER_IP"
-    echo "  Make sure the DNS A record points to $SERVER_IP"
-    echo ""
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
+for NEW_DOMAIN in "${NEW_DOMAINS[@]}"; do
+    echo "Checking DNS for $NEW_DOMAIN..."
+    RESOLVED_IP=$(dig +short "$NEW_DOMAIN" 2>/dev/null | head -1)
+
+    if [ -z "$RESOLVED_IP" ]; then
+        echo -e "${RED}✗${NC} $NEW_DOMAIN does not resolve. Ask your IT team to create a DNS A record."
+        echo "  Skipping $NEW_DOMAIN"
+        echo ""
+        continue
+    elif [ "$RESOLVED_IP" != "$SERVER_IP" ]; then
+        echo -e "${YELLOW}!${NC} $NEW_DOMAIN resolves to $RESOLVED_IP but this server is $SERVER_IP"
+        read -p "  Continue with $NEW_DOMAIN anyway? (y/n) " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "  Skipping $NEW_DOMAIN"
+            echo ""
+            continue
+        fi
+    else
+        echo -e "${GREEN}✓${NC} $NEW_DOMAIN resolves to $SERVER_IP"
     fi
-else
-    echo -e "${GREEN}✓${NC} $NEW_DOMAIN resolves to $SERVER_IP"
+
+    DOMAINS_TO_ADD+=("$NEW_DOMAIN")
+done
+
+if [ ${#DOMAINS_TO_ADD[@]} -eq 0 ]; then
+    echo ""
+    echo -e "${RED}✗ No valid domains to add.${NC}"
+    exit 1
 fi
 
 # ── Step 3: Get existing domains from NGINX ──
 EXISTING_DOMAINS=$(grep "server_name" "$NGINX_ACTIVE" | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs)
+FIRST_DOMAIN=$(echo "$EXISTING_DOMAINS" | awk '{print $1}')
 
-# Check if domain is already added
-if echo "$EXISTING_DOMAINS" | grep -qw "$NEW_DOMAIN"; then
-    echo -e "${YELLOW}!${NC} $NEW_DOMAIN is already in the NGINX config."
+# Filter out domains that are already added
+ACTUALLY_NEW=()
+for d in "${DOMAINS_TO_ADD[@]}"; do
+    if echo "$EXISTING_DOMAINS" | grep -qw "$d"; then
+        echo -e "${YELLOW}!${NC} $d is already configured — skipping"
+    else
+        ACTUALLY_NEW+=("$d")
+    fi
+done
+
+if [ ${#ACTUALLY_NEW[@]} -eq 0 ]; then
     echo ""
-    echo "If you just need to create the database, go to:"
-    echo "  https://$NEW_DOMAIN/web/database/manager"
+    echo "All domains are already configured. Nothing to do."
+    echo ""
+    echo "To create databases, go to:"
+    echo "  https://$FIRST_DOMAIN/web/database/manager"
     exit 0
 fi
 
-ALL_DOMAINS="$EXISTING_DOMAINS $NEW_DOMAIN"
-echo -e "${GREEN}✓${NC} All domains: $ALL_DOMAINS"
+ALL_DOMAINS="$EXISTING_DOMAINS ${ACTUALLY_NEW[*]}"
+echo ""
+echo -e "${GREEN}✓${NC} All domains will be: $ALL_DOMAINS"
 
 # ── Step 4: Get email from .env ──────────────
 EMAIL=$(grep "^SSL_EMAIL=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2-)
@@ -95,17 +122,13 @@ fi
 
 # ── Step 5: Expand the SSL certificate ───────
 echo ""
-echo "Expanding SSL certificate to include $NEW_DOMAIN..."
+echo "Expanding SSL certificate..."
 echo ""
 
-# Build -d flags for all domains
 CERTBOT_DOMAINS=""
 for d in $ALL_DOMAINS; do
     CERTBOT_DOMAINS="$CERTBOT_DOMAINS -d $d"
 done
-
-# Get the first domain (cert name)
-FIRST_DOMAIN=$(echo "$EXISTING_DOMAINS" | awk '{print $1}')
 
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm --entrypoint "" certbot \
     certbot certonly --webroot \
@@ -122,9 +145,7 @@ if [ $? -ne 0 ]; then
     echo ""
     echo -e "${RED}✗ Certificate expansion failed.${NC}"
     echo ""
-    echo "Check that:"
-    echo "  - $NEW_DOMAIN points to this server (dig +short $NEW_DOMAIN)"
-    echo "  - Ports 80 and 443 are open"
+    echo "Check that all domains point to this server and ports 80/443 are open."
     echo ""
     exit 1
 fi
@@ -136,7 +157,6 @@ echo -e "${GREEN}✓ Certificate expanded!${NC}"
 echo ""
 echo "Updating NGINX config..."
 
-# Replace server_name lines (both HTTP and HTTPS blocks)
 sed -i "s|server_name $EXISTING_DOMAINS;|server_name $ALL_DOMAINS;|g" "$NGINX_ACTIVE"
 
 echo -e "${GREEN}✓${NC} NGINX config updated"
@@ -155,20 +175,27 @@ fi
 
 echo -e "${GREEN}✓${NC} NGINX is running"
 
-# ── Step 8: Extract database name from subdomain ─
-DB_NAME=$(echo "$NEW_DOMAIN" | cut -d'.' -f1)
-
+# ── Summary ──────────────────────────────────
 echo ""
 echo "========================================="
-echo -e "${GREEN}✓ Domain added successfully!${NC}"
+echo -e "${GREEN}✓ Domain(s) added successfully!${NC}"
 echo ""
-echo "  Domain:   https://$NEW_DOMAIN"
-echo "  Database: $DB_NAME"
+
+for d in "${ACTUALLY_NEW[@]}"; do
+    DB_NAME=$(echo "$d" | cut -d'.' -f1)
+    echo "  https://$d  →  database: $DB_NAME"
+done
+
 echo ""
-echo "Next: Create the '$DB_NAME' database at:"
-echo "  https://$NEW_DOMAIN/web/database/manager"
-echo ""
-echo "Or duplicate an existing database from:"
+echo "Create the database(s) at:"
 echo "  https://$FIRST_DOMAIN/web/database/manager"
+echo ""
+echo "Make sure database names match the subdomain:"
+
+for d in "${ACTUALLY_NEW[@]}"; do
+    DB_NAME=$(echo "$d" | cut -d'.' -f1)
+    echo "  $d  →  name the database '$DB_NAME'"
+done
+
 echo "========================================="
 echo ""
