@@ -9,6 +9,10 @@ backups/*.log
 .env
 custom-addons/
 
+# NGINX HTTP-only backup (created by ssl-setup.sh)
+nginx/default.http-only.conf
+
+
 # OS / IDE
 .DS_Store
 Thumbs.db

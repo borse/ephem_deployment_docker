@@ -55,7 +55,33 @@ fi
 
 # ── Check nginx config ───────────────────────
 if [ -f "nginx/default.conf" ]; then
-    echo -e "${GREEN}✓${NC} nginx/default.conf exists"
+    # Check if config references SSL certs that might not exist yet
+    if grep -q "ssl_certificate" "nginx/default.conf"; then
+        echo -e "${YELLOW}!${NC} nginx/default.conf has HTTPS enabled."
+        echo "  Checking if certificates exist..."
+
+        # Start just the db and certbot to check cert volume
+        docker compose up -d db certbot 2>/dev/null
+
+        # Check if the cert exists in the volume
+        CERT_EXISTS=$(docker compose run --rm --entrypoint "" certbot \
+            sh -c "test -f /etc/letsencrypt/live/*/fullchain.pem && echo yes || echo no" 2>/dev/null || echo "no")
+
+        if [ "$CERT_EXISTS" = "no" ]; then
+            echo -e "${YELLOW}!${NC} Certificates not found. Restoring HTTP-only config..."
+            if [ -f "nginx/default.http-only.conf" ]; then
+                cp nginx/default.http-only.conf nginx/default.conf
+            else
+                git checkout nginx/default.conf 2>/dev/null || true
+            fi
+            echo -e "${GREEN}✓${NC} nginx/default.conf restored to HTTP-only"
+            echo -e "${YELLOW}!${NC} Run ./scripts/ssl-setup.sh after setup to re-enable HTTPS"
+        else
+            echo -e "${GREEN}✓${NC} Certificates found. HTTPS config is valid."
+        fi
+    else
+        echo -e "${GREEN}✓${NC} nginx/default.conf exists"
+    fi
 else
     echo -e "${RED}✗${NC} nginx/default.conf is missing. Re-clone the repo."
     ERRORS=$((ERRORS + 1))
@@ -67,7 +93,7 @@ if [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v REA
 else
     echo -e "${YELLOW}!${NC} custom-addons/ is empty — cloning ePHEM modules..."
     rm -rf custom-addons
-    git clone git@github.com:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch  custom-addons
+    git clone https://github.com/borse/ePHEM.git custom-addons
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else

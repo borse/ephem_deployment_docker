@@ -26,12 +26,14 @@ fi
 DOMAINS="$1"
 EMAIL="$2"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+NGINX_CONF="$SCRIPT_DIR/nginx/default.conf"
+NGINX_CONF_BACKUP="$SCRIPT_DIR/nginx/default.http-only.conf"
 
 # Build the -d flags for certbot
 CERTBOT_DOMAINS=""
 IFS=',' read -ra DOMAIN_ARRAY <<< "$DOMAINS"
 for d in "${DOMAIN_ARRAY[@]}"; do
-    d=$(echo "$d" | xargs)  # trim whitespace
+    d=$(echo "$d" | xargs)
     CERTBOT_DOMAINS="$CERTBOT_DOMAINS -d $d"
 done
 
@@ -46,7 +48,48 @@ echo "Domain(s): $DOMAINS"
 echo "Email:     $EMAIL"
 echo ""
 
-# ── Step 1: Get the certificate ──────────────
+# ── Step 1: Save the HTTP-only config as backup ─
+# This backup is used to recover if certificates are
+# ever deleted (e.g. docker compose down -v).
+if [ ! -f "$NGINX_CONF_BACKUP" ]; then
+    # Only back up if it doesn't already reference ssl_certificate
+    if ! grep -q "ssl_certificate" "$NGINX_CONF"; then
+        cp "$NGINX_CONF" "$NGINX_CONF_BACKUP"
+        echo -e "${GREEN}✓${NC} Saved HTTP-only config backup"
+    fi
+fi
+
+# ── Step 2: Make sure NGINX is running on HTTP ───
+# If NGINX is in a restart loop (broken SSL config), restore HTTP config first
+NGINX_STATUS=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps nginx --format '{{.Status}}' 2>/dev/null || echo "unknown")
+if echo "$NGINX_STATUS" | grep -qi "restarting"; then
+    echo -e "${YELLOW}!${NC} NGINX is in a restart loop. Restoring HTTP-only config..."
+    if [ -f "$NGINX_CONF_BACKUP" ]; then
+        cp "$NGINX_CONF_BACKUP" "$NGINX_CONF"
+    else
+        # No backup exists — restore from git
+        cd "$SCRIPT_DIR" && git checkout nginx/default.conf 2>/dev/null || true
+    fi
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" restart nginx
+    sleep 3
+fi
+
+# Verify NGINX is actually running
+for i in $(seq 1 10); do
+    NGINX_STATUS=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps nginx --format '{{.Status}}' 2>/dev/null || echo "unknown")
+    if echo "$NGINX_STATUS" | grep -qi "up"; then
+        echo -e "${GREEN}✓${NC} NGINX is running"
+        break
+    fi
+    if [ $i -eq 10 ]; then
+        echo -e "${RED}✗${NC} NGINX is not running. Check: docker compose logs nginx"
+        exit 1
+    fi
+    sleep 2
+done
+
+# ── Step 3: Get the certificate ──────────────
+echo ""
 echo "Requesting SSL certificate..."
 echo ""
 
@@ -67,7 +110,7 @@ if [ $? -ne 0 ]; then
     echo "Check that:"
     echo "  - Your domain points to this server (run: dig +short $FIRST_DOMAIN)"
     echo "  - Ports 80 and 443 are open (run: sudo ufw allow 80 && sudo ufw allow 443)"
-    echo "  - The containers are running (run: docker compose ps)"
+    echo "  - NGINX is running (run: docker compose ps)"
     echo ""
     exit 1
 fi
@@ -75,11 +118,9 @@ fi
 echo ""
 echo -e "${GREEN}✓ Certificate obtained!${NC}"
 
-# ── Step 2: Enable HTTPS in NGINX config ─────
+# ── Step 4: Enable HTTPS in NGINX config ─────
 echo ""
 echo "Enabling HTTPS in NGINX config..."
-
-NGINX_CONF="$SCRIPT_DIR/nginx/default.conf"
 
 # Build server_name with all domains
 SERVER_NAMES=""
@@ -88,7 +129,6 @@ for d in "${DOMAIN_ARRAY[@]}"; do
     SERVER_NAMES="$SERVER_NAMES $d"
 done
 
-# Create the HTTPS server block
 cat > "$NGINX_CONF" << NGINXEOF
 # ── Rate Limiting ──────────────────────────────
 limit_req_zone \$binary_remote_addr zone=ephem_limit:10m rate=10r/s;
@@ -124,7 +164,8 @@ server {
 
 # ── HTTPS server ──────────────────────────────
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name$SERVER_NAMES;
     server_tokens off;
 
@@ -181,10 +222,27 @@ NGINXEOF
 
 echo -e "${GREEN}✓ NGINX config updated with HTTPS${NC}"
 
-# ── Step 3: Reload NGINX ─────────────────────
+# ── Step 5: Reload NGINX ─────────────────────
 echo ""
 echo "Restarting NGINX..."
 docker compose -f "$SCRIPT_DIR/docker-compose.yml" restart nginx
+
+# Verify NGINX started successfully with SSL
+sleep 3
+NGINX_STATUS=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" ps nginx --format '{{.Status}}' 2>/dev/null || echo "unknown")
+if echo "$NGINX_STATUS" | grep -qi "restarting"; then
+    echo ""
+    echo -e "${RED}✗ NGINX failed to start with SSL config. Restoring HTTP-only config...${NC}"
+    if [ -f "$NGINX_CONF_BACKUP" ]; then
+        cp "$NGINX_CONF_BACKUP" "$NGINX_CONF"
+    else
+        cd "$SCRIPT_DIR" && git checkout nginx/default.conf 2>/dev/null || true
+    fi
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" restart nginx
+    echo ""
+    echo "NGINX is back on HTTP. Check: docker compose logs nginx"
+    exit 1
+fi
 
 echo ""
 echo "========================================="
