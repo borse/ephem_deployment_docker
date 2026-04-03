@@ -219,15 +219,28 @@ docker compose logs
 
 ### Step 5 — Set Up SSL (HTTPS)
 
-Replace `ephem.health.gov.xx` and `admin@health.gov.xx` with your actual domain and email:
+This script gets a certificate and configures HTTPS automatically. Replace the domain and email with yours:
 
 ```bash
-docker compose exec nginx certbot --nginx -d ephem.health.gov.xx --non-interactive --agree-tos -m admin@health.gov.xx
+chmod +x scripts/ssl-setup.sh
 ```
 
 ```bash
-docker compose restart nginx
+./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
 ```
+
+For **multiple domains** (e.g. production + training), separate them with commas:
+
+```bash
+./scripts/ssl-setup.sh ephem.health.gov.xx,training.ephem.health.gov.xx,staging.ephem.health.gov.xx admin@health.gov.xx
+```
+
+The script will:
+
+- Request an SSL certificate from Let's Encrypt
+- Update the NGINX config to enable HTTPS
+- Set up HTTP → HTTPS redirect
+- Restart NGINX
 
 > **If this fails:**
 > - Make sure your domain points to the server: `ping ephem.health.gov.xx`
@@ -431,13 +444,15 @@ Run these from inside the `ephem-deploy` folder.
 
 ## SSL Renewal
 
-Certificates renew automatically. To verify:
+Certificates renew automatically via the Certbot container running in the background.
+
+To manually test renewal:
 
 ```bash
-docker compose exec nginx certbot renew --dry-run
+docker compose run --rm certbot renew --dry-run
 ```
 
-If it says "all simulated renewals succeeded", you're fine.
+If it says "simulated renewals succeeded", auto-renewal is working.
 
 ---
 
@@ -503,7 +518,7 @@ sudo ufw allow 80
 sudo ufw allow 443
 ```
 
-Re-run the Certbot command from [Step 5](#step-5--set-up-ssl-https).
+Re-run the SSL setup script from [Step 5](#step-5--set-up-ssl-https).
 
 ### Start completely fresh
 
@@ -535,7 +550,8 @@ ephem-deploy/
 ├── custom-addons/           ← ePHEM modules (from github.com/borse/ePHEM)
 │
 ├── scripts/
-│   └── backup.sh            ← Backup script
+│   ├── backup.sh            ← Backup script
+│   └── ssl-setup.sh         ← SSL certificate setup (run once)
 │
 └── backups/                 ← Backup files
 ```

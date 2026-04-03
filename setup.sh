@@ -82,6 +82,11 @@ if [ -f "scripts/backup.sh" ]; then
     echo -e "${GREEN}✓${NC} Backup script is ready"
 fi
 
+if [ -f "scripts/ssl-setup.sh" ]; then
+    chmod +x scripts/ssl-setup.sh
+    echo -e "${GREEN}✓${NC} SSL setup script is ready"
+fi
+
 # ── Create backups directory ─────────────────
 mkdir -p backups
 echo -e "${GREEN}✓${NC} backups/ directory exists"
@@ -107,7 +112,8 @@ else
     echo -e "${GREEN}ePHEM is running!${NC}"
     echo ""
     echo "Next steps:"
-    echo "  1. Set up SSL:  docker compose exec nginx certbot --nginx -d YOUR_DOMAIN --non-interactive --agree-tos -m YOUR_EMAIL"
+    echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
+    echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
     echo "  2. Open in browser: http://YOUR_DOMAIN"
     echo ""
 fi
