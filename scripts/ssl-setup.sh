@@ -50,13 +50,14 @@ echo ""
 echo "Requesting SSL certificate..."
 echo ""
 
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm certbot \
-    certonly --webroot \
+docker compose -f "$SCRIPT_DIR/docker-compose.yml" run --rm --entrypoint "" certbot \
+    certbot certonly --webroot \
     -w /var/www/certbot \
     $CERTBOT_DOMAINS \
     --email "$EMAIL" \
     --agree-tos \
     --no-eff-email \
+    --non-interactive \
     --force-renewal
 
 if [ $? -ne 0 ]; then
