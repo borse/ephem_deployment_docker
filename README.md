@@ -88,7 +88,7 @@ Docker starts **three containers** that work together:
 | What | Where it comes from | What you do |
 |------|-------------------|-------------|
 | **Odoo 18 + system packages** | Pre-built Docker image published by the ePHEM team. | Nothing — Docker downloads it automatically. |
-| **ePHEM modules** | [github.com/borse/ePHEM](https://github.com/borse/ePHEM) | Downloaded automatically by the setup script. Update with `git pull`. |
+| **ePHEM modules** | Private repository (access granted by ePHEM team) | The setup script generates an access key automatically. Send it to `ephem@who.int` to get access. |
 | **Deployment files** | [github.com/borse/ephem_deployment_docker](https://github.com/borse/ephem_deployment_docker) — this repo | Download once. Update with `git pull`. |
 
 ---

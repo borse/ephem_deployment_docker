@@ -10,6 +10,8 @@ set -euo pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 echo ""
@@ -84,7 +86,7 @@ else
     echo -e "${YELLOW}!${NC} custom-addons/ is empty — attempting to download ePHEM modules..."
     rm -rf custom-addons
 
-    # Try 1: Private repo via deploy key
+    # Try 1: Private repo via deploy key (if already set up)
     if [ -f "$HOME/.ssh/ephem_addons_deploy" ] && ssh -T git@github-ephem-addons 2>&1 | grep -qi "successfully"; then
         git clone git@github-ephem-addons:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons 2>/dev/null
         if [ $? -eq 0 ]; then
@@ -93,11 +95,8 @@ else
             echo -e "${RED}✗${NC} Failed to clone. Check deploy key access."
             mkdir -p custom-addons
         fi
-    # Try 2: Public repo
-    elif git clone https://github.com/borse/ePHEM.git custom-addons 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else
-        # Can't access — auto-generate deploy key
+        # No access — auto-generate deploy key
         mkdir -p custom-addons
         NEEDS_ADDONS_ACCESS=true
 
