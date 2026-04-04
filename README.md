@@ -133,7 +133,7 @@ You should see `Docker version 27.x.x` or similar.
 ### Step 2 — Download the Deployment Files
 
 ```bash
-git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
+git clone git@github.com:borse/ephem_deployment_docker.git ephem-deploy
 ```
 
 ```bash
