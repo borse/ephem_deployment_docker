@@ -103,8 +103,7 @@ Connect to your server via SSH. Run all commands on the server.
 ```bash
 curl -fsSL https://get.docker.com | sh
 ```
-The Above command may not always work on the first shot,
-keep repeating until it finishes
+
 ```bash
 sudo usermod -aG docker $USER
 ```
@@ -146,6 +145,12 @@ cp .env.example .env
 nano .env
 ```
 
+> **New to `nano`?** It's a simple text editor that runs in the terminal. Use arrow keys to move around, type to edit. When done:
+> - Press `Ctrl+O` (the letter O) to save → press `Enter` to confirm
+> - Press `Ctrl+X` to exit
+>
+> If `nano` is not installed, run: `sudo apt install -y nano`
+
 **Set your passwords** (required):
 
 ```env
@@ -168,8 +173,6 @@ DOMAIN=
 > ```bash
 > openssl rand -base64 24
 > ```
-
-**Save:** `Ctrl+O`, `Enter`, `Ctrl+X`
 
 ### Step 4 — Run Setup
 
