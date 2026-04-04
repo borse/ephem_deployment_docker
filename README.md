@@ -86,23 +86,33 @@ Docker starts **three containers** that work together on your server:
 
 ## Requirements
 
-- **A Linux server** — Ubuntu 22.04 or newer, with at least 2 GB RAM
-- **SSH access** to the server (PuTTY on Windows, Terminal on Mac/Linux)
+- **A server or computer** running one of:
+  - **Linux** (Ubuntu 22.04+ recommended) — works out of the box
+  - **Mac** (macOS 12+) — install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
+  - **Windows 10/11** — install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) and run all commands inside **WSL** (Windows Subsystem for Linux)
+- At least **2 GB RAM**
+- **SSH access** (for remote servers) or a terminal (for local machines)
 - **A domain name** (for production servers) — pointed at the server's IP address via a DNS A record
 
-> **No domain?** That's fine for testing and local use. The setup script will detect this and make ePHEM accessible via `http://YOUR_SERVER_IP`. You can add a domain later.
+> **No domain?** That's fine for testing and local use. The setup script will detect this and make ePHEM accessible via `http://YOUR_IP` or `http://localhost`. You can add a domain later.
+
+> **Windows users:** Open a WSL terminal (search "WSL" or "Ubuntu" in the Start menu) and run all commands there. Do not use PowerShell or CMD — the setup scripts require bash.
 
 ---
 
 ## Installation
 
-Connect to your server via SSH. Run all commands on the server.
+Connect to your server via SSH, or open a terminal on your local machine (on Windows, use WSL).
 
 ### Step 1 — Install Docker
+
+**Linux (Ubuntu/Debian):**
 
 ```bash
 curl -fsSL https://get.docker.com | sh
 ```
+
+This command may not work on the first try — repeat if needed.
 
 ```bash
 sudo usermod -aG docker $USER
@@ -114,11 +124,13 @@ Log out and back in:
 exit
 ```
 
-Reconnect via SSH, then verify:
+Reconnect, then verify:
 
 ```bash
 docker --version
 ```
+
+**Mac or Windows:** Install [Docker Desktop](https://docs.docker.com/desktop/) and make sure it's running. On Windows, open a **WSL terminal** for all remaining steps.
 
 ### Step 2 — Download the Deployment Files
 
@@ -235,7 +247,7 @@ The ePHEM custom modules are hosted in a private repository. When you run `bash 
 
 1. Copy the SSH key shown by the setup script
 2. Email it to **`ephem@who.int`** — include your country or server name in the subject
-3. The ePHEM team will grant deployment access and confirm
+3. The ePHEM team will grant read-only access and confirm
 4. Once confirmed, run `bash setup.sh` again — it will download the modules automatically
 
 **While waiting for access**, ePHEM runs with standard Odoo modules. You can create databases, configure users, and explore the interface. The ePHEM-specific modules will appear in **Apps** after access is granted and setup is re-run.
