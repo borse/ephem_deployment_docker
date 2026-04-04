@@ -155,20 +155,26 @@ cp .env.example .env
 nano .env
 ```
 
-**Change these values:**
+**You must set the passwords:**
 
 ```env
-# Your domain (no www, no https)
-DOMAIN=ephem.health.gov.xx
-
 # Database password
 POSTGRES_PASSWORD=CHANGE_ME
 
 # Odoo master password (for database management page)
 ODOO_ADMIN_PASSWORD=CHANGE_ME
+```
 
-# Email for SSL certificate
+**Domain is optional:**
+
+```env
+# If you have a domain name:
+DOMAIN=ephem.health.gov.xx
 SSL_EMAIL=admin@health.gov.xx
+
+# If you're testing locally or on a VM without a domain:
+# Leave DOMAIN empty — access via http://YOUR_SERVER_IP
+DOMAIN=
 ```
 
 > **Generate strong passwords:**
@@ -202,7 +208,9 @@ docker compose ps
 
 All containers should show **Up**.
 
-### Step 5 — Set Up SSL (HTTPS)
+### Step 5 — Set Up SSL (only if you have a domain)
+
+> **Skip this step** if you left `DOMAIN` empty in `.env`. Your site is already accessible at `http://YOUR_SERVER_IP`.
 
 ```bash
 bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
@@ -218,9 +226,8 @@ Replace with your actual domain and email. This will:
 
 Go to:
 
-```
-https://ephem.health.gov.xx
-```
+- **With domain:** `https://ephem.health.gov.xx`
+- **Without domain:** `http://YOUR_SERVER_IP` (the setup script shows the exact URL)
 
 Fill in the database creation form:
 

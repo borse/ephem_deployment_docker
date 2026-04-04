@@ -46,10 +46,19 @@ if [ -f ".env" ]; then
     else
         echo -e "${GREEN}✓${NC} Passwords have been set"
     fi
+
+    # Check domain setting
+    ENV_DOMAIN=$(grep "^DOMAIN=" .env | cut -d'=' -f2- | xargs)
+    if [ -n "$ENV_DOMAIN" ]; then
+        echo -e "${GREEN}✓${NC} Domain: $ENV_DOMAIN"
+    else
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        echo -e "${YELLOW}!${NC} No domain set — running in IP mode ($SERVER_IP)"
+    fi
 else
     echo -e "${YELLOW}!${NC} .env not found — creating from template..."
     cp .env.example .env
-    echo -e "${RED}✗${NC} Edit .env now: nano .env (set your domain and passwords)"
+    echo -e "${RED}✗${NC} Edit .env now: nano .env (set your passwords)"
     ERRORS=$((ERRORS + 1))
 fi
 
@@ -97,6 +106,16 @@ if [ -f "scripts/add-domain.sh" ]; then
     echo -e "${GREEN}✓${NC} Add domain script is ready"
 fi
 
+if [ -f "scripts/duplicate-db.sh" ]; then
+    chmod +x scripts/duplicate-db.sh
+    echo -e "${GREEN}✓${NC} Duplicate database script is ready"
+fi
+
+if [ -f "scripts/update-modules.sh" ]; then
+    chmod +x scripts/update-modules.sh
+    echo -e "${GREEN}✓${NC} Update modules script is ready"
+fi
+
 # ── Sync odoo.conf with .env settings ───────
 if [ -f "odoo.conf" ] && [ -f ".env" ]; then
     ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
@@ -108,19 +127,19 @@ if [ -f "odoo.conf" ] && [ -f ".env" ]; then
     # Sync dbfilter
     DB_FILTER=$(grep "^ODOO_DBFILTER=" .env | cut -d'=' -f2-)
     if [ -n "$DB_FILTER" ]; then
-        if grep -q "^dbfilter" odoo.conf; then
-            sed -i "s|^dbfilter.*|dbfilter = $DB_FILTER|" odoo.conf
-        else
-            echo "dbfilter = $DB_FILTER" >> odoo.conf
-        fi
-        echo -e "${GREEN}✓${NC} Database filter synced from .env"
+        # Remove existing dbfilter line if present
+        sed -i '/^dbfilter/d' odoo.conf
+        # Append the new value
+        echo "dbfilter = $DB_FILTER" >> odoo.conf
+        echo -e "${GREEN}✓${NC} Database filter synced from .env: $DB_FILTER"
     fi
 
     # Sync list_db
     LIST_DB=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2-)
     if [ -n "$LIST_DB" ]; then
-        sed -i "s|^list_db.*|list_db = $LIST_DB|" odoo.conf
-        echo -e "${GREEN}✓${NC} Database listing synced from .env"
+        sed -i '/^list_db/d' odoo.conf
+        echo "list_db = $LIST_DB" >> odoo.conf
+        echo -e "${GREEN}✓${NC} Database listing synced from .env: $LIST_DB"
     fi
 fi
 
@@ -201,16 +220,29 @@ echo "========================================="
 echo -e "${GREEN}ePHEM is running!${NC}"
 echo ""
 
+# Detect domain from .env
+ENV_DOMAIN=$(grep "^DOMAIN=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+
 # Show smart next steps based on current state
 if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then
     # SSL is already configured
     DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
     echo "Your site is available at:"
     echo "  https://$DOMAIN"
+elif [ -n "$ENV_DOMAIN" ]; then
+    # Domain is set but SSL not configured yet
+    echo "Your site is available at:"
+    echo "  http://$ENV_DOMAIN"
+    echo ""
+    echo "To enable HTTPS, run:"
+    echo "  bash scripts/ssl-setup.sh $ENV_DOMAIN ${SSL_EMAIL:-admin@$ENV_DOMAIN}"
 else
-    echo "Next steps:"
-    echo "  1. Set up SSL:  ./scripts/ssl-setup.sh YOUR_DOMAIN YOUR_EMAIL"
-    echo "     Example:     ./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
-    echo "  2. Open in browser: http://YOUR_DOMAIN"
+    # No domain — IP-only mode
+    echo "Your site is available at:"
+    echo "  http://$SERVER_IP"
+    echo ""
+    echo "To set up a domain later, edit .env and set DOMAIN=yourdomain.com"
+    echo "Then run: bash scripts/ssl-setup.sh yourdomain.com your@email.com"
 fi
 echo ""
