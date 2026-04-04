@@ -24,6 +24,16 @@ LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/update_${TIMESTAMP}.log"
 
+# ── Read database credentials from .env ──────
+DB_USER=$(grep "^POSTGRES_USER=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "odoo")
+DB_PASS=$(grep "^POSTGRES_PASSWORD=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2-)
+DB_USER="${DB_USER:-odoo}"
+
+if [ -z "$DB_PASS" ]; then
+    echo -e "${RED}✗${NC} Cannot read POSTGRES_PASSWORD from .env"
+    exit 1
+fi
+
 # ── Module list (in update order) ────────────
 MODULES=(
   "eoc_base"
@@ -110,8 +120,15 @@ run_batch_update() {
     echo ""
 
     # Run with live output — user can see progress
+    # Pass database credentials explicitly since odoo.conf doesn't have them
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T odoo \
-        odoo $FLAG "$MODULES_CSV" -d "$DB" --stop-after-init --no-http 2>&1 | \
+        odoo $FLAG "$MODULES_CSV" \
+        -d "$DB" \
+        --db_host db \
+        --db_port 5432 \
+        --db_user "$DB_USER" \
+        --db_password "$DB_PASS" \
+        --stop-after-init --no-http 2>&1 | \
         tee -a "$LOG_FILE" | \
         grep --line-buffered -E "INFO|WARNING|ERROR|CRITICAL|Loading|loading|Updat|updat|instal" | \
         sed 's/^/    /'
