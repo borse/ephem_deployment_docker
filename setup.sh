@@ -149,7 +149,9 @@ fi
 if [ -f "odoo.conf" ] && [ -f ".env" ]; then
     ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
     if [ -n "$ADMIN_PASS" ]; then
-        sed -i "s|^admin_passwd.*|admin_passwd = $ADMIN_PASS|" odoo.conf
+        sed -i '/^admin_passwd/d' odoo.conf
+        sed -i '/ODOO_ADMIN_PASSWORD_PLACEHOLDER/d' odoo.conf
+        echo "admin_passwd = $ADMIN_PASS" >> odoo.conf
         echo -e "${GREEN}✓${NC} Odoo master password synced from .env"
     fi
 
