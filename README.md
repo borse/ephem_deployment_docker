@@ -12,37 +12,28 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
 ## Table of Contents
 
 - [How This Works](#how-this-works)
-- [What You Need Before Starting](#what-you-need-before-starting)
+- [Requirements](#requirements)
 - [Installation](#installation)
   - [Step 1 — Install Docker](#step-1--install-docker)
   - [Step 2 — Download the Deployment Files](#step-2--download-the-deployment-files)
   - [Step 3 — Configure Your Settings](#step-3--configure-your-settings)
-  - [Step 4 — Run the Setup Script](#step-4--run-the-setup-script)
-  - [Step 5 — Set Up SSL (HTTPS)](#step-5--set-up-ssl-https)
-  - [Step 6 — Open ePHEM in Your Browser](#step-6--open-ephem-in-your-browser)
-- [Custom Addons (Private Repository)](#custom-addons-private-repository)
-  - [Requesting Access](#requesting-access)
-  - [Downloading the Addons](#downloading-the-addons)
-  - [Using ePHEM Without Custom Addons](#using-ephem-without-custom-addons)
-  - [Updating Custom Addons](#updating-custom-addons)
+  - [Step 4 — Run Setup](#step-4--run-setup)
+  - [Step 5 — Set Up SSL](#step-5--set-up-ssl)
+  - [Step 6 — Open ePHEM](#step-6--open-ephem)
+- [ePHEM Custom Modules](#ephem-custom-modules)
 - [Adding Domains](#adding-domains)
   - [Adding a Single Domain](#adding-a-single-domain)
-  - [Adding Multiple Domains at Once](#adding-multiple-domains-at-once)
+  - [Adding Multiple Domains](#adding-multiple-domains)
   - [Creating Databases for New Domains](#creating-databases-for-new-domains)
 - [Duplicating Databases](#duplicating-databases)
-  - [Example: Setting Up Training Environments](#example-setting-up-training-environments)
-  - [Duplicating a Single Database](#duplicating-a-single-database)
-  - [Overwriting Existing Databases](#overwriting-existing-databases)
+  - [Example: Training Environments](#example-training-environments)
 - [Updating ePHEM](#updating-ephem)
-  - [Update ePHEM Modules](#update-ephem-modules)
-  - [Update the Deployment Configuration](#update-the-deployment-configuration)
-  - [Update the Odoo Base Image](#update-the-odoo-base-image)
+  - [Update Custom Modules](#update-custom-modules)
+  - [Update Deployment Configuration](#update-deployment-configuration)
+  - [Update Odoo Base Image](#update-odoo-base-image)
+  - [Update Odoo Modules Across Databases](#update-odoo-modules-across-databases)
 - [Backups](#backups)
-  - [Manual Backup](#manual-backup)
-  - [Automatic Daily Backups](#automatic-daily-backups)
-  - [Restore a Backup](#restore-a-backup)
 - [Day-to-Day Commands](#day-to-day-commands)
-- [SSL Renewal](#ssl-renewal)
 - [Troubleshooting](#troubleshooting)
 - [File Structure](#file-structure)
 - [Security Notes](#security-notes)
@@ -54,11 +45,11 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
 
 ### What is Docker?
 
-Docker runs software in **containers** — pre-packaged boxes that include everything an application needs. Instead of spending hours installing software manually, Docker does it in minutes with a single command.
+Docker runs software in **containers** — pre-packaged boxes that include everything an application needs. Instead of spending hours installing software manually, Docker sets everything up in minutes with a single command.
 
-### What happens when you start ePHEM?
+### What gets installed?
 
-Docker starts **three containers** that work together:
+Docker starts **three containers** that work together on your server:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -80,30 +71,26 @@ Docker starts **three containers** that work together:
 | Container | What it does |
 |-----------|-------------|
 | **NGINX** | The front door. Handles HTTPS and forwards traffic to Odoo. Only part visible from the internet. |
-| **Odoo** | The ePHEM application. Uses a **pre-built image** — nothing to install manually. |
+| **Odoo** | The ePHEM application. Uses a pre-built image — nothing to install manually. |
 | **PostgreSQL** | The database. Stores all data. Hidden from the internet. |
 
 ### Where does the software come from?
 
-| What | Where it comes from | What you do |
-|------|-------------------|-------------|
-| **Odoo 18 + system packages** | Pre-built Docker image published by the ePHEM team. | Nothing — Docker downloads it automatically. |
-| **ePHEM modules** | Private repository (access granted by ePHEM team) | The setup script generates an access key automatically. Send it to `ephem@who.int` to get access. |
-| **Deployment files** | [github.com/borse/ephem_deployment_docker](https://github.com/borse/ephem_deployment_docker) — this repo | Download once. Update with `git pull`. |
+| What | Source | What you do |
+|------|--------|-------------|
+| **Odoo 18 + system packages** | Pre-built Docker image by the ePHEM team | Nothing — Docker downloads it automatically |
+| **ePHEM custom modules** | Private repository (access granted by ePHEM team) | The setup script generates an access key — send it to `ephem@who.int` |
+| **Deployment files** | This repository | Download once, update with `git pull` |
 
 ---
 
-## What You Need Before Starting
+## Requirements
 
 - **A Linux server** — Ubuntu 22.04 or newer, with at least 2 GB RAM
-- **A domain name** pointed at your server's IP address (ask your IT team to create a DNS A record)
 - **SSH access** to the server (PuTTY on Windows, Terminal on Mac/Linux)
+- **A domain name** (for production servers) — pointed at the server's IP address via a DNS A record
 
-> **Check if your domain is set up correctly:**
-> ```bash
-> ping ephem.health.gov.xx
-> ```
-> If it shows your server's IP address, you're ready.
+> **No domain?** That's fine for testing and local use. The setup script will detect this and make ePHEM accessible via `http://YOUR_SERVER_IP`. You can add a domain later.
 
 ---
 
@@ -133,8 +120,6 @@ Reconnect via SSH, then verify:
 docker --version
 ```
 
-You should see `Docker version 27.x.x` or similar.
-
 ### Step 2 — Download the Deployment Files
 
 ```bash
@@ -160,25 +145,21 @@ cp .env.example .env
 nano .env
 ```
 
-**You must set the passwords:**
+**Set your passwords** (required):
 
 ```env
-# Database password
-POSTGRES_PASSWORD=CHANGE_ME
-
-# Odoo master password (for database management page)
-ODOO_ADMIN_PASSWORD=CHANGE_ME
+POSTGRES_PASSWORD=your_strong_password_here
+ODOO_ADMIN_PASSWORD=your_master_password_here
 ```
 
-**Domain is optional:**
+**Set your domain** (optional — leave empty for IP-only access):
 
 ```env
-# If you have a domain name:
+# Production server with a domain:
 DOMAIN=ephem.health.gov.xx
 SSL_EMAIL=admin@health.gov.xx
 
-# If you're testing locally or on a VM without a domain:
-# Leave DOMAIN empty — access via http://YOUR_SERVER_IP
+# Testing / local VM without a domain:
 DOMAIN=
 ```
 
@@ -189,57 +170,48 @@ DOMAIN=
 
 **Save:** `Ctrl+O`, `Enter`, `Ctrl+X`
 
-### Step 4 — Run the Setup Script
+### Step 4 — Run Setup
 
 ```bash
 bash setup.sh
 ```
 
-This script will:
+The setup script will:
 
 - Verify Docker is installed
 - Check your passwords are set
-- Download the ePHEM modules automatically
+- Detect whether you have a domain or are running in IP mode
+- Generate an access key for the ePHEM custom modules
 - Sync settings from `.env` into the Odoo config
 - Start all containers
 
-> **First time:** Takes 2–5 minutes to download (~1 GB). Future starts are instant.
+At the end, the script shows your site URL and instructions for getting the ePHEM custom modules (see [ePHEM Custom Modules](#ephem-custom-modules)).
 
-Check everything is running:
+> **First run:** Takes 2–5 minutes to download (~1 GB). Future runs are instant.
 
-```bash
-docker compose ps
-```
+### Step 5 — Set Up SSL
 
-All containers should show **Up**.
-
-### Step 5 — Set Up SSL (only if you have a domain)
-
-> **Skip this step** if you left `DOMAIN` empty in `.env`. Your site is already accessible at `http://YOUR_SERVER_IP`.
+> **Skip this step** if you left `DOMAIN` empty in `.env`.
 
 ```bash
 bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
 ```
 
-Replace with your actual domain and email. This will:
+Replace with your actual domain and email.
 
-- Request an SSL certificate from Let's Encrypt
-- Configure NGINX for HTTPS
-- Set up HTTP → HTTPS redirect
+### Step 6 — Open ePHEM
 
-### Step 6 — Open ePHEM in Your Browser
-
-Go to:
+Open your browser and go to:
 
 - **With domain:** `https://ephem.health.gov.xx`
-- **Without domain:** `http://YOUR_SERVER_IP` (the setup script shows the exact URL)
+- **Without domain:** `http://YOUR_SERVER_IP` (shown by the setup script)
 
 Fill in the database creation form:
 
 | Field | What to enter |
 |-------|--------------|
 | **Master Password** | The `ODOO_ADMIN_PASSWORD` from your `.env` |
-| **Database Name** | Use your subdomain name (e.g. `ephem`) |
+| **Database Name** | Use your subdomain (e.g. `ephem`) or any name |
 | **Email** | Your admin email |
 | **Password** | Choose a password for the admin user |
 | **Language** | Your language |
@@ -247,71 +219,30 @@ Fill in the database creation form:
 
 Click **Create Database** (takes 1–2 minutes).
 
-After login, go to **Apps → Update Apps List** and install the ePHEM modules.
-
 🎉 **ePHEM is running!**
 
 ---
 
-## Custom Addons (Private Repository)
+## ePHEM Custom Modules
 
-The ePHEM custom modules are in a private repository. If `setup.sh` cannot download them automatically, you'll need to request access.
+The ePHEM custom modules are hosted in a private repository. When you run `bash setup.sh` for the first time, the script automatically generates an SSH access key and displays it at the end.
 
-### Requesting Access
+**To get access:**
 
-Run the access request script:
+1. Copy the SSH key shown by the setup script
+2. Email it to **`ephem@who.int`** — include your country or server name in the subject
+3. The ePHEM team will grant read-only access and confirm
+4. Once confirmed, run `bash setup.sh` again — it will download the modules automatically
 
-```bash
-bash scripts/request-addons-access.sh
-```
+**While waiting for access**, ePHEM runs with standard Odoo modules. You can create databases, configure users, and explore the interface. The ePHEM-specific modules will appear in **Apps** after access is granted and setup is re-run.
 
-The script will:
-
-1. Generate a unique SSH deploy key for your server
-2. Configure SSH to use it with GitHub
-3. Display your public key
-
-**Send the public key to the ePHEM team at `ephem@who.int`** — include your country or server name in the email subject. They will add it to the repository (read-only access).
-
-### Downloading the Addons
-
-Once the ePHEM team confirms your key has been added:
-
-```bash
-bash scripts/clone-addons.sh
-```
-
-This clones the addons and restarts Odoo. Go to **Apps → Update Apps List** to see the ePHEM modules.
-
-### Using ePHEM Without Custom Addons
-
-You can start using Odoo immediately while waiting for access — just run `bash setup.sh`. The system works with standard Odoo modules. The ePHEM-specific modules can be added later without reinstalling.
-
-### Updating Custom Addons
-
-After access is set up, update the addons with:
-
-```bash
-cd custom-addons
-```
-
-```bash
-git pull
-```
-
-```bash
-cd ..
-```
-
-```bash
-docker compose restart odoo
-```
+> **Already have access?** Running `bash setup.sh` detects your key and clones the modules automatically — no extra steps.
 
 ---
 
 ## Adding Domains
 
-You can run multiple databases on the same server — for example production, training, and simulation exercises. Each domain points to its own independent database.
+Run multiple databases on the same server — for example production, training, and simulation exercises. Each domain points to its own independent database.
 
 | URL | Database |
 |-----|----------|
@@ -319,15 +250,7 @@ You can run multiple databases on the same server — for example production, tr
 | `training.health.gov.xx` | `training` |
 | `simex.health.gov.xx` | `simex` |
 
-### Before Adding a Domain
-
-Ask your IT team to create a **DNS A record** for the new domain pointing to the same server IP. Verify it works:
-
-```bash
-dig +short training.health.gov.xx
-```
-
-It should show your server's IP address.
+**Before adding a domain**, ask your IT team to create a DNS A record pointing the new domain to this server's IP.
 
 ### Adding a Single Domain
 
@@ -335,65 +258,35 @@ It should show your server's IP address.
 bash scripts/add-domain.sh training.health.gov.xx
 ```
 
-The script will:
-
-1. Check DNS is set up correctly
-2. Expand the SSL certificate to include the new domain
-3. Update the NGINX config
-4. Restart NGINX
-
-### Adding Multiple Domains at Once
+### Adding Multiple Domains
 
 ```bash
 bash scripts/add-domain.sh training.health.gov.xx simex.health.gov.xx staging.health.gov.xx
 ```
 
-All domains are processed in one go — one certificate expansion, one NGINX restart.
+The script checks DNS, expands the SSL certificate, updates NGINX, and restarts — all automatically.
 
 ### Creating Databases for New Domains
 
-After adding a domain, you need to create a database for it.
-
-**Option A — Create a fresh database:**
-
-Go to:
+After adding a domain, create a database for it at:
 
 ```
 https://training.health.gov.xx/web/database/manager
 ```
 
-Enter the master password and click **Create Database**.
-
 > **Important:** The database name must match the subdomain. For `training.health.gov.xx`, name the database `training`.
 
-**Option B — Duplicate an existing database:**
+You can also **duplicate** an existing database or **restore** from a backup (see [Duplicating Databases](#duplicating-databases)).
 
-If you want the new database to be a copy of an existing one (e.g. copy production as a starting point for training):
+### Disable Database Manager
 
-1. Go to `https://ephem.health.gov.xx/web/database/manager`
-2. Click **Duplicate** next to your existing database
-3. Name the copy to match the new subdomain (e.g. `training`)
-
-**Option C — Restore from a backup:**
-
-1. Go to `https://training.health.gov.xx/web/database/manager`
-2. Click **Restore Database**
-3. Upload a `.zip` backup file
-4. Name it to match the subdomain
-
-### Disable Database Manager After Setup
-
-Once all databases are created, disable the database manager page to prevent unauthorized access:
+Once all databases are created, prevent unauthorized access to the database manager:
 
 ```bash
 nano .env
 ```
 
-Change:
-
-```env
-ODOO_LIST_DB=False
-```
+Set `ODOO_LIST_DB=False`, save, then:
 
 ```bash
 bash setup.sh
@@ -403,61 +296,31 @@ bash setup.sh
 
 ## Duplicating Databases
 
-Use this to create multiple copies of a configured database. This is useful when you need several identical environments — for example, setting up training rooms where each group gets their own database.
+Create multiple copies of a configured database. Useful for setting up training rooms where each group gets their own environment.
 
-### Example: Setting Up Training Environments
+### Example: Training Environments
 
-Let's say you need 6 training databases (`training-01` through `training-06`), all identical.
-
-**1. Add all domains at once:**
+**1. Add all domains:**
 
 ```bash
 bash scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
 ```
 
-**2. Create and configure `training-01`:**
+**2. Create and configure `training-01`** at `https://training-01.pheoc.com` — install modules, set up users, configure settings.
 
-Go to `https://training-01.pheoc.com/web/database/manager`, create the `training-01` database, install the ePHEM modules, set up users, configure settings — everything you want all training environments to have.
-
-**3. Duplicate into all the others:**
+**3. Duplicate into all others:**
 
 ```bash
 bash scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
 ```
 
-That's it. All 6 databases are now identical copies — same modules, same users, same configuration. Each one is accessible at its own URL.
-
-### Duplicating a Single Database
-
-You can also duplicate just one:
-
-```bash
-bash scripts/duplicate-db.sh production staging
-```
-
-This creates a `staging` database that's an exact copy of `production`.
-
-### Overwriting Existing Databases
-
-If any of the target databases already exist, the script will ask before overwriting:
-
-```
-! The following databases already exist:
-  - training-02
-  - training-03
-
-Overwrite them? This will DELETE their data. (y/n)
-```
-
-Type `y` to replace them with fresh copies, or `n` to cancel.
-
-> **Tip:** After duplicating, each database is completely independent. Changes to `training-01` will NOT affect `training-02` or any other copy.
+All 6 databases are now identical copies. Each is accessible at its own URL and completely independent — changes to one don't affect the others.
 
 ---
 
 ## Updating ePHEM
 
-### Update ePHEM Modules
+### Update Custom Modules
 
 When the ePHEM team releases new features or fixes:
 
@@ -477,11 +340,11 @@ cd ..
 docker compose restart odoo
 ```
 
-Then in your browser, go to **Apps → Update Apps List** and upgrade the ePHEM modules.
+Then go to **Apps → Update Apps List** and upgrade the modules.
 
-### Update the Deployment Configuration
+### Update Deployment Configuration
 
-When the deployment repo is updated (new scripts, config changes):
+When this repository is updated (new scripts, config changes):
 
 ```bash
 cd ~/ephem-deploy
@@ -495,15 +358,11 @@ git pull
 bash setup.sh
 ```
 
-> **Note:** `git pull` will never overwrite your `.env`, `nginx/active.conf`, or `odoo.conf` — these are either git-ignored or only modified by the setup scripts.
+> `git pull` never overwrites your `.env`, `nginx/active.conf`, or `odoo.conf`.
 
-### Update the Odoo Base Image
+### Update Odoo Base Image
 
-When the ePHEM team announces a system update (security patches, new dependencies):
-
-```bash
-cd ~/ephem-deploy
-```
+When the ePHEM team announces a system update:
 
 ```bash
 bash scripts/backup.sh
@@ -517,19 +376,37 @@ docker compose pull
 docker compose up -d
 ```
 
-> **Always back up before updating the base image.**
+### Update Odoo Modules Across Databases
+
+To update or install modules across all databases at once:
+
+**Auto mode** (all modules, all databases):
+
+```bash
+bash scripts/update-modules.sh --auto
+```
+
+**Auto mode on a specific database:**
+
+```bash
+bash scripts/update-modules.sh --auto --db training-server
+```
+
+**Interactive mode** (pick databases and modules):
+
+```bash
+bash scripts/update-modules.sh
+```
 
 ---
 
 ## Backups
 
-### Manual Backup
+### Run a Backup
 
 ```bash
 bash scripts/backup.sh
 ```
-
-Backups are saved in the `backups/` folder with timestamps.
 
 ### Automatic Daily Backups
 
@@ -537,30 +414,24 @@ Backups are saved in the `backups/` folder with timestamps.
 crontab -e
 ```
 
-Add this line (replace the path):
+Add (replace the path):
 
 ```
-0 2 * * * /home/YOUR_USERNAME/ephem-deplobash scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
+0 2 * * * /home/YOUR_USERNAME/ephem-deploy/scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
 ```
 
-> **Find your path:** Run `pwd` inside the `ephem-deploy` folder.
+Backups older than 14 days are deleted automatically.
 
-Backups older than 14 days are automatically deleted.
+> **Important:** Copy backups to a different location regularly. If this server fails, local backups are lost too.
 
-> **Important:** Copy backups to a different location (USB drive, another server, cloud storage). If this server fails, local backups are lost too.
-
-### Restore a Backup
+### Restore from Backup
 
 ```bash
 docker compose stop odoo
 ```
 
 ```bash
-gunzip < backups/production_20260402_020000.sql.gz | docker compose exec -T db psql -U odoo -d production
-```
-
-```bash
-tar -xzf backups/filestore_production_20260402_020000.tar.gz -C ./odoo-data/filestore/
+gunzip < backups/DBNAME_TIMESTAMP.sql.gz | docker compose exec -T db psql -U odoo -d DBNAME
 ```
 
 ```bash
@@ -571,7 +442,7 @@ docker compose start odoo
 
 ## Day-to-Day Commands
 
-Run these from inside the `ephem-deploy` folder.
+Run from inside the `ephem-deploy` folder.
 
 | What you want to do | Command |
 |---------------------|---------|
@@ -581,25 +452,13 @@ Run these from inside the `ephem-deploy` folder.
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
-| View all logs | `docker compose logs -f` |
 | Run a backup | `bash scripts/backup.sh` |
 | Add a domain | `bash scripts/add-domain.sh new.domain.com` |
-| Duplicate a database | `bash scripts/duplicate-db.sh source-db target-db1 target-db2` |
-| Update ePHEM modules | `cd custom-addons && git pull && cd .. && docker compose restart odoo` |
+| Duplicate a database | `bash scripts/duplicate-db.sh source target1 target2` |
+| Update modules | `bash scripts/update-modules.sh` |
+| Re-run setup | `bash setup.sh` |
 
 > Press `Ctrl+C` to stop watching logs.
-
----
-
-## SSL Renewal
-
-Certificates renew automatically via the Certbot container.
-
-To test:
-
-```bash
-docker compose run --rm --entrypoint "" certbot certbot renew --dry-run
-```
 
 ---
 
@@ -611,16 +470,8 @@ docker compose run --rm --entrypoint "" certbot certbot renew --dry-run
 docker compose ps
 ```
 
-If containers are down:
-
 ```bash
 docker compose up -d
-```
-
-Check your domain points to the server:
-
-```bash
-dig +short ephem.health.gov.xx
 ```
 
 ### Odoo errors or blank pages
@@ -629,30 +480,15 @@ dig +short ephem.health.gov.xx
 docker compose logs --tail=30 odoo
 ```
 
-Look for lines with `ERROR` or `ValueError`.
-
-### Database errors
-
-```bash
-docker compose exec db pg_isready -U odoo
-```
-
 ### New domain shows wrong database
 
-Make sure `ODOO_DBFILTER=^%d$` is set in `.env`, and the database name **exactly matches** the subdomain:
-
-- `training.health.gov.xx` → database must be named `training`
-- `simex.health.gov.xx` → database must be named `simex`
+Make sure `ODOO_DBFILTER=%d` is set in `.env` and database names match subdomains exactly. Then:
 
 ```bash
 bash setup.sh
 ```
 
-### Custom modules not showing in Apps
-
-```bash
-ls custom-addons/
-```
+### Custom modules not appearing
 
 ```bash
 chmod -R 755 custom-addons/
@@ -674,11 +510,13 @@ sudo ufw allow 80
 sudo ufw allow 443
 ```
 
-Re-run `bash scripts/ssl-setup.sh`.
+```bash
+bash scripts/ssl-setup.sh yourdomain.com your@email.com
+```
 
-### Need to start completely fresh
+### Start completely fresh
 
-> **Warning:** This deletes ALL data.
+> **Warning:** Deletes ALL data.
 
 ```bash
 docker compose down -v
@@ -692,8 +530,6 @@ rm -f nginx/active.conf
 bash setup.sh
 ```
 
-Then re-run `bash scripts/ssl-setup.sh`.
-
 ---
 
 ## File Structure
@@ -701,65 +537,56 @@ Then re-run `bash scripts/ssl-setup.sh`.
 ```
 ephem-deploy/
 │
-├── docker-compose.yml       ← Defines the containers
-├── .env.example             ← Settings template — copy to .env
-├── .env                     ← Your settings (passwords, domain) — never shared
-├── odoo.conf                ← Odoo config (synced from .env by setup.sh)
-├── setup.sh                 ← Run once to start, run again after updates
+├── docker-compose.yml         ← Container definitions
+├── .env.example               ← Settings template — copy to .env
+├── .env                       ← Your settings (never shared)
+├── odoo.conf                  ← Odoo config (synced from .env by setup.sh)
+├── setup.sh                   ← Main setup script — run after install and updates
 │
 ├── nginx/
-│   ├── default.conf         ← HTTP-only template (in Git, never modified)
-│   └── active.conf          ← Active NGINX config (git-ignored, created by scripts)
+│   ├── default.conf           ← HTTP-only template (in Git, never modified)
+│   └── active.conf            ← Active NGINX config (created by scripts)
 │
-├── custom-addons/           ← ePHEM modules (from github.com/borse/ePHEM)
+├── custom-addons/             ← ePHEM modules (private repo)
 │
 ├── scripts/
-│   ├── backup.sh              ← Backup all databases and filestore
-│   ├── ssl-setup.sh           ← Set up SSL certificates (run once)
-│   ├── add-domain.sh          ← Add new domains (training, simex, etc.)
-│   ├── duplicate-db.sh        ← Copy a database into multiple new ones
-│   ├── update-modules.sh      ← Update/install Odoo modules across databases
-│   ├── request-addons-access.sh ← Generate deploy key for private addons repo
-│   └── clone-addons.sh        ← Clone addons after access is granted
+│   ├── ssl-setup.sh           ← Set up SSL certificates
+│   ├── add-domain.sh          ← Add new domains
+│   ├── duplicate-db.sh        ← Copy databases
+│   ├── update-modules.sh      ← Update Odoo modules across databases
+│   ├── backup.sh              ← Backup databases and filestore
+│   ├── clone-addons.sh        ← Clone addons after access is granted
+│   └── request-addons-access.sh ← Generate deploy key (also run by setup.sh)
 │
-└── backups/                 ← Backup files (git-ignored)
-```
-
-**Created automatically by Docker:**
-
-```
-postgres-data/               ← Database files
-odoo-data/                   ← Uploaded documents and images
+├── backups/                   ← Backup files
+└── logs/                      ← Module update logs
 ```
 
 ---
 
 ## Security Notes
 
-Built-in security:
+**Built-in:**
 
-- PostgreSQL and Odoo are **hidden from the internet** — only NGINX is exposed
-- All traffic is **encrypted with HTTPS** (TLS 1.2+)
-- **Security headers** protect against common web attacks
-- **Rate limiting** prevents abuse
-- Containers run on a **private Docker network**
-- SSL certificates **renew automatically**
+- PostgreSQL and Odoo are hidden from the internet — only NGINX is exposed
+- All traffic encrypted with HTTPS (TLS 1.2+)
+- Security headers protect against common web attacks
+- Rate limiting prevents abuse
+- Containers run on a private Docker network
+- SSL certificates renew automatically
 
 **Recommended after installation:**
 
 - Disable password-based SSH login (use SSH keys only)
-- Install fail2ban:
-  ```bash
-  sudo apt install -y fail2ban
-  ```
-- Copy backups to a different location regularly
-- Enable **two-factor authentication** for admin users (Settings → General Settings → Permissions)
-- Disable the database manager after setup (set `ODOO_LIST_DB=False` in `.env`)
+- Install fail2ban: `sudo apt install -y fail2ban`
+- Copy backups off the server regularly
+- Enable two-factor authentication for admin users (Settings → Permissions)
+- Disable the database manager after setup (`ODOO_LIST_DB=False` in `.env`)
 
 ---
 
 ## Need Help?
 
-1. Check [Troubleshooting](#troubleshooting) above
+1. Check [Troubleshooting](#troubleshooting)
 2. Run `docker compose logs` and share the output with the ePHEM team
 3. Open an issue: [github.com/borse/ephem_deployment_docker/issues](https://github.com/borse/ephem_deployment_docker/issues)
