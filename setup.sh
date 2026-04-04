@@ -80,34 +80,45 @@ fi
 # ── Check custom-addons ──────────────────────
 if [ -d "custom-addons/.git" ]; then
     echo -e "${GREEN}✓${NC} custom-addons/ has modules (Git repo)"
-elif [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v README)" ]; then
-    echo -e "${GREEN}✓${NC} custom-addons/ has modules"
 else
-    echo -e "${YELLOW}!${NC} custom-addons/ is empty — attempting to download ePHEM modules..."
+    echo -e "${YELLOW}!${NC} Downloading ePHEM modules..."
     rm -rf custom-addons
 
-    # Try 1: Private repo via deploy key (if already set up)
-    if [ -f "$HOME/.ssh/ephem_addons_deploy" ] && ssh -T git@github-ephem-addons 2>&1 | grep -qi "successfully"; then
-        git clone git@github-ephem-addons:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons 2>/dev/null
-        if [ $? -eq 0 ]; then
-            echo -e "${GREEN}✓${NC} ePHEM modules downloaded (private repo)"
+    DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
+    ADDONS_CLONED=false
+
+    # Try: Private repo via deploy key (if key exists)
+    if [ -f "$DEPLOY_KEY" ]; then
+        echo "  Testing deploy key access..."
+        SSH_OUTPUT="$(ssh -T git@github-ephem-addons 2>&1 || true)"
+
+        if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
+            echo -e "  ${GREEN}✓${NC} Access granted"
+            git clone git@github-ephem-addons:borse/ePHEM.git \
+                --depth 1 --branch 18_national_dev --single-branch custom-addons 2>/dev/null
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
+                ADDONS_CLONED=true
+            else
+                echo -e "${RED}✗${NC} Clone failed. The key has access but the branch may not exist."
+                mkdir -p custom-addons
+            fi
         else
-            echo -e "${RED}✗${NC} Failed to clone. Check deploy key access."
+            echo -e "${YELLOW}!${NC} Deploy key exists but access not yet granted"
             mkdir -p custom-addons
         fi
-    else
-        # No access — auto-generate deploy key
+    fi
+
+    # No key or no access — generate deploy key
+    if [ "$ADDONS_CLONED" = false ]; then
         mkdir -p custom-addons
         NEEDS_ADDONS_ACCESS=true
-
-        DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
 
         if [ ! -f "$DEPLOY_KEY" ]; then
             echo -e "${YELLOW}!${NC} Generating deploy key for ePHEM addons..."
             mkdir -p ~/.ssh
             chmod 700 ~/.ssh
 
-            # Get server identifier
             SERVER_NAME=$(hostname 2>/dev/null || echo "unknown")
 
             ssh-keygen -t ed25519 -f "$DEPLOY_KEY" -C "ephem-addons-${SERVER_NAME}" -N "" -q
@@ -134,6 +145,8 @@ SSHEOF
             fi
 
             echo -e "${GREEN}✓${NC} Deploy key generated"
+        else
+            echo -e "${YELLOW}!${NC} Deploy key exists — waiting for ePHEM team to grant access"
         fi
     fi
 fi
