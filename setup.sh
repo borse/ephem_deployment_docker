@@ -72,7 +72,7 @@ if [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v REA
 else
     echo -e "${YELLOW}!${NC} custom-addons/ is empty — cloning ePHEM modules..."
     rm -rf custom-addons
-    git git clone git@github.com:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons
+    git clone git@github.com:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else
