@@ -103,7 +103,8 @@ Connect to your server via SSH. Run all commands on the server.
 ```bash
 curl -fsSL https://get.docker.com | sh
 ```
-
+The Above command may not always work on the first shot,
+keep repeating until it finishes
 ```bash
 sudo usermod -aG docker $USER
 ```
