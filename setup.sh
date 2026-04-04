@@ -102,10 +102,19 @@ else
 
         if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
             echo -e "  ${GREEN}✓${NC} Access granted"
-            echo "  Cloning ePHEM modules..."
+            echo "  Cloning ePHEM modules (this may take a few minutes)..."
             echo ""
+
+            # Clone the repo — show all progress
+            GIT_SSH_COMMAND="ssh -o ConnectTimeout=30 -v" \
+            GIT_TRACE=1 \
             git clone git@github-ephem-addons:borse/ePHEM.git \
-                --depth 1 --branch 18_national_dev --single-branch custom-addons --progress 2>&1 | sed 's/^/    /'
+                --depth 1 \
+                --branch 18_national_dev \
+                --single-branch \
+                custom-addons \
+                --progress
+
             if [ $? -eq 0 ]; then
                 echo ""
                 echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
