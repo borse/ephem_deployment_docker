@@ -181,7 +181,7 @@ SSL_EMAIL=admin@health.gov.xx
 ### Step 4 — Run the Setup Script
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 This script will:
@@ -205,7 +205,7 @@ All containers should show **Up**.
 ### Step 5 — Set Up SSL (HTTPS)
 
 ```bash
-./scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
+bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
 ```
 
 Replace with your actual domain and email. This will:
@@ -264,7 +264,7 @@ It should show your server's IP address.
 ### Adding a Single Domain
 
 ```bash
-./scripts/add-domain.sh training.health.gov.xx
+bash scripts/add-domain.sh training.health.gov.xx
 ```
 
 The script will:
@@ -277,7 +277,7 @@ The script will:
 ### Adding Multiple Domains at Once
 
 ```bash
-./scripts/add-domain.sh training.health.gov.xx simex.health.gov.xx staging.health.gov.xx
+bash scripts/add-domain.sh training.health.gov.xx simex.health.gov.xx staging.health.gov.xx
 ```
 
 All domains are processed in one go — one certificate expansion, one NGINX restart.
@@ -328,7 +328,7 @@ ODOO_LIST_DB=False
 ```
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 ---
@@ -344,7 +344,7 @@ Let's say you need 6 training databases (`training-01` through `training-06`), a
 **1. Add all domains at once:**
 
 ```bash
-./scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
+bash scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
 ```
 
 **2. Create and configure `training-01`:**
@@ -354,7 +354,7 @@ Go to `https://training-01.pheoc.com/web/database/manager`, create the `training
 **3. Duplicate into all the others:**
 
 ```bash
-./scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
+bash scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
 ```
 
 That's it. All 6 databases are now identical copies — same modules, same users, same configuration. Each one is accessible at its own URL.
@@ -364,7 +364,7 @@ That's it. All 6 databases are now identical copies — same modules, same users
 You can also duplicate just one:
 
 ```bash
-./scripts/duplicate-db.sh production staging
+bash scripts/duplicate-db.sh production staging
 ```
 
 This creates a `staging` database that's an exact copy of `production`.
@@ -424,7 +424,7 @@ git pull
 ```
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 > **Note:** `git pull` will never overwrite your `.env`, `nginx/active.conf`, or `odoo.conf` — these are either git-ignored or only modified by the setup scripts.
@@ -438,7 +438,7 @@ cd ~/ephem-deploy
 ```
 
 ```bash
-./scripts/backup.sh
+bash scripts/backup.sh
 ```
 
 ```bash
@@ -458,7 +458,7 @@ docker compose up -d
 ### Manual Backup
 
 ```bash
-./scripts/backup.sh
+bash scripts/backup.sh
 ```
 
 Backups are saved in the `backups/` folder with timestamps.
@@ -472,7 +472,7 @@ crontab -e
 Add this line (replace the path):
 
 ```
-0 2 * * * /home/YOUR_USERNAME/ephem-deploy/scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
+0 2 * * * /home/YOUR_USERNAME/ephem-deplobash scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
 ```
 
 > **Find your path:** Run `pwd` inside the `ephem-deploy` folder.
@@ -514,9 +514,9 @@ Run these from inside the `ephem-deploy` folder.
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
 | View all logs | `docker compose logs -f` |
-| Run a backup | `./scripts/backup.sh` |
-| Add a domain | `./scripts/add-domain.sh new.domain.com` |
-| Duplicate a database | `./scripts/duplicate-db.sh source-db target-db1 target-db2` |
+| Run a backup | `bash scripts/backup.sh` |
+| Add a domain | `bash scripts/add-domain.sh new.domain.com` |
+| Duplicate a database | `bash scripts/duplicate-db.sh source-db target-db1 target-db2` |
 | Update ePHEM modules | `cd custom-addons && git pull && cd .. && docker compose restart odoo` |
 
 > Press `Ctrl+C` to stop watching logs.
@@ -577,7 +577,7 @@ Make sure `ODOO_DBFILTER=^%d$` is set in `.env`, and the database name **exactly
 - `simex.health.gov.xx` → database must be named `simex`
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
 ### Custom modules not showing in Apps
@@ -606,7 +606,7 @@ sudo ufw allow 80
 sudo ufw allow 443
 ```
 
-Re-run `./scripts/ssl-setup.sh`.
+Re-run `bash scripts/ssl-setup.sh`.
 
 ### Need to start completely fresh
 
@@ -621,10 +621,10 @@ rm -f nginx/active.conf
 ```
 
 ```bash
-./setup.sh
+bash setup.sh
 ```
 
-Then re-run `./scripts/ssl-setup.sh`.
+Then re-run `bash scripts/ssl-setup.sh`.
 
 ---
 
