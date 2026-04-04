@@ -94,9 +94,12 @@ else
 
         if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
             echo -e "  ${GREEN}✓${NC} Access granted"
+            echo "  Cloning ePHEM modules..."
+            echo ""
             git clone git@github-ephem-addons:borse/ePHEM.git \
-                --depth 1 --branch 18_national_dev --single-branch custom-addons 2>/dev/null
+                --depth 1 --branch 18_national_dev --single-branch custom-addons --progress 2>&1 | sed 's/^/    /'
             if [ $? -eq 0 ]; then
+                echo ""
                 echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
                 ADDONS_CLONED=true
             else
