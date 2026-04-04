@@ -275,6 +275,7 @@ echo ""
 
 # ── Start containers ─────────────────────────
 docker compose up -d
+docker compose restart odoo
 echo ""
 
 # ── Wait for database to be ready ────────────
