@@ -14,6 +14,14 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Cross-platform IP detection
+get_server_ip() {
+    hostname -I 2>/dev/null | awk '{print $1}' ||
+    ipconfig getifaddr en0 2>/dev/null ||
+    ip route get 1 2>/dev/null | awk '{print $7; exit}' ||
+    echo "127.0.0.1"
+}
+
 echo ""
 echo "========================================="
 echo "  ePHEM Setup"
@@ -54,7 +62,7 @@ if [ -f ".env" ]; then
     if [ -n "$ENV_DOMAIN" ]; then
         echo -e "${GREEN}✓${NC} Domain: $ENV_DOMAIN"
     else
-        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        SERVER_IP=$(get_server_ip)
         echo -e "${YELLOW}!${NC} No domain set — running in IP mode ($SERVER_IP)"
     fi
 else
@@ -192,7 +200,11 @@ fi
 if [ -f ".env" ]; then
 
     # Clean Windows line endings from .env if present
-    sed -i 's/\r$//' .env
+    if sed --version 2>/dev/null | grep -q GNU; then
+        sed -i 's/\r$//' .env
+    else
+        sed -i '' 's/\r$//' .env
+    fi
 
     # Read values from .env
     ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
@@ -337,7 +349,7 @@ echo ""
 # Detect domain and email from .env
 ENV_DOMAIN=$(grep "^DOMAIN=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
 ENV_EMAIL=$(grep "^SSL_EMAIL=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
-SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+SERVER_IP=$(get_server_ip)
 
 # Show smart next steps based on current state
 if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then

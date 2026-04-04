@@ -52,7 +52,7 @@ if ! grep -v "^#" "$NGINX_ACTIVE" | grep -q "ssl_certificate"; then
 fi
 
 # ── Step 2: Check DNS for each domain ────────
-SERVER_IP=$(hostname -I | awk '{print $1}')
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || ipconfig getifaddr en0 2>/dev/null || echo "127.0.0.1")
 DOMAINS_TO_ADD=()
 
 for NEW_DOMAIN in "${NEW_DOMAINS[@]}"; do
