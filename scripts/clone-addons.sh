@@ -43,17 +43,23 @@ fi
 echo "Testing access to the ePHEM repository..."
 echo ""
 
-if ssh -T git@github-ephem-addons 2>&1 | grep -qi "successfully authenticated"; then
+SSH_OUTPUT="$(ssh -T git@github-ephem-addons 2>&1 || true)"
+
+if echo "$SSH_OUTPUT" | grep -qi "successfully authenticated"; then
     echo -e "${GREEN}✓${NC} Access granted"
 else
     echo -e "${RED}✗${NC} Access denied."
     echo ""
-    echo "Your deploy key has not been added to the repository yet."
+    echo "SSH output was:"
+    echo "$SSH_OUTPUT"
+    echo ""
+    echo "Your deploy key has not been added to the repository yet,"
+    echo "or your SSH config is not using the expected key."
+    echo ""
     echo "Send your public key to the ePHEM team:"
     echo ""
-    echo -e "${CYAN}$(cat ${DEPLOY_KEY}.pub)${NC}"
+    echo -e "${CYAN}$(cat "${DEPLOY_KEY}.pub")${NC}"
     echo ""
-    echo "Once they confirm, run this script again."
     exit 1
 fi
 
@@ -63,7 +69,11 @@ echo ""
 if [ -d "$ADDONS_DIR/.git" ]; then
     echo "custom-addons/ already has a Git repo. Updating..."
     cd "$ADDONS_DIR"
-    git pull
+
+    git fetch origin "$BRANCH"
+    git checkout "$BRANCH"
+    git pull origin "$BRANCH"
+
     cd "$SCRIPT_DIR"
     echo -e "${GREEN}✓${NC} Custom addons updated"
 else
