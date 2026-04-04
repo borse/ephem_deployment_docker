@@ -190,30 +190,46 @@ fi
 
 # ── Sync odoo.conf with .env settings ───────
 if [ -f "odoo.conf" ] && [ -f ".env" ]; then
-    ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2-)
-    if [ -n "$ADMIN_PASS" ]; then
-        sed -i '/^admin_passwd/d' odoo.conf
-        sed -i '/ODOO_ADMIN_PASSWORD_PLACEHOLDER/d' odoo.conf
+
+    # Clean Windows line endings from .env if present
+    sed -i 's/\r$//' .env
+
+    # Sync admin_passwd
+    ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
+    # Always remove old lines first
+    sed -i '/^admin_passwd/d' odoo.conf
+    sed -i '/ODOO_ADMIN_PASSWORD_PLACEHOLDER/d' odoo.conf
+    if [ -n "$ADMIN_PASS" ] && [ "$ADMIN_PASS" != "CHANGE_ME" ]; then
         echo "admin_passwd = $ADMIN_PASS" >> odoo.conf
         echo -e "${GREEN}✓${NC} Odoo master password synced from .env"
+    else
+        # Fallback — generate a random password so Odoo doesn't complain
+        RANDOM_PASS=$(openssl rand -base64 16 2>/dev/null || echo "ephem-default-$(date +%s)")
+        echo "admin_passwd = $RANDOM_PASS" >> odoo.conf
+        echo -e "${YELLOW}!${NC} ODOO_ADMIN_PASSWORD not set in .env — generated: $RANDOM_PASS"
+        echo -e "${YELLOW}!${NC} Save this password or set ODOO_ADMIN_PASSWORD in .env"
     fi
 
     # Sync dbfilter
-    DB_FILTER=$(grep "^ODOO_DBFILTER=" .env | cut -d'=' -f2-)
+    DB_FILTER=$(grep "^ODOO_DBFILTER=" .env | cut -d'=' -f2- | xargs)
     if [ -n "$DB_FILTER" ]; then
-        # Remove existing dbfilter line if present
         sed -i '/^dbfilter/d' odoo.conf
-        # Append the new value
         echo "dbfilter = $DB_FILTER" >> odoo.conf
         echo -e "${GREEN}✓${NC} Database filter synced from .env: $DB_FILTER"
     fi
 
     # Sync list_db
-    LIST_DB=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2-)
+    LIST_DB=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2- | xargs)
     if [ -n "$LIST_DB" ]; then
         sed -i '/^list_db/d' odoo.conf
         echo "list_db = $LIST_DB" >> odoo.conf
         echo -e "${GREEN}✓${NC} Database listing synced from .env: $LIST_DB"
+    fi
+
+    # Verify admin_passwd exists in odoo.conf (safety net)
+    if ! grep -q "^admin_passwd" odoo.conf; then
+        echo "admin_passwd = ephem-fallback-$(date +%s)" >> odoo.conf
+        echo -e "${RED}!${NC} admin_passwd was missing — added fallback. Set ODOO_ADMIN_PASSWORD in .env"
     fi
 fi
 
