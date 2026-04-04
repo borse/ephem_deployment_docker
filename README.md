@@ -235,7 +235,7 @@ The ePHEM custom modules are hosted in a private repository. When you run `bash 
 
 1. Copy the SSH key shown by the setup script
 2. Email it to **`ephem@who.int`** — include your country or server name in the subject
-3. The ePHEM team will grant read-only access and confirm
+3. The ePHEM team will grant deployment access and confirm
 4. Once confirmed, run `bash setup.sh` again — it will download the modules automatically
 
 **While waiting for access**, ePHEM runs with standard Odoo modules. You can create databases, configure users, and explore the interface. The ePHEM-specific modules will appear in **Apps** after access is granted and setup is re-run.
