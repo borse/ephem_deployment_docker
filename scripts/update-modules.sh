@@ -4,9 +4,9 @@
 # Updates Odoo modules across one or all databases.
 #
 # Usage:
-#   ./scripts/update-modules.sh              (interactive)
+#   ./scripts/update-modules.sh              (interactive — pick modules & databases)
 #   ./scripts/update-modules.sh --auto       (update all modules on all databases)
-#   ./scripts/update-modules.sh --auto --db training-server   (one database only)
+#   ./scripts/update-modules.sh --auto --db training-server
 # ──────────────────────────────────────────────
 
 set -euo pipefail
@@ -19,10 +19,12 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/update_${TIMESTAMP}.log"
 
 # ── Module list (in update order) ────────────
-# Modules are updated in this sequence.
-# Edit this list to add/remove/reorder modules.
 MODULES=(
   "eoc_base"
   "eoc_signals"
@@ -86,19 +88,37 @@ get_databases() {
         2>/dev/null | tr -d '\r'
 }
 
-# ── Update a single module on a single database ─
-run_module_action() {
+# ── Update modules on a database (batch) ─────
+# Runs all selected modules in ONE Odoo command.
+# Much faster than running one command per module.
+run_batch_update() {
     local DB="$1"
-    local MODULE="$2"
-    local ACTION="${3:-update}"
+    shift
+    local MODULE_LIST="$*"
+    local ACTION="${SPECIFIC_ACTION:-update}"
     local FLAG="-u"
 
     if [ "$ACTION" = "install" ]; then
         FLAG="-i"
     fi
 
+    # Join modules with comma for Odoo CLI
+    local MODULES_CSV=$(echo "$MODULE_LIST" | tr ' ' ',')
+
+    echo -e "  ${BOLD}Modules:${NC} $MODULES_CSV"
+    echo -e "  ${BOLD}Action:${NC}  $ACTION"
+    echo ""
+
+    # Run with live output — user can see progress
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T odoo \
-        odoo $FLAG "$MODULE" -d "$DB" --stop-after-init --no-http 2>&1
+        odoo $FLAG "$MODULES_CSV" -d "$DB" --stop-after-init --no-http 2>&1 | \
+        tee -a "$LOG_FILE" | \
+        grep --line-buffered -E "INFO|WARNING|ERROR|CRITICAL|Loading|loading|Updat|updat|instal" | \
+        sed 's/^/    /'
+
+    # Check exit code from the pipe
+    local EXIT_CODE=${PIPESTATUS[0]}
+    return $EXIT_CODE
 }
 
 # ── Print header ─────────────────────────────
@@ -106,6 +126,8 @@ echo ""
 echo "========================================="
 echo "  ePHEM — Module Update"
 echo "========================================="
+echo ""
+echo -e "Log file: ${CYAN}$LOG_FILE${NC}"
 echo ""
 
 # ── Get database list ────────────────────────
@@ -120,61 +142,47 @@ if [ ${#DATABASES[@]} -eq 0 ]; then
     exit 1
 fi
 
-# ── Determine action ────────────────────────
-ACTION="update"
-if [ -n "$SPECIFIC_ACTION" ]; then
-    ACTION="$SPECIFIC_ACTION"
-fi
+ACTION="${SPECIFIC_ACTION:-update}"
 
 # ── AUTO MODE ────────────────────────────────
 if [ "$AUTO_MODE" = true ]; then
-    echo -e "${BOLD}Mode:${NC}      Auto (all modules, all databases)"
+    echo -e "${BOLD}Mode:${NC}      Auto"
     echo -e "${BOLD}Action:${NC}    ${ACTION}"
     echo -e "${BOLD}Databases:${NC} ${DATABASES[*]}"
-    echo -e "${BOLD}Modules:${NC}   ${#MODULES[@]} modules"
+    echo -e "${BOLD}Modules:${NC}   ${#MODULES[@]} modules (batch)"
     echo ""
 
-    TOTAL=$((${#DATABASES[@]} * ${#MODULES[@]}))
-    CURRENT=0
-    FAILED=0
-    FAILED_LIST=()
+    FAILED_DBS=()
 
     for DB in "${DATABASES[@]}"; do
         echo ""
-        echo -e "${CYAN}━━━ Database: $DB ━━━${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  Database: $DB${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
 
-        for MODULE in "${MODULES[@]}"; do
-            CURRENT=$((CURRENT + 1))
-            PROGRESS="[$CURRENT/$TOTAL]"
-            echo -n -e "  $PROGRESS ${ACTION^}ing ${BOLD}$MODULE${NC}... "
+        echo "--- $DB ---" >> "$LOG_FILE"
 
-            OUTPUT=$(run_module_action "$DB" "$MODULE" "$ACTION" 2>&1)
-
-            if echo "$OUTPUT" | grep -q "ERROR\|Traceback\|CRITICAL"; then
-                echo -e "${RED}✗${NC}"
-                FAILED=$((FAILED + 1))
-                FAILED_LIST+=("$DB:$MODULE")
-            else
-                echo -e "${GREEN}✓${NC}"
-            fi
-        done
+        if run_batch_update "$DB" "${MODULES[@]}"; then
+            echo ""
+            echo -e "  ${GREEN}✓ $DB completed${NC}"
+        else
+            echo ""
+            echo -e "  ${RED}✗ $DB had errors (check log)${NC}"
+            FAILED_DBS+=("$DB")
+        fi
     done
 
-    # Summary
     echo ""
     echo "========================================="
-    SUCCEEDED=$((TOTAL - FAILED))
-    echo -e "${GREEN}✓ Completed: $SUCCEEDED succeeded${NC}"
+    echo -e "${GREEN}✓ Update complete${NC}"
 
-    if [ $FAILED -gt 0 ]; then
-        echo -e "${RED}✗ Failed: $FAILED${NC}"
-        echo ""
-        echo "Failed modules:"
-        for f in "${FAILED_LIST[@]}"; do
-            echo "  - $f"
-        done
+    if [ ${#FAILED_DBS[@]} -gt 0 ]; then
+        echo -e "${RED}  Databases with errors: ${FAILED_DBS[*]}${NC}"
     fi
 
+    echo ""
+    echo -e "Full log: ${CYAN}$LOG_FILE${NC}"
     echo "========================================="
     echo ""
     echo "Restarting Odoo..."
@@ -256,11 +264,12 @@ if [ ${#SELECTED_MODULES[@]} -eq 0 ]; then
 fi
 
 # Step 4: Confirm
+MODULES_CSV=$(echo "${SELECTED_MODULES[*]}" | tr ' ' ',')
 echo ""
 echo "─────────────────────────────────────────"
 echo -e "${BOLD}Action:${NC}    ${ACTION}"
 echo -e "${BOLD}Databases:${NC} ${SELECTED_DBS[*]}"
-echo -e "${BOLD}Modules:${NC}   ${SELECTED_MODULES[*]}"
+echo -e "${BOLD}Modules:${NC}   $MODULES_CSV"
 echo "─────────────────────────────────────────"
 echo ""
 read -p "Proceed? (y/n) " -n 1 -r
@@ -271,53 +280,42 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Step 5: Execute
+# Step 5: Execute (batch per database)
 echo ""
 
-TOTAL=$((${#SELECTED_DBS[@]} * ${#SELECTED_MODULES[@]}))
-CURRENT=0
-FAILED=0
-FAILED_LIST=()
+FAILED_DBS=()
 
 for DB in "${SELECTED_DBS[@]}"; do
     echo ""
-    echo -e "${CYAN}━━━ Database: $DB ━━━${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  Database: $DB${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
 
-    for MODULE in "${SELECTED_MODULES[@]}"; do
-        CURRENT=$((CURRENT + 1))
-        PROGRESS="[$CURRENT/$TOTAL]"
-        echo -n -e "  $PROGRESS ${ACTION^}ing ${BOLD}$MODULE${NC}... "
+    SPECIFIC_ACTION="$ACTION"
+    echo "--- $DB ---" >> "$LOG_FILE"
 
-        OUTPUT=$(run_module_action "$DB" "$MODULE" "$ACTION" 2>&1)
-
-        if echo "$OUTPUT" | grep -q "ERROR\|Traceback\|CRITICAL"; then
-            echo -e "${RED}✗${NC}"
-            FAILED=$((FAILED + 1))
-            FAILED_LIST+=("$DB:$MODULE")
-
-            # Show error details
-            echo "$OUTPUT" | grep -E "ERROR|Traceback|CRITICAL" | head -3 | sed 's/^/    /'
-        else
-            echo -e "${GREEN}✓${NC}"
-        fi
-    done
+    if run_batch_update "$DB" "${SELECTED_MODULES[@]}"; then
+        echo ""
+        echo -e "  ${GREEN}✓ $DB completed${NC}"
+    else
+        echo ""
+        echo -e "  ${RED}✗ $DB had errors (check log)${NC}"
+        FAILED_DBS+=("$DB")
+    fi
 done
 
 # Summary
 echo ""
 echo "========================================="
-SUCCEEDED=$((TOTAL - FAILED))
-echo -e "${GREEN}✓ Completed: $SUCCEEDED succeeded${NC}"
+echo -e "${GREEN}✓ Update complete${NC}"
 
-if [ $FAILED -gt 0 ]; then
-    echo -e "${RED}✗ Failed: $FAILED${NC}"
-    echo ""
-    echo "Failed modules:"
-    for f in "${FAILED_LIST[@]}"; do
-        echo "  - $f"
-    done
+if [ ${#FAILED_DBS[@]} -gt 0 ]; then
+    echo -e "${RED}  Databases with errors: ${FAILED_DBS[*]}${NC}"
 fi
 
+echo ""
+echo -e "Full log: ${CYAN}$LOG_FILE${NC}"
 echo "========================================="
 echo ""
 echo "Restarting Odoo..."
