@@ -333,8 +333,9 @@ echo "========================================="
 echo -e "${GREEN}ePHEM is running!${NC}"
 echo ""
 
-# Detect domain from .env
+# Detect domain and email from .env
 ENV_DOMAIN=$(grep "^DOMAIN=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
+ENV_EMAIL=$(grep "^SSL_EMAIL=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 
 # Show smart next steps based on current state
@@ -349,7 +350,7 @@ elif [ -n "$ENV_DOMAIN" ]; then
     echo "  http://$ENV_DOMAIN"
     echo ""
     echo "To enable HTTPS, run:"
-    echo "  bash scripts/ssl-setup.sh $ENV_DOMAIN ${SSL_EMAIL:-admin@$ENV_DOMAIN}"
+    echo "  bash scripts/ssl-setup.sh $ENV_DOMAIN $ENV_EMAIL"
 else
     # No domain — IP-only mode
     echo "Your site is available at:"
