@@ -97,17 +97,45 @@ else
     elif git clone https://github.com/borse/ePHEM.git custom-addons 2>/dev/null; then
         echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else
-        # Can't access — continue without custom addons
+        # Can't access — auto-generate deploy key
         mkdir -p custom-addons
-        echo -e "${YELLOW}!${NC} Could not download ePHEM modules (private repo)"
-        echo ""
-        echo "  ePHEM will start without custom modules."
-        echo "  To get access, run:"
-        echo "    bash scripts/request-addons-access.sh"
-        echo ""
-        echo "  After the ePHEM team adds your key, run:"
-        echo "    bash scripts/clone-addons.sh"
-        echo ""
+        NEEDS_ADDONS_ACCESS=true
+
+        DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
+
+        if [ ! -f "$DEPLOY_KEY" ]; then
+            echo -e "${YELLOW}!${NC} Generating deploy key for ePHEM addons..."
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+
+            # Get server identifier
+            SERVER_NAME=$(hostname 2>/dev/null || echo "unknown")
+
+            ssh-keygen -t ed25519 -f "$DEPLOY_KEY" -C "ephem-addons-${SERVER_NAME}" -N "" -q
+            chmod 600 "$DEPLOY_KEY"
+            chmod 644 "${DEPLOY_KEY}.pub"
+
+            # Configure SSH host alias
+            if ! grep -q "github-ephem-addons" "$HOME/.ssh/config" 2>/dev/null; then
+                cat >> "$HOME/.ssh/config" << SSHEOF
+
+Host github-ephem-addons
+    HostName github.com
+    User git
+    IdentityFile $DEPLOY_KEY
+    IdentitiesOnly yes
+SSHEOF
+                chmod 600 "$HOME/.ssh/config"
+            fi
+
+            # Trust GitHub host key
+            if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
+                ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+                chmod 644 ~/.ssh/known_hosts
+            fi
+
+            echo -e "${GREEN}✓${NC} Deploy key generated"
+        fi
     fi
 fi
 
@@ -277,3 +305,35 @@ else
     echo "Then run: bash scripts/ssl-setup.sh yourdomain.com your@email.com"
 fi
 echo ""
+
+# ── Show deploy key if addons access is needed ─
+if [ "${NEEDS_ADDONS_ACCESS:-false}" = true ] && [ -f "$HOME/.ssh/ephem_addons_deploy.pub" ]; then
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  ePHEM CUSTOM MODULES — ACTION REQUIRED${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "  ePHEM is running, but without custom modules."
+    echo "  To get the ePHEM modules, send the key below to:"
+    echo ""
+    echo -e "  ${BOLD}${CYAN}ephem@who.int${NC}"
+    echo ""
+    echo -e "  ${BOLD}Include your country/server name in the email subject.${NC}"
+    echo ""
+    echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${GREEN}║  COPY EVERYTHING BETWEEN THE LINES AND PASTE IN YOUR EMAIL  ║${NC}"
+    echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${CYAN}$(cat $HOME/.ssh/ephem_addons_deploy.pub)${NC}"
+    echo ""
+    echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${GREEN}║  END OF KEY                                                 ║${NC}"
+    echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "  Once the ePHEM team confirms your key has been added, run:"
+    echo ""
+    echo -e "  ${BOLD}bash scripts/clone-addons.sh${NC}"
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+fi
