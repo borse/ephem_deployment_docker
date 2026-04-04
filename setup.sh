@@ -76,17 +76,38 @@ else
 fi
 
 # ── Check custom-addons ──────────────────────
-if [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v README)" ]; then
+if [ -d "custom-addons/.git" ]; then
+    echo -e "${GREEN}✓${NC} custom-addons/ has modules (Git repo)"
+elif [ -d "custom-addons" ] && [ "$(ls -A custom-addons/ 2>/dev/null | grep -v README)" ]; then
     echo -e "${GREEN}✓${NC} custom-addons/ has modules"
 else
-    echo -e "${YELLOW}!${NC} custom-addons/ is empty — cloning ePHEM modules..."
+    echo -e "${YELLOW}!${NC} custom-addons/ is empty — attempting to download ePHEM modules..."
     rm -rf custom-addons
-    git clone git@github.com:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons
-    if [ $? -eq 0 ]; then
+
+    # Try 1: Private repo via deploy key
+    if [ -f "$HOME/.ssh/ephem_addons_deploy" ] && ssh -T git@github-ephem-addons 2>&1 | grep -qi "successfully"; then
+        git clone git@github-ephem-addons:borse/ePHEM.git --depth 1 --branch 18_national_dev --single-branch custom-addons 2>/dev/null
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}✓${NC} ePHEM modules downloaded (private repo)"
+        else
+            echo -e "${RED}✗${NC} Failed to clone. Check deploy key access."
+            mkdir -p custom-addons
+        fi
+    # Try 2: Public repo
+    elif git clone https://github.com/borse/ePHEM.git custom-addons 2>/dev/null; then
         echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
     else
-        echo -e "${RED}✗${NC} Failed to clone ePHEM. Check your internet connection."
-        ERRORS=$((ERRORS + 1))
+        # Can't access — continue without custom addons
+        mkdir -p custom-addons
+        echo -e "${YELLOW}!${NC} Could not download ePHEM modules (private repo)"
+        echo ""
+        echo "  ePHEM will start without custom modules."
+        echo "  To get access, run:"
+        echo "    bash scripts/request-addons-access.sh"
+        echo ""
+        echo "  After the ePHEM team adds your key, run:"
+        echo "    bash scripts/clone-addons.sh"
+        echo ""
     fi
 fi
 
@@ -114,6 +135,14 @@ fi
 if [ -f "scripts/update-modules.sh" ]; then
     chmod +x scripts/update-modules.sh
     echo -e "${GREEN}✓${NC} Update modules script is ready"
+fi
+
+if [ -f "scripts/request-addons-access.sh" ]; then
+    chmod +x scripts/request-addons-access.sh
+fi
+
+if [ -f "scripts/clone-addons.sh" ]; then
+    chmod +x scripts/clone-addons.sh
 fi
 
 # ── Sync odoo.conf with .env settings ───────

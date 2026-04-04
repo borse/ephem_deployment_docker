@@ -20,6 +20,11 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
   - [Step 4 — Run the Setup Script](#step-4--run-the-setup-script)
   - [Step 5 — Set Up SSL (HTTPS)](#step-5--set-up-ssl-https)
   - [Step 6 — Open ePHEM in Your Browser](#step-6--open-ephem-in-your-browser)
+- [Custom Addons (Private Repository)](#custom-addons-private-repository)
+  - [Requesting Access](#requesting-access)
+  - [Downloading the Addons](#downloading-the-addons)
+  - [Using ePHEM Without Custom Addons](#using-ephem-without-custom-addons)
+  - [Updating Custom Addons](#updating-custom-addons)
 - [Adding Domains](#adding-domains)
   - [Adding a Single Domain](#adding-a-single-domain)
   - [Adding Multiple Domains at Once](#adding-multiple-domains-at-once)
@@ -245,6 +250,62 @@ Click **Create Database** (takes 1–2 minutes).
 After login, go to **Apps → Update Apps List** and install the ePHEM modules.
 
 🎉 **ePHEM is running!**
+
+---
+
+## Custom Addons (Private Repository)
+
+The ePHEM custom modules are in a private repository. If `setup.sh` cannot download them automatically, you'll need to request access.
+
+### Requesting Access
+
+Run the access request script:
+
+```bash
+bash scripts/request-addons-access.sh
+```
+
+The script will:
+
+1. Generate a unique SSH deploy key for your server
+2. Configure SSH to use it with GitHub
+3. Display your public key
+
+**Send the public key to the ePHEM team at `ephem@who.int`** — include your country or server name in the email subject. They will add it to the repository (read-only access).
+
+### Downloading the Addons
+
+Once the ePHEM team confirms your key has been added:
+
+```bash
+bash scripts/clone-addons.sh
+```
+
+This clones the addons and restarts Odoo. Go to **Apps → Update Apps List** to see the ePHEM modules.
+
+### Using ePHEM Without Custom Addons
+
+You can start using Odoo immediately while waiting for access — just run `bash setup.sh`. The system works with standard Odoo modules. The ePHEM-specific modules can be added later without reinstalling.
+
+### Updating Custom Addons
+
+After access is set up, update the addons with:
+
+```bash
+cd custom-addons
+```
+
+```bash
+git pull
+```
+
+```bash
+cd ..
+```
+
+```bash
+docker compose restart odoo
+```
 
 ---
 
@@ -653,10 +714,13 @@ ephem-deploy/
 ├── custom-addons/           ← ePHEM modules (from github.com/borse/ePHEM)
 │
 ├── scripts/
-│   ├── backup.sh            ← Backup all databases and filestore
-│   ├── ssl-setup.sh         ← Set up SSL certificates (run once)
-│   ├── add-domain.sh        ← Add new domains (training, simex, etc.)
-│   └── duplicate-db.sh      ← Copy a database into multiple new ones
+│   ├── backup.sh              ← Backup all databases and filestore
+│   ├── ssl-setup.sh           ← Set up SSL certificates (run once)
+│   ├── add-domain.sh          ← Add new domains (training, simex, etc.)
+│   ├── duplicate-db.sh        ← Copy a database into multiple new ones
+│   ├── update-modules.sh      ← Update/install Odoo modules across databases
+│   ├── request-addons-access.sh ← Generate deploy key for private addons repo
+│   └── clone-addons.sh        ← Clone addons after access is granted
 │
 └── backups/                 ← Backup files (git-ignored)
 ```
