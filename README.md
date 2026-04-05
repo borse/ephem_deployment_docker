@@ -35,6 +35,7 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
 - [Backups](#backups)
 - [Day-to-Day Commands](#day-to-day-commands)
 - [Troubleshooting](#troubleshooting)
+- [Uninstalling ePHEM](#uninstalling-ephem)
 - [File Structure](#file-structure)
 - [Security Notes](#security-notes)
 - [Need Help?](#need-help)
@@ -545,6 +546,112 @@ rm -f nginx/active.conf
 ```bash
 bash setup.sh
 ```
+
+---
+
+## Uninstalling ePHEM
+
+### Linux
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+docker compose down -v
+```
+
+```bash
+docker rmi borrs/ephem:latest nginx:alpine postgres:16-alpine certbot/certbot
+```
+
+```bash
+cd ~
+```
+
+```bash
+rm -rf ephem-deploy
+```
+
+To also remove Docker:
+
+```bash
+sudo apt remove -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+```
+
+### Mac
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+docker compose down -v
+```
+
+```bash
+docker rmi borrs/ephem:latest nginx:alpine postgres:16-alpine certbot/certbot
+```
+
+```bash
+cd ~
+```
+
+```bash
+rm -rf ephem-deploy
+```
+
+To also remove Docker, open **Docker Desktop → Settings → Uninstall**, or drag Docker Desktop to Trash from Applications.
+
+### Windows
+
+**Option A — If you used WSL** (recommended):
+
+Open a WSL terminal and run:
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+docker compose down -v
+```
+
+```bash
+docker rmi borrs/ephem:latest nginx:alpine postgres:16-alpine certbot/certbot
+```
+
+```bash
+cd ~
+```
+
+```bash
+rm -rf ephem-deploy
+```
+
+**Option B — If you used PowerShell:**
+
+```powershell
+cd C:\Users\YOUR_USERNAME\ephem-deploy
+```
+
+```powershell
+docker compose down -v
+```
+
+```powershell
+docker rmi borrs/ephem:latest nginx:alpine postgres:16-alpine certbot/certbot
+```
+
+```powershell
+cd ..
+```
+
+```powershell
+Remove-Item -Recurse -Force ephem-deploy
+```
+
+To also remove Docker, go to **Windows Settings → Apps → Docker Desktop → Uninstall**.
 
 ---
 
