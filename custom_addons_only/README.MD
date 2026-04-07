@@ -77,17 +77,38 @@ cd ephem-tools/custom_addons_only
 
 ### Step 2 — Run the Script
 
-**Auto-detect** the addons folder (works if Odoo is in a standard location):
-
 ```bash
-bash setup_ephem_repo.sh
+bash setup-ephem-repo.sh
 ```
 
-**Or specify the path** to your custom addons folder:
+The script will ask you two questions:
 
-```bash
-bash setup_ephem_repo.sh /opt/odoo18/custom-addons
+**1. Where to install the modules:**
+
 ```
+Where should the ePHEM modules be installed?
+
+  Detected: /opt/odoo18/custom-addons
+
+Enter path (press Enter to use detected path):
+```
+
+If it detects your Odoo installation, just press `Enter`. Otherwise, type the full path.
+
+**2. Which branch to use:**
+
+```
+Which branch do you want to use?
+
+  1) 18_national_dev       — Odoo 18 development (recommended)
+  2) 18_national_master    — Odoo 18 stable
+  3) 16_national_dev       — Odoo 16 development
+  4) 16_national_master    — Odoo 16 stable
+
+Choose [1-4] (default: 1):
+```
+
+Press `Enter` for the default (Odoo 18 development), or choose another option.
 
 > **First run:** The script will generate an SSH key and display it. It will NOT clone the repo yet — you need to request access first.
 
@@ -125,10 +146,10 @@ The script shows your SSH public key at the end:
 Once the ePHEM team confirms your access:
 
 ```bash
-bash setup_ephem_repo.sh
+bash setup-ephem-repo.sh
 ```
 
-The script will detect the key, verify access, and clone the ePHEM modules automatically.
+The script remembers your settings. It will verify access, clone the modules, set permissions, and confirm.
 
 ### Step 5 — Restart Odoo
 
@@ -155,14 +176,10 @@ Then open Odoo in your browser, go to **Apps → Update Apps List**, and install
 Run the same script to pull the latest changes:
 
 ```bash
-bash setup_ephem_repo.sh
+bash setup-ephem-repo.sh
 ```
 
-Or specify the path:
-
-```bash
-bash setup_ephem_repo.sh /opt/odoo18/custom-addons
-```
+It will ask for the path and branch again (defaults to your previous choices), then pull the latest code.
 
 Then restart Odoo:
 
@@ -178,59 +195,14 @@ Go to **Apps → Update Apps List** and upgrade the modules.
 
 The ePHEM repository has branches for different Odoo versions and environments:
 
-| Branch | Odoo Version | Purpose |
-|--------|-------------|---------|
-| `18_national_dev` | 18 | Development (default) |
-| `18_national_master` | 18 | Stable / production |
-| `16_national_dev` | 16 | Development |
-| `16_national_master` | 16 | Stable / production |
+| Option | Branch | Odoo Version | Purpose |
+|--------|--------|-------------|---------|
+| 1 | `18_national_dev` | 18 | Development (default) |
+| 2 | `18_national_master` | 18 | Stable / production |
+| 3 | `16_national_dev` | 16 | Development |
+| 4 | `16_national_master` | 16 | Stable / production |
 
-Switch branches with the `--branch` flag:
-
-```bash
-bash setup_ephem_repo.sh --branch 16_national_master /opt/odoo16/odca-national-master
-```
-
-```bash
-bash setup_ephem_repo.sh --branch 18_national_master /opt/odoo18/custom-addons
-```
-
----
-
-## Examples
-
-**Odoo 18 — standard install:**
-
-```bash
-bash setup_ephem_repo.sh /opt/odoo18/custom-addons
-```
-
-**Odoo 18 — stable branch:**
-
-```bash
-bash setup_ephem_repo.sh --branch 18_national_master /opt/odoo18/custom-addons
-```
-
-**Odoo 16 — existing server:**
-
-```bash
-bash setup_ephem_repo.sh --branch 16_national_master /opt/odoo16/odca-national-master
-```
-
-**Auto-detect path:**
-
-```bash
-bash setup_ephem_repo.sh
-```
-
-The script checks these locations automatically:
-
-- `/opt/odoo18/custom-addons`
-- `/opt/odoo/custom-addons`
-- `/opt/odoo16/odca-national-master`
-- `/opt/odoo16/custom-addons`
-
-If none are found, it asks you to enter the path.
+The script asks you to choose when you run it.
 
 ---
 
@@ -271,7 +243,7 @@ It should contain a `Host github-ephem-addons` section. If missing, run the scri
 The script couldn't find a standard Odoo installation. Specify the path manually:
 
 ```bash
-bash setup_ephem_repo.sh /your/custom/addons/path
+bash setup-ephem-repo.sh /your/custom/addons/path
 ```
 
 ### Permission errors after cloning
@@ -311,7 +283,7 @@ nano ~/.ssh/config
 Then re-run:
 
 ```bash
-bash setup_ephem_repo.sh
+bash setup-ephem-repo.sh
 ```
 
 ---

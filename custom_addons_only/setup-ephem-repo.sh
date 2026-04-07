@@ -7,9 +7,7 @@
 # server with Odoo installed (no Docker required).
 #
 # Usage:
-#   bash setup_ephem_repo.sh                        (auto-detect addons path)
-#   bash setup_ephem_repo.sh /opt/odoo/custom-addons (specify path)
-#   bash setup_ephem_repo.sh --branch 16_national_master /opt/odoo16/odca
+#   bash setup-ephem-repo.sh
 # ──────────────────────────────────────────────
 
 set -euo pipefail
@@ -24,88 +22,75 @@ NC='\033[0m'
 DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
 SSH_CONFIG="$HOME/.ssh/config"
 REPO="git@github-ephem-addons:borse/ePHEM.git"
-DEFAULT_BRANCH="18_national_dev"
-
-# ── Parse arguments ──────────────────────────
-BRANCH="$DEFAULT_BRANCH"
-ADDONS_PATH=""
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --branch|-b) BRANCH="$2"; shift 2 ;;
-        --help|-h)
-            echo ""
-            echo "Usage: bash setup_ephem_repo.sh [OPTIONS] [ADDONS_PATH]"
-            echo ""
-            echo "Options:"
-            echo "  --branch, -b BRANCH   Git branch to clone (default: $DEFAULT_BRANCH)"
-            echo "  --help, -h            Show this help"
-            echo ""
-            echo "Examples:"
-            echo "  bash setup_ephem_repo.sh"
-            echo "  bash setup_ephem_repo.sh /opt/odoo/custom-addons"
-            echo "  bash setup_ephem_repo.sh --branch 16_national_master /opt/odoo16/odca"
-            echo "  bash setup_ephem_repo.sh -b 18_national_dev /opt/odoo18/custom-addons"
-            echo ""
-            echo "Available branches:"
-            echo "  18_national_dev          Odoo 18 development"
-            echo "  18_national_master       Odoo 18 stable"
-            echo "  16_national_dev          Odoo 16 development"
-            echo "  16_national_master       Odoo 16 stable"
-            echo ""
-            exit 0
-            ;;
-        *) ADDONS_PATH="$1"; shift ;;
-    esac
-done
-
-# Cross-platform IP detection
-get_server_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}' ||
-    ipconfig getifaddr en0 2>/dev/null ||
-    ip route get 1 2>/dev/null | awk '{print $7; exit}' ||
-    echo "127.0.0.1"
-}
 
 echo ""
 echo "========================================="
 echo "  ePHEM — Custom Addons Setup"
 echo "========================================="
 echo ""
-echo -e "Branch: ${BOLD}$BRANCH${NC}"
 
-# ── Step 1: Determine addons path ────────────
-if [ -z "$ADDONS_PATH" ]; then
-    # Try to auto-detect from common locations
-    if [ -d "/opt/odoo18/custom-addons" ]; then
-        ADDONS_PATH="/opt/odoo18/custom-addons"
-    elif [ -d "/opt/odoo/custom-addons" ]; then
-        ADDONS_PATH="/opt/odoo/custom-addons"
-    elif [ -d "/opt/odoo16/odca-national-master" ]; then
-        ADDONS_PATH="/opt/odoo16/odca-national-master"
-    elif [ -d "/opt/odoo16/custom-addons" ]; then
-        ADDONS_PATH="/opt/odoo16/custom-addons"
-    else
-        echo ""
-        echo -e "${YELLOW}!${NC} Could not auto-detect addons path."
-        echo ""
-        echo "Common locations:"
-        echo "  /opt/odoo18/custom-addons"
-        echo "  /opt/odoo/custom-addons"
-        echo "  /opt/odoo16/odca-national-master"
-        echo ""
-        read -p "Enter the full path to your custom addons folder: " ADDONS_PATH
-        if [ -z "$ADDONS_PATH" ]; then
-            echo -e "${RED}✗${NC} No path provided."
-            exit 1
-        fi
-    fi
+# ── Step 1: Ask for addons path ──────────────
+# Check common locations and suggest a default
+DEFAULT_PATH=""
+if [ -d "/opt/odoo18/custom-addons" ]; then
+    DEFAULT_PATH="/opt/odoo18/custom-addons"
+elif [ -d "/opt/odoo/custom-addons" ]; then
+    DEFAULT_PATH="/opt/odoo/custom-addons"
+elif [ -d "/opt/odoo16/odca-national-master" ]; then
+    DEFAULT_PATH="/opt/odoo16/odca-national-master"
+elif [ -d "/opt/odoo16/custom-addons" ]; then
+    DEFAULT_PATH="/opt/odoo16/custom-addons"
 fi
 
-echo -e "Path:   ${BOLD}$ADDONS_PATH${NC}"
+echo "Where should the ePHEM modules be installed?"
+echo ""
+if [ -n "$DEFAULT_PATH" ]; then
+    echo -e "  Detected: ${CYAN}$DEFAULT_PATH${NC}"
+    echo ""
+    read -p "Enter path (press Enter to use detected path): " USER_PATH
+    ADDONS_PATH="${USER_PATH:-$DEFAULT_PATH}"
+else
+    echo "  Common locations:"
+    echo "    /opt/odoo18/custom-addons"
+    echo "    /opt/odoo/custom-addons"
+    echo "    /opt/odoo16/odca-national-master"
+    echo ""
+    read -p "Enter the full path to your custom addons folder: " ADDONS_PATH
+fi
+
+if [ -z "$ADDONS_PATH" ]; then
+    echo -e "${RED}✗${NC} No path provided."
+    exit 1
+fi
+
 echo ""
 
-# ── Step 2: Generate SSH deploy key ──────────
+# ── Step 2: Ask for branch ───────────────────
+echo "Which branch do you want to use?"
+echo ""
+echo "  1) 18_national_dev       — Odoo 18 development (recommended)"
+echo "  2) 18_national_master    — Odoo 18 stable"
+echo "  3) 16_national_dev       — Odoo 16 development"
+echo "  4) 16_national_master    — Odoo 16 stable"
+echo ""
+read -p "Choose [1-4] (default: 1): " BRANCH_CHOICE
+
+case "${BRANCH_CHOICE:-1}" in
+    1) BRANCH="18_national_dev" ;;
+    2) BRANCH="18_national_master" ;;
+    3) BRANCH="16_national_dev" ;;
+    4) BRANCH="16_national_master" ;;
+    *) BRANCH="18_national_dev" ;;
+esac
+
+echo ""
+echo "─────────────────────────────────────────"
+echo -e "${BOLD}Path:${NC}   $ADDONS_PATH"
+echo -e "${BOLD}Branch:${NC} $BRANCH"
+echo "─────────────────────────────────────────"
+echo ""
+
+# ── Step 3: Generate SSH deploy key ──────────
 if [ -f "$DEPLOY_KEY" ]; then
     echo -e "${GREEN}✓${NC} Deploy key already exists"
 else
@@ -123,7 +108,7 @@ else
     echo -e "${GREEN}✓${NC} Deploy key generated"
 fi
 
-# ── Step 3: Configure SSH ────────────────────
+# ── Step 4: Configure SSH ────────────────────
 if ! grep -q "github-ephem-addons" "$SSH_CONFIG" 2>/dev/null; then
     cat >> "$SSH_CONFIG" << SSHEOF
 
@@ -146,7 +131,7 @@ if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
     echo -e "${GREEN}✓${NC} GitHub host key trusted"
 fi
 
-# ── Step 4: Test SSH access ──────────────────
+# ── Step 5: Test SSH access ──────────────────
 echo ""
 echo "Testing access to the ePHEM repository..."
 
@@ -180,14 +165,14 @@ else
     echo ""
     echo "  Once the ePHEM team confirms, run this script again:"
     echo ""
-    echo -e "  ${BOLD}bash setup_ephem_repo.sh $ADDONS_PATH${NC}"
+    echo -e "  ${BOLD}bash setup-ephem-repo.sh${NC}"
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     exit 0
 fi
 
-# ── Step 5: Clone or update the repo ─────────
+# ── Step 6: Clone or update the repo ─────────
 echo ""
 
 if [ -d "$ADDONS_PATH/.git" ]; then
@@ -233,7 +218,7 @@ else
     echo -e "${GREEN}✓${NC} ePHEM addons cloned (branch: $BRANCH)"
 fi
 
-# ── Step 6: Fix permissions ──────────────────
+# ── Step 7: Fix permissions ──────────────────
 # Detect the Odoo user
 ODOO_USER=""
 for u in odoo odoo18 odoo16; do
@@ -253,7 +238,7 @@ else
     echo -e "${GREEN}✓${NC} Permissions set"
 fi
 
-# ── Step 7: Mark as safe directory for Git ───
+# ── Step 8: Mark as safe directory for Git ───
 git config --global --add safe.directory "$ADDONS_PATH" 2>/dev/null || true
 
 # ── Summary ──────────────────────────────────
@@ -263,12 +248,11 @@ echo -e "${GREEN}✓ ePHEM addons are ready!${NC}"
 echo ""
 echo "  Path:   $ADDONS_PATH"
 echo "  Branch: $BRANCH"
-echo ""
 
 # Count modules
 MODULE_COUNT=$(find "$ADDONS_PATH" -maxdepth 1 -name "__manifest__.py" -o -name "__openerp__.py" 2>/dev/null | wc -l)
 if [ "$MODULE_COUNT" -gt 0 ]; then
-    echo "  Modules found: $MODULE_COUNT"
+    echo "  Modules: $MODULE_COUNT"
 fi
 
 echo ""
@@ -277,7 +261,7 @@ echo "  1. Restart Odoo to load the new modules"
 echo "  2. Go to Apps → Update Apps List"
 echo "  3. Install the ePHEM modules"
 echo ""
-echo "To update later:"
-echo "  bash setup_ephem_repo.sh $ADDONS_PATH"
+echo "To update later, run this script again:"
+echo "  bash setup-ephem-repo.sh"
 echo "========================================="
 echo ""
