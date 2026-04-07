@@ -35,6 +35,13 @@ Deploy ePHEM on your server by following this guide step by step. No Docker expe
 - [Backups](#backups)
 - [Day-to-Day Commands](#day-to-day-commands)
 - [Troubleshooting](#troubleshooting)
+- [Developer Guide](#developer-guide)
+  - [Setup](#setup)
+  - [Open in PyCharm](#open-in-pycharm)
+  - [Development Cycle](#development-cycle)
+  - [Viewing Logs](#viewing-logs)
+  - [Useful Developer Commands](#useful-developer-commands)
+  - [Git Workflow](#git-workflow)
 - [Uninstalling ePHEM](#uninstalling-ephem)
 - [File Structure](#file-structure)
 - [Security Notes](#security-notes)
@@ -549,6 +556,212 @@ bash setup.sh
 
 ---
 
+## Developer Guide
+
+This section is for developers who want to work on ePHEM modules locally — editing code, testing changes, and pushing updates.
+
+### Prerequisites
+
+- **Docker Desktop** — [Mac](https://docs.docker.com/desktop/install/mac-install/) · [Windows](https://docs.docker.com/desktop/install/windows-install/) · [Linux](https://docs.docker.com/desktop/install/linux-install/)
+- **PyCharm** — [Community Edition](https://www.jetbrains.com/pycharm/download/) (free) or Professional
+- **Git** — usually pre-installed on Mac/Linux. Windows: install via [git-scm.com](https://git-scm.com/download/win) or use WSL
+
+> **Windows developers:** Use **WSL** (Windows Subsystem for Linux) for all terminal commands. PyCharm can open folders inside WSL natively.
+
+### Setup
+
+**1. Clone the deployment repo:**
+
+```bash
+git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
+```
+
+```bash
+cd ephem-deploy
+```
+
+**2. Configure for local development:**
+
+```bash
+cp .env.example .env
+```
+
+```bash
+nano .env
+```
+
+Set simple values for local development:
+
+```env
+POSTGRES_PASSWORD=dev
+ODOO_ADMIN_PASSWORD=dev
+DOMAIN=
+```
+
+Save and exit.
+
+**3. Clone the ePHEM addons** (requires deploy key access — see [ePHEM Custom Modules](#ephem-custom-modules)):
+
+```bash
+rm -rf custom-addons
+```
+
+```bash
+git clone git@github-ephem-addons:borse/ePHEM.git custom-addons
+```
+
+```bash
+cd custom-addons
+```
+
+```bash
+git checkout 18_national_dev
+```
+
+```bash
+cd ..
+```
+
+**4. Start ePHEM:**
+
+```bash
+bash setup.sh
+```
+
+Once running, open `http://localhost` or `http://YOUR_LOCAL_IP` in your browser.
+
+### Open in PyCharm
+
+1. Open PyCharm
+2. Go to **File → Open**
+3. Select the `ephem-deploy/custom-addons` folder
+4. PyCharm opens with all ePHEM modules visible in the project tree
+
+> **Windows + WSL:** In PyCharm, go to **File → Open** and navigate to `\\wsl$\Ubuntu\home\YOUR_USERNAME\ephem-deploy\custom-addons`
+
+Your project structure in PyCharm should look like:
+
+```
+custom-addons/              ← PyCharm project root
+├── eoc_base/
+├── eoc_signals/
+├── eoc_actors/
+├── eoc_incident_management/
+├── eoc_dashboard/
+├── ...
+```
+
+### Development Cycle
+
+The workflow is: **edit code → restart Odoo → test in browser**.
+
+**1. Edit** any file in PyCharm (Python, XML views, CSS, etc.)
+
+**2. Restart Odoo** to pick up the changes. Open PyCharm's built-in terminal (`Alt+F12` or **View → Tool Windows → Terminal**) and run:
+
+```bash
+cd ~/ephem-deploy
+```
+
+```bash
+docker compose restart odoo
+```
+
+**3. Test** in your browser at `http://localhost`
+
+> **Tip:** For Python code changes, you need to restart Odoo. For XML/CSS changes, you can often just reload the browser page.
+
+### Update a Specific Module
+
+If you changed a specific module and want Odoo to re-read its views, data files, and code:
+
+```bash
+docker compose exec odoo odoo -u eoc_base -d YOUR_DB_NAME --db_host db --db_user odoo --db_password dev --stop-after-init --no-http
+```
+
+Replace `eoc_base` with your module name and `YOUR_DB_NAME` with your database name.
+
+Or use the update script:
+
+```bash
+bash scripts/update-modules.sh
+```
+
+### Viewing Logs
+
+**From PyCharm's terminal:**
+
+```bash
+docker compose logs -f odoo
+```
+
+This shows Odoo's output in real time — errors, warnings, and info messages. Press `Ctrl+C` to stop.
+
+**Filter for errors only:**
+
+```bash
+docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
+```
+
+### Useful Developer Commands
+
+Run these from PyCharm's terminal inside the `ephem-deploy` folder.
+
+| What you want to do | Command |
+|---------------------|---------|
+| Start everything | `docker compose up -d` |
+| Stop everything | `docker compose down` |
+| Restart Odoo (after code changes) | `docker compose restart odoo` |
+| View Odoo logs | `docker compose logs -f odoo` |
+| Open Odoo shell (Python console) | `docker compose exec odoo odoo shell -d YOUR_DB --db_host db --db_user odoo --db_password dev --no-http` |
+| Open PostgreSQL console | `docker compose exec db psql -U odoo` |
+| List databases | `docker compose exec db psql -U odoo -d postgres -c "SELECT datname FROM pg_database WHERE datistemplate = false;"` |
+| Check container status | `docker compose ps` |
+| Rebuild after Docker image changes | `docker compose pull && docker compose up -d` |
+
+### Git Workflow
+
+You can manage Git from PyCharm or from the terminal.
+
+**From PyCharm:**
+
+- **VCS → Commit** (or `Ctrl+K`) to commit changes
+- **VCS → Push** (or `Ctrl+Shift+K`) to push
+- **VCS → Pull** to get latest changes
+- Branch switching: bottom-right corner of PyCharm shows the current branch — click to switch
+
+**From the terminal:**
+
+```bash
+cd ~/ephem-deploy/custom-addons
+```
+
+```bash
+git status
+```
+
+```bash
+git add .
+```
+
+```bash
+git commit -m "your commit message"
+```
+
+```bash
+git push
+```
+
+### Tips
+
+- **Don't create databases with demo data** on a machine with less than 4 GB RAM — it can cause Odoo to crash during creation
+- **Use a simple master password** like `dev` locally — no need for strong passwords on your own machine
+- **Keep PyCharm and the terminal open side by side** — edit in PyCharm, restart/test from the terminal
+- **If Odoo crashes**, check the logs: `docker compose logs --tail=50 odoo`
+- **If a module won't update**, try: `docker compose restart odoo` and then update from **Apps → Update Apps List** in the browser
+
+---
+
 ## Uninstalling ePHEM
 
 ### Linux
@@ -684,7 +897,7 @@ ephem-deploy/
 ├── backups/                   ← Backup files
 └── logs/                      ← Module update logs
 ```
-
+  
 ---
 
 ## Security Notes
