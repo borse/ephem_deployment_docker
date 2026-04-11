@@ -85,8 +85,12 @@ if [ "$MODE" = "developer" ]; then
         echo -e "${GREEN}✓${NC} custom-addons/ already cloned"
         echo "  Checking for updates..."
         cd custom-addons
-        git fetch origin 2>/dev/null || true
-        ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        if ! git fetch origin 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} Could not reach remote — skipping update check (no internet or SSH issue)"
+            ADDONS_BEHIND=0
+        else
+            ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        fi
         cd ..
 
         if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
@@ -132,7 +136,13 @@ if [ "$MODE" = "developer" ]; then
                --progress; then
             echo -e "${GREEN}✓${NC} custom-addons/ cloned (branch: $BRANCH)"
         else
-            echo -e "${RED}✗${NC} Clone failed. Check your SSH key and collaborator access."
+            echo -e "${RED}✗${NC} Clone failed. Cleaning up..."
+            rm -rf custom-addons
+            echo ""
+            echo "  Things to check:"
+            echo "    • Is your SSH key added to GitHub? ssh -T git@github.com"
+            echo "    • Do you have collaborator access on borse/ePHEM?"
+            echo "    • Is there a network/firewall issue?"
             exit 1
         fi
     fi
@@ -337,8 +347,12 @@ if [ "$MODE" != "developer" ]; then
         echo -e "${GREEN}✓${NC} custom-addons/ has modules (Git repo)"
         echo "  Checking for updates..."
         cd custom-addons
-        git fetch origin 2>/dev/null || true
-        ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        if ! git fetch origin 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} Could not reach remote — skipping update check (no internet or SSH issue)"
+            ADDONS_BEHIND=0
+        else
+            ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        fi
         cd ..
 
         if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
@@ -383,7 +397,8 @@ if [ "$MODE" != "developer" ]; then
                     echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
                     ADDONS_CLONED=true
                 else
-                    echo -e "${RED}✗${NC} Clone failed."
+                    echo -e "${RED}✗${NC} Clone failed. Cleaning up partial clone..."
+                    rm -rf custom-addons
                     mkdir -p custom-addons
                 fi
             else
