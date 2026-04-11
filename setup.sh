@@ -83,9 +83,28 @@ if [ "$MODE" = "developer" ]; then
 
     if [ -d "custom-addons/.git" ]; then
         echo -e "${GREEN}✓${NC} custom-addons/ already cloned"
-        echo "  Pulling latest..."
-        cd custom-addons && git pull && cd ..
-        echo -e "${GREEN}✓${NC} custom-addons/ up to date"
+        echo "  Checking for updates..."
+        cd custom-addons
+        git fetch origin 2>/dev/null || true
+        ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        cd ..
+
+        if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} custom-addons/ is $ADDONS_BEHIND commit(s) behind"
+            echo ""
+            read -p "  Pull updates now? [y/N]: " PULL_ADDONS
+            if [[ "${PULL_ADDONS:-N}" =~ ^[Yy]$ ]]; then
+                cd custom-addons && git pull && cd ..
+                echo -e "${GREEN}✓${NC} custom-addons/ updated ($ADDONS_BEHIND commit(s))"
+                ADDONS_UPDATED=true
+            else
+                echo "  Skipped — addons not updated"
+                ADDONS_UPDATED=false
+            fi
+        else
+            echo -e "${GREEN}✓${NC} custom-addons/ is up to date"
+            ADDONS_UPDATED=false
+        fi
     else
         echo ""
         echo "Which branch do you want to work on?"
@@ -106,12 +125,16 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo "Cloning ePHEM addons (branch: $BRANCH)..."
         rm -rf custom-addons
-        git clone git@github.com:borse/ePHEM.git \
-            --branch "$BRANCH" \
-            --single-branch \
-            custom-addons \
-            --progress
-        echo -e "${GREEN}✓${NC} custom-addons/ cloned (branch: $BRANCH)"
+        if git clone git@github.com:borse/ePHEM.git \
+               --branch "$BRANCH" \
+               --single-branch \
+               custom-addons \
+               --progress; then
+            echo -e "${GREEN}✓${NC} custom-addons/ cloned (branch: $BRANCH)"
+        else
+            echo -e "${RED}✗${NC} Clone failed. Check your SSH key and collaborator access."
+            exit 1
+        fi
     fi
 
     # Write developer docker-compose override
@@ -160,6 +183,8 @@ OVERRIDE
 fi
 
 ERRORS=0
+ADDONS_UPDATED=false
+IMAGE_UPDATED=false
 
 # ── Check Docker ──────────────────────────────
 if command -v docker &> /dev/null; then
@@ -310,6 +335,28 @@ fi
 if [ "$MODE" != "developer" ]; then
     if [ -d "custom-addons/.git" ]; then
         echo -e "${GREEN}✓${NC} custom-addons/ has modules (Git repo)"
+        echo "  Checking for updates..."
+        cd custom-addons
+        git fetch origin 2>/dev/null || true
+        ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
+        cd ..
+
+        if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} custom-addons/ is $ADDONS_BEHIND commit(s) behind"
+            echo ""
+            read -p "  Pull updates now? [y/N]: " PULL_ADDONS
+            if [[ "${PULL_ADDONS:-N}" =~ ^[Yy]$ ]]; then
+                cd custom-addons && git pull && cd ..
+                echo -e "${GREEN}✓${NC} custom-addons/ updated ($ADDONS_BEHIND commit(s))"
+                ADDONS_UPDATED=true
+            else
+                echo "  Skipped — addons not updated"
+                ADDONS_UPDATED=false
+            fi
+        else
+            echo -e "${GREEN}✓${NC} custom-addons/ is up to date"
+            ADDONS_UPDATED=false
+        fi
     else
         echo -e "${YELLOW}!${NC} Downloading ePHEM modules..."
         rm -rf custom-addons
@@ -325,14 +372,13 @@ if [ "$MODE" != "developer" ]; then
                 echo -e "  ${GREEN}✓${NC} Access granted"
                 echo "  Cloning ePHEM modules..."
                 echo ""
-                GIT_SSH_COMMAND="ssh -o ConnectTimeout=30" \
-                git clone git@github-ephem-addons:borse/ePHEM.git \
-                    --depth 1 \
-                    --branch 18_national_dev \
-                    --single-branch \
-                    custom-addons \
-                    --progress
-                if [ $? -eq 0 ]; then
+                if GIT_SSH_COMMAND="ssh -o ConnectTimeout=30" \
+                   git clone git@github-ephem-addons:borse/ePHEM.git \
+                       --depth 1 \
+                       --branch 18_national_dev \
+                       --single-branch \
+                       custom-addons \
+                       --progress; then
                     echo ""
                     echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
                     ADDONS_CLONED=true
@@ -488,6 +534,33 @@ echo -e "${GREEN}✓ Everything looks good!${NC}"
 echo ""
 echo "Starting ePHEM..."
 echo ""
+
+# ── Check for Docker image updates ──────────
+echo ""
+echo "Checking for Docker image updates..."
+CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' borrs/ephem:latest 2>/dev/null || echo "none")
+REMOTE_DIGEST=$(docker manifest inspect borrs/ephem:latest 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('config',{}).get('digest','unknown'))" 2>/dev/null || echo "unknown")
+
+if [ "$CURRENT_IMAGE" = "none" ]; then
+    # Image not present at all — will be pulled automatically by docker compose
+    echo -e "${GREEN}✓${NC} Image will be downloaded on first run"
+    IMAGE_UPDATED=false
+else
+    read -p "  Check for Odoo image updates? [y/N]: " CHECK_IMAGE
+    if [[ "${CHECK_IMAGE:-N}" =~ ^[Yy]$ ]]; then
+        echo "  Pulling latest image (this may take a few minutes)..."
+        if docker compose pull odoo 2>&1 | grep -q "Downloaded newer image\|Pull complete"; then
+            echo -e "${GREEN}✓${NC} Image updated"
+            IMAGE_UPDATED=true
+        else
+            echo -e "${GREEN}✓${NC} Image is already up to date"
+            IMAGE_UPDATED=false
+        fi
+    else
+        echo "  Skipped — image not updated"
+        IMAGE_UPDATED=false
+    fi
+fi
 
 # ── Write demo override (no nginx) ───────────
 # Demo and developer both run locally — nginx is not needed and conflicts
@@ -651,5 +724,32 @@ if [ "${NEEDS_ADDONS_ACCESS:-false}" = true ] && [ -f "$HOME/.ssh/ephem_addons_d
     echo -e "  ${BOLD}bash setup.sh${NC}"
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+fi
+# ── Module update warning ─────────────────────
+# Show this if addons were updated — make it impossible to miss
+if [ "${ADDONS_UPDATED:-false}" = true ]; then
+    echo ""
+    echo -e "${RED}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}║   ⚠  ACTION REQUIRED — ODOO MODULE UPDATE NEEDED                ║${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}╠══════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}║  The custom addon code was updated, but Odoo's database has      ║${NC}"
+    echo -e "${RED}║  not been told about the changes yet.                            ║${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}║  Without running the module update, you may see:                 ║${NC}"
+    echo -e "${RED}║    • Missing fields or buttons                                   ║${NC}"
+    echo -e "${RED}║    • Old views not reflecting new changes                        ║${NC}"
+    echo -e "${RED}║    • Errors on pages that used to work                           ║${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}╠══════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}║  Run this now:                                                   ║${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}║    bash scripts/update-modules.sh                                ║${NC}"
+    echo -e "${RED}║                                                                  ║${NC}"
+    echo -e "${RED}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 fi
