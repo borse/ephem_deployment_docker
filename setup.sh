@@ -667,7 +667,10 @@ if [ "$MODE" = "developer" ]; then
 
 elif [ "$MODE" = "demo" ]; then
     echo "Your demo is available at:"
-    echo "  http://localhost:8069"
+    echo "  http://localhost:8069       (on this machine)"
+    if [ -n "$SERVER_IP" ] && [ "$SERVER_IP" != "127.0.0.1" ]; then
+        echo "  http://$SERVER_IP:8069   (from other devices on the network)"
+    fi
     echo ""
     echo "When you're done:"
     echo "  docker compose down      — stop (keep data)"
