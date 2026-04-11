@@ -218,7 +218,22 @@ if [ -f ".env" ]; then
             fi
             echo -e "${GREEN}✓${NC} Passwords auto-set (fine for local use)"
         else
-            echo -e "${RED}✗${NC} .env still has CHANGE_ME passwords. Edit .env and set real passwords."
+            echo -e "${RED}✗${NC} .env still has CHANGE_ME passwords."
+            echo ""
+            echo "  Edit your .env file and set real values:"
+            echo ""
+            echo "    nano .env"
+            echo ""
+            echo "  Required:"
+            echo "    POSTGRES_PASSWORD   — strong password for the database"
+            echo "    ODOO_ADMIN_PASSWORD — master password for Odoo"
+            echo ""
+            echo "  Recommended for production:"
+            echo "    DOMAIN    — your domain name  (e.g. ephem.health.gov.xx)"
+            echo "    SSL_EMAIL — your email address (e.g. admin@health.gov.xx)"
+            echo ""
+            echo "  Then run:  bash setup.sh"
+            echo ""
             ERRORS=$((ERRORS + 1))
         fi
     else
@@ -232,6 +247,14 @@ if [ -f ".env" ]; then
         SERVER_IP=$(get_server_ip)
         if [ "$MODE" = "server" ]; then
             echo -e "${YELLOW}!${NC} No domain set — running in IP mode ($SERVER_IP)"
+            echo ""
+            echo "  For production, set a domain in .env:"
+            echo "    DOMAIN=$SERVER_IP   →   DOMAIN=ephem.health.gov.xx"
+            echo "    SSL_EMAIL=          →   SSL_EMAIL=admin@health.gov.xx"
+            echo ""
+            echo "  Then run: bash setup.sh"
+            echo "  And after that: bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
+            echo ""
         else
             echo -e "${GREEN}✓${NC} Local mode — will run on http://localhost"
         fi
@@ -249,7 +272,25 @@ else
         fi
         echo -e "${GREEN}✓${NC} .env created with auto-generated passwords"
     else
-        echo -e "${RED}✗${NC} Edit .env now: nano .env (set your passwords)"
+        echo ""
+        echo -e "${YELLOW}  .env has been created from the template.${NC}"
+        echo "  You must edit it before setup can continue."
+        echo ""
+        echo "    nano .env"
+        echo ""
+        echo "  Required:"
+        echo "    POSTGRES_PASSWORD   — strong password for the database"
+        echo "    ODOO_ADMIN_PASSWORD — master password for Odoo"
+        echo ""
+        echo "  Recommended for production:"
+        echo "    DOMAIN    — your domain name  (e.g. ephem.health.gov.xx)"
+        echo "    SSL_EMAIL — your email address (e.g. admin@health.gov.xx)"
+        echo ""
+        echo "  To generate strong passwords:"
+        echo "    openssl rand -base64 24"
+        echo ""
+        echo "  Once done, run:  bash setup.sh"
+        echo ""
         ERRORS=$((ERRORS + 1))
     fi
 fi
@@ -549,18 +590,33 @@ else
         DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
         echo "Your site is available at:"
         echo "  https://$DOMAIN"
+        echo ""
+        echo "Next steps:"
+        echo "  • Go to https://$DOMAIN/web/database/manager to create your database"
+        echo "  • Set up automatic backups: crontab -e"
     elif [ -n "$ENV_DOMAIN" ]; then
         echo "Your site is available at:"
-        echo "  http://$ENV_DOMAIN"
+        echo "  http://$ENV_DOMAIN  (HTTP only)"
         echo ""
-        echo "To enable HTTPS, run:"
+        echo "Next step — enable HTTPS:"
         echo "  bash scripts/ssl-setup.sh $ENV_DOMAIN $ENV_EMAIL"
+        echo ""
+        echo "Then run setup again to apply any remaining config:"
+        echo "  bash setup.sh"
     else
         echo "Your site is available at:"
-        echo "  http://$SERVER_IP"
+        echo "  http://$SERVER_IP  (no domain, no SSL)"
         echo ""
-        echo "To set up a domain: edit .env → DOMAIN=yourdomain.com"
-        echo "Then run: bash scripts/ssl-setup.sh yourdomain.com your@email.com"
+        echo -e "${YELLOW}For production, set a domain and SSL:${NC}"
+        echo "  1. Edit .env:"
+        echo "       DOMAIN=$SERVER_IP   →   DOMAIN=ephem.health.gov.xx"
+        echo "       SSL_EMAIL=          →   SSL_EMAIL=admin@health.gov.xx"
+        echo ""
+        echo "  2. Run setup again:"
+        echo "       bash setup.sh"
+        echo ""
+        echo "  3. Then set up SSL:"
+        echo "       bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
     fi
 fi
 
