@@ -23,10 +23,11 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
   - [Open ePHEM](#open-ephem)
 - [Mode 2 — Demo / Evaluate](#mode-2--demo--evaluate)
 - [Mode 3 — Developer](#mode-3--developer)
-  - [Prerequisites](#developer-prerequisites)
+  - [Developer Prerequisites](#developer-prerequisites)
   - [GitHub SSH Key](#github-ssh-key)
   - [What the Script Sets Up](#what-the-script-sets-up)
-  - [PyCharm Remote Debugger](#pycharm-remote-debugger)
+  - [Open in PyCharm](#open-in-pycharm)
+  - [Docker Plugin for PyCharm](#docker-plugin-for-pycharm)
   - [Development Cycle](#development-cycle)
   - [Useful Developer Commands](#useful-developer-commands)
   - [Git Workflow](#git-workflow)
@@ -74,15 +75,17 @@ Here's how each mode works:
   - **Windows 10/11** — install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) and run all commands inside **WSL**
 - At least **2 GB RAM**
 - **SSH access** (for remote servers) or a terminal (for local machines)
-- **A domain name** (for production servers) — pointed at the server's IP via a DNS A record
+- **A domain name** (for production servers with SSL) — pointed at the server's IP via a DNS A record
 
-> **No domain?** Fine for testing and local use. The script detects this and runs on `http://YOUR_IP` or `http://localhost`. You can add a domain later.
+> **No domain?** Fine for testing and local use. The script detects this and runs on `http://YOUR_IP:8069` or `http://localhost:8069`. You can add a domain later.
 
 > **Windows users:** Open a WSL terminal (search "WSL" or "Ubuntu" in Start) and run all commands there.
 
 ---
 
 ## Quick Start
+
+These three steps apply to all modes. After cloning and running setup, the script guides you through the rest.
 
 ### Step 1 — Install Docker
 
@@ -124,9 +127,9 @@ cd ephem-deploy
 bash setup.sh
 ```
 
-The script will ask which mode you want, then handle everything from there.
+The script asks which mode you want, then handles everything from there — creating config files, downloading images, cloning addons, and starting containers.
 
-> **First run:** Takes 2–5 minutes to download (~1 GB). Future runs are instant.
+> **First run:** Takes 2–5 minutes to download (~1 GB of Docker images). Future runs are instant.
 
 ---
 
@@ -136,48 +139,52 @@ For deploying ePHEM on a production or staging server.
 
 ### Configure Your Settings
 
-Before running setup, edit your settings:
+When you run `bash setup.sh` and choose **1**, the script creates a `.env` file from the template and immediately stops to ask you to fill it in. Open it:
 
 ```bash
-cp .env.example .env
 nano .env
 ```
 
-**Required — set your passwords:**
+**Required — set real passwords:**
 
 ```env
 POSTGRES_PASSWORD=your_strong_password_here
 ODOO_ADMIN_PASSWORD=your_master_password_here
 ```
 
-**Optional — set your domain:**
+**Recommended for production — set your domain:**
 
 ```env
-# Production server with a domain:
 DOMAIN=ephem.health.gov.xx
 SSL_EMAIL=admin@health.gov.xx
-
-# Testing without a domain (IP-only):
-DOMAIN=
 ```
 
 > **Generate strong passwords:** `openssl rand -base64 24`
 
 > **New to `nano`?** Arrow keys to move, type to edit. `Ctrl+O` then `Enter` to save, `Ctrl+X` to exit.
 
+Once saved, run setup again:
+
+```bash
+bash setup.sh
+```
+
 ### Set Up SSL
 
-After setup completes, if you have a domain:
+After setup completes, if you set a domain, enable HTTPS:
 
 ```bash
 bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx
 ```
 
+> **SSL prerequisite:** Port 80 and 443 must be open on your server firewall, and your domain DNS must already point to the server's IP. Let's Encrypt will fail if either is missing.
+
 ### Open ePHEM
 
 Open your browser:
 
-- **With domain:** `https://ephem.health.gov.xx`
+- **With SSL:** `https://ephem.health.gov.xx`
+- **With domain, no SSL yet:** `http://ephem.health.gov.xx`
 - **Without domain:** `http://YOUR_SERVER_IP` (shown by the setup script)
 
 Fill in the database creation form:
@@ -197,13 +204,21 @@ Click **Create Database** (takes 1–2 minutes). 🎉
 
 ## Mode 2 — Demo / Evaluate
 
-For trying ePHEM locally without any development intent.
+For trying ePHEM on any machine — locally or on a cloud server — without any development intent.
 
 Run `bash setup.sh` and choose **2**. The script:
 
-- Auto-generates passwords (no `.env` editing needed)
-- Skips domain and SSL configuration
-- Starts ePHEM at `http://localhost:8069`
+- Creates a `.env` with auto-generated passwords (no editing needed)
+- Skips domain and SSL — Odoo is exposed directly on port 8069
+- Starts ePHEM and shows you the URLs to access it
+
+At the end you'll see:
+
+```
+Your demo is available at:
+  http://localhost:8069        (on this machine)
+  http://YOUR_SERVER_IP:8069  (from other devices on the network)
+```
 
 When you're done:
 
@@ -216,14 +231,14 @@ docker compose down -v     # stop and delete all data
 
 ## Mode 3 — Developer
 
-For collaborators who want to edit ePHEM custom addons locally, with live reloading and PyCharm debugging.
+For collaborators who want to edit ePHEM custom addons locally, with live reloading and PyCharm integration.
 
 ### Developer Prerequisites
 
-- **Docker Desktop** — [Mac](https://docs.docker.com/desktop/install/mac-install/) · [Windows](https://docs.docker.com/desktop/install/windows-install/) · [Linux](https://docs.docker.com/desktop/install/linux-install/)
-- **PyCharm** — [Community](https://www.jetbrains.com/pycharm/download/) (free) or Professional
+- **Docker** — installed and your user in the `docker` group (see [Step 1](#step-1--install-docker))
+- **PyCharm** — [Community Edition](https://www.jetbrains.com/pycharm/download/) (free) or Professional
 - **Git** — pre-installed on Mac/Linux. Windows: [git-scm.com](https://git-scm.com/download/win) or WSL
-- **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team
+- **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team before running setup
 
 ### GitHub SSH Key
 
@@ -271,7 +286,7 @@ When you choose mode 3, `setup.sh`:
    - `log_level = debug` — verbose output in the logs
    - `dev_mode = reload,qweb,werkzeug,xml` — enables live asset reloading in the browser
 
-> `docker-compose.override.yml` is picked up automatically by Docker Compose and should **not** be committed. Add it to `.gitignore`.
+> `docker-compose.override.yml` is picked up automatically by Docker Compose. Add it to `.gitignore` — do not commit it.
 
 ### Open in PyCharm
 
@@ -293,12 +308,30 @@ custom-addons/
 
 PyCharm Community understands Odoo's Python and XML — you get full autocomplete, go-to-definition, and error highlighting without any extra configuration.
 
+### Docker Plugin for PyCharm
+
+The Docker plugin lets you start, stop, and restart containers and watch live logs — all from inside PyCharm without touching a terminal.
+
+**Install:**
+
+1. **Settings → Plugins** → search "Docker" → Install → restart PyCharm
+2. **Settings → Build, Execution, Deployment → Docker** → click `+` → select **Unix socket** (auto-detected)
+3. A **Services** panel appears at the bottom (**View → Tool Windows → Services**)
+
+From the Services panel you can:
+
+- See all running containers
+- Start / stop / restart `ephem-app` with one click
+- View live logs per container in a dedicated tab — persistent across PyCharm restarts
+
+> **Permission denied in the Docker plugin?** Your user isn't in the `docker` group or the session hasn't picked it up yet. See [Permission denied connecting to Docker](#permission-denied-connecting-to-docker) in Troubleshooting.
+
 ### Development Cycle
 
 **Edit → Restart → Test:**
 
 1. Edit any file in `custom-addons/` in PyCharm
-2. Restart Odoo to pick up changes:
+2. Restart Odoo — either from the Services panel in PyCharm, or in the terminal:
 
 ```bash
 docker compose restart odoo
@@ -306,7 +339,7 @@ docker compose restart odoo
 
 3. Test at `http://localhost:8069`
 
-**Update a specific module** (re-reads views, data files, and code):
+**Update a specific module** (re-reads views, data files, and migrations):
 
 ```bash
 docker compose exec odoo odoo -u your_module_name -d YOUR_DB --db_host db --db_user odoo --db_password dev --stop-after-init --no-http
@@ -330,7 +363,7 @@ docker compose logs -f odoo
 docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
 ```
 
-> **Tip:** For Python changes, restart Odoo. For XML/CSS, a browser reload is often enough (with `dev_mode` on).
+> **Tip:** For Python changes, restart Odoo. For XML/CSS/QWeb changes, a browser reload is often enough with `dev_mode` on.
 
 ### Useful Developer Commands
 
@@ -348,7 +381,9 @@ docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
 
 ### Git Workflow
 
-**From PyCharm:**
+Work in the `custom-addons/` folder — that's the repo you push to.
+
+**From PyCharm** (recommended):
 
 - **Git → Commit** (`Ctrl+K`) to commit
 - **Git → Push** (`Ctrl+Shift+K`) to push
@@ -371,9 +406,9 @@ git push
 
 The ePHEM custom modules live in a private repository.
 
-**For server deploy and demo (modes 1 & 2):** The setup script generates a machine-specific deploy key and shows it at the end. Email it to **`ephem@who.int`** with your country/server name in the subject. Once the team grants access, run `bash setup.sh` again — it clones the modules automatically.
+**For server deploy and demo (modes 1 & 2):** The setup script generates a machine-specific deploy key and displays it at the end of the first run. Email it to **`ephem@who.int`** with your country/server name in the subject. Once the team grants access, run `bash setup.sh` again — it clones the modules automatically.
 
-**For developers (mode 3):** You need collaborator access on `borse/ePHEM`. Request this from the ePHEM team. Once granted, the setup script clones using your personal SSH key.
+**For developers (mode 3):** You need collaborator access on `borse/ePHEM`. Request this from the ePHEM team before running setup. Once granted, the script clones using your personal SSH key.
 
 > **While waiting for access**, ePHEM runs with standard Odoo modules. You can create databases, configure users, and explore the interface. ePHEM-specific modules appear in **Apps** after access is granted and setup is re-run.
 
@@ -430,7 +465,7 @@ Create identical copies of a configured database — useful for training rooms w
 # 1. Add all domains
 bash scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
 
-# 2. Configure training-01 at https://training-01.pheoc.com
+# 2. Set up and configure training-01 at https://training-01.pheoc.com
 
 # 3. Duplicate to all others
 bash scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
@@ -442,25 +477,31 @@ All 6 databases are identical and completely independent.
 
 ## Updating ePHEM
 
-### Update Custom Modules
+Re-running `bash setup.sh` is the recommended way to update — it checks for addon and image updates and prompts you before pulling anything.
+
+### Update via setup.sh (recommended)
 
 ```bash
-cd custom-addons && git pull && cd ..
-docker compose restart odoo
+bash setup.sh
 ```
 
-Then go to **Apps → Update Apps List**.
+The script will:
+- Check if `custom-addons/` has new commits and ask if you want to pull
+- Ask if you want to check for a newer Docker image
+- Warn you clearly if an addon update requires running `bash scripts/update-modules.sh`
 
-### Update Deployment Configuration
+### Update Deployment Scripts
+
+When this repo itself has changes (new scripts, config improvements):
 
 ```bash
 git pull
 bash setup.sh
 ```
 
-> `git pull` never overwrites `.env`, `nginx/active.conf`, or `odoo.conf`.
+> `git pull` on this repo never overwrites `.env`, `nginx/active.conf`, `odoo.conf`, or `docker-compose.override.yml`.
 
-### Update Odoo Base Image
+### Update Odoo Base Image Manually
 
 ```bash
 bash scripts/backup.sh
@@ -468,7 +509,9 @@ docker compose pull
 docker compose up -d
 ```
 
-### Update Modules Across All Databases
+### Update Odoo Modules Across All Databases
+
+After pulling addon updates, tell Odoo about the changes:
 
 ```bash
 bash scripts/update-modules.sh --auto
@@ -477,7 +520,7 @@ bash scripts/update-modules.sh --auto
 Or for a specific database:
 
 ```bash
-bash scripts/update-modules.sh --auto --db training-server
+bash scripts/update-modules.sh --auto --db your-database-name
 ```
 
 ---
@@ -494,7 +537,7 @@ bash scripts/backup.sh
 crontab -e
 ```
 
-Add:
+Add (replace `YOUR_USERNAME` and the path to match your setup):
 
 ```
 0 2 * * * /home/YOUR_USERNAME/ephem-deploy/scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
@@ -553,24 +596,38 @@ docker compose logs --tail=30 odoo
 
 ### Permission denied connecting to Docker
 
-This means your user isn't in the `docker` group yet. Run:
+This means your user isn't in the `docker` group yet, or the session hasn't reloaded since it was added. Run:
 
 ```bash
 sudo usermod -aG docker $USER
 ```
 
-Then **log out and log back in completely** — not just a new terminal, a full desktop/SSH logout. This is required because running processes (including PyCharm) inherit group memberships from the login session and won't see the change until you re-login.
+Then **log out and log back in completely** — not just a new terminal, a full desktop or SSH logout. Running processes (including PyCharm) inherit group memberships from the login session and won't see the change until you re-login.
 
-After logging back in, verify it worked:
+After logging back in, verify:
 
 ```bash
-groups
-# should now include: docker
+groups   # should now include: docker
 ```
 
 Then run `bash setup.sh` again.
 
-> **Why doesn't `newgrp docker` work?** `newgrp` only applies to the current terminal session. PyCharm and other GUI apps launched from the desktop still run without the `docker` group until you do a full logout.
+> **Why doesn't `newgrp docker` work?** `newgrp` only applies to the current terminal. PyCharm and other GUI apps launched from the desktop still run without the `docker` group until you do a full logout.
+
+### SSL certificate fails
+
+Make sure ports 80 and 443 are open and your domain's DNS points to the server:
+
+```bash
+sudo ufw allow 80
+sudo ufw allow 443
+```
+
+Also check your hosting provider's firewall (DigitalOcean, AWS, etc. have separate firewall settings). Then retry:
+
+```bash
+bash scripts/ssl-setup.sh yourdomain.com your@email.com
+```
 
 ### New domain shows wrong database
 
@@ -589,21 +646,13 @@ docker compose restart odoo
 
 Go to **Apps → Update Apps List**.
 
-### SSL not working
-
-```bash
-sudo ufw allow 80
-sudo ufw allow 443
-bash scripts/ssl-setup.sh yourdomain.com your@email.com
-```
-
 ### Start completely fresh
 
 > **Warning:** Deletes ALL data.
 
 ```bash
 docker compose down -v
-rm -f nginx/active.conf
+rm -f nginx/active.conf docker-compose.override.yml
 bash setup.sh
 ```
 
@@ -637,52 +686,54 @@ sudo apt remove -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 ephem-deploy/
 │
 ├── docker-compose.yml              ← Container definitions (production)
-├── docker-compose.override.yml     ← Developer overrides (generated, not committed)
-├── .env.example                    ← Settings template — copy to .env
+├── docker-compose.override.yml     ← Local overrides (generated by setup.sh, not committed)
+├── .env.example                    ← Settings template
 ├── .env                            ← Your settings (never committed)
 ├── odoo.conf                       ← Odoo config (generated by setup.sh)
-├── setup.sh                        ← Main setup script
+├── setup.sh                        ← Main setup script — run this for installs and updates
 │
 ├── nginx/
 │   ├── default.conf                ← HTTP-only template (in Git, never modified)
 │   └── active.conf                 ← Active NGINX config (created by scripts)
 │
 ├── custom-addons/                  ← ePHEM modules (private repo)
-│                                     read-only in production, read-write in dev
+│                                     read-only in server/demo, read-write in developer mode
 │
 ├── scripts/
-│   ├── ssl-setup.sh                ← Set up SSL certificates
-│   ├── add-domain.sh               ← Add new domains
-│   ├── duplicate-db.sh             ← Copy databases
-│   ├── update-modules.sh           ← Update Odoo modules across databases
+│   ├── ssl-setup.sh                ← Set up HTTPS with Let's Encrypt
+│   ├── add-domain.sh               ← Add new domains to an existing installation
+│   ├── duplicate-db.sh             ← Copy a database (for training environments)
+│   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── backup.sh                   ← Backup databases and filestore
-│   ├── clone-addons.sh             ← Clone addons after access is granted
-│   └── request-addons-access.sh    ← Generate deploy key
+│   ├── clone-addons.sh             ← Clone addons after deploy key access is granted
+│   └── request-addons-access.sh    ← Generate a deploy key manually
 │
-├── backups/                        ← Backup files
-└── logs/                           ← Module update logs
+├── backups/                        ← Backup files (auto-created)
+└── logs/                           ← Module update logs (auto-created)
 ```
 
 ---
 
 ## Security Notes
 
-**Built-in:**
+**Built-in (server mode):**
 
-- PostgreSQL and Odoo are hidden from the internet — only NGINX is exposed
+- PostgreSQL and Odoo are not exposed to the internet — only NGINX is
 - All traffic encrypted with HTTPS (TLS 1.2+)
 - Security headers protect against common web attacks
 - Rate limiting prevents abuse
 - Containers run on a private Docker network
 - SSL certificates renew automatically
 
-**Recommended after installation:**
+**Note:** Demo and developer modes expose Odoo directly on port 8069 without SSL or a reverse proxy. This is intentional for local/evaluation use — do not use demo or developer mode on a public-facing production server.
+
+**Recommended after production installation:**
 
 - Disable password-based SSH login (use SSH keys only)
 - Install fail2ban: `sudo apt install -y fail2ban`
 - Copy backups off the server regularly
-- Enable two-factor authentication for admin users (Settings → Permissions)
-- Disable the database manager after setup (`ODOO_LIST_DB=False` in `.env`)
+- Enable two-factor authentication for admin users (**Settings → Permissions**)
+- Disable the database manager after all databases are created (`ODOO_LIST_DB=False` in `.env`, then re-run `bash setup.sh`)
 
 ---
 

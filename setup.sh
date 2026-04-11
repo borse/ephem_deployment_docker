@@ -666,11 +666,24 @@ if [ "$MODE" = "developer" ]; then
     echo "  docker compose logs -f odoo   (watch logs)"
 
 elif [ "$MODE" = "demo" ]; then
+    DEMO_ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
     echo "Your demo is available at:"
     echo "  http://localhost:8069       (on this machine)"
     if [ -n "$SERVER_IP" ] && [ "$SERVER_IP" != "127.0.0.1" ]; then
         echo "  http://$SERVER_IP:8069   (from other devices on the network)"
     fi
+    echo ""
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  First time? Create a database:${NC}"
+    echo ""
+    echo "  1. Open the URL above in your browser"
+    echo "  2. Fill in the database creation form"
+    echo "  3. When asked for Master Password, use:"
+    echo ""
+    echo -e "     ${BOLD}${GREEN}$DEMO_ADMIN_PASS${NC}"
+    echo ""
+    echo "  (This is your ODOO_ADMIN_PASSWORD from .env)"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo "When you're done:"
     echo "  docker compose down      — stop (keep data)"
