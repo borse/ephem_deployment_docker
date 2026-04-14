@@ -742,3 +742,11 @@ ephem-deploy/
 1. Check [Troubleshooting](#troubleshooting)
 2. Run `docker compose logs` and share the output with the ePHEM team
 3. Open an issue: [github.com/borse/ephem_deployment_docker/issues](https://github.com/borse/ephem_deployment_docker/issues)
+
+
+## To switch to testing branch
+```bash
+git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+git fetch origin
+git switch 18_national_test
+```
