@@ -20,6 +20,215 @@ get_server_ip() {
     echo "127.0.0.1"
 }
 
+# ── Developer pre-flight helpers ───────────────
+# Used by the developer-mode menu shown before installation.
+
+dev_cheatsheet() {
+    echo -e "${CYAN}${BOLD}Common developer commands${NC} (run from this repo dir)"
+    echo ""
+    echo "  Logs:"
+    echo "    docker compose logs -f odoo            # live tail (Ctrl-C to stop)"
+    echo "    docker compose logs --tail=100 odoo    # last 100 lines"
+    echo "  Service:"
+    echo "    docker compose restart odoo            # restart Odoo only"
+    echo "    docker compose up -d                   # start everything"
+    echo "    docker compose down                    # stop (keep data)"
+    echo "  Image:"
+    echo "    docker compose pull                    # fetch a newer app image"
+    echo "  Addons (your live git work in custom-addons/):"
+    echo "    git -C custom-addons status"
+    echo "    git -C custom-addons pull"
+    echo "    git -C custom-addons branch --show-current"
+    echo "  Update a module after editing:"
+    echo "    docker compose exec odoo odoo -u <module> -d <db> --stop-after-init"
+}
+
+dev_suggest() {
+    echo -e "${CYAN}${BOLD}Suggested next commands${NC} (based on current state)"
+    echo ""
+    local running=0
+    docker compose ps --status=running 2>/dev/null | grep -q odoo && running=1
+    if [ "$running" -eq 1 ]; then
+        echo "  • Odoo is running. Watch logs:    docker compose logs -f odoo"
+        echo "  • After editing addons, restart:  docker compose restart odoo"
+    else
+        echo "  • Stack is down. Start it:        docker compose up -d"
+        echo "  • Then watch startup:             docker compose logs -f odoo"
+    fi
+    if [ -d custom-addons/.git ]; then
+        local cur behind
+        cur=$(git -C custom-addons branch --show-current 2>/dev/null || echo "?")
+        echo "  • custom-addons branch:           $cur"
+        if git -C custom-addons fetch origin >/dev/null 2>&1; then
+            behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo 0)
+            [ "${behind:-0}" -gt 0 ] 2>/dev/null && \
+                echo "  • $behind commit(s) behind — update:  git -C custom-addons pull"
+        fi
+    fi
+}
+
+dev_readme() {
+    echo -e "${CYAN}${BOLD}Documentation${NC}"
+    echo ""
+    echo "  Deployment / setup (this repo):"
+    echo "    https://github.com/borse/ephem_deployment_docker#readme"
+    echo "  ePHEM addons:"
+    echo "    https://github.com/borse/ePHEM"
+    echo ""
+    if [ -f README.md ]; then
+        read -p "  View the local README.md now? [y/N]: " V
+        if [[ "${V:-N}" =~ ^[Yy]$ ]]; then
+            ${PAGER:-less} README.md 2>/dev/null || cat README.md
+        fi
+    fi
+    if command -v xdg-open >/dev/null 2>&1; then
+        read -p "  Open the deployment README in a browser? [y/N]: " O
+        [[ "${O:-N}" =~ ^[Yy]$ ]] && xdg-open "https://github.com/borse/ephem_deployment_docker#readme" >/dev/null 2>&1 || true
+    fi
+}
+
+dev_prereq_check() {
+    echo -e "${CYAN}${BOLD}Prerequisite check${NC}"
+    echo ""
+    local ok=1
+    if command -v docker >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} docker     $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+    else
+        echo -e "${RED}✗${NC} docker not found — install Docker Engine/Desktop"; ok=0
+    fi
+    if docker compose version >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} compose    $(docker compose version --short 2>/dev/null)"
+    else
+        echo -e "${RED}✗${NC} docker compose v2 not found"; ok=0
+    fi
+    if command -v git >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} git        $(git --version 2>/dev/null | awk '{print $3}')"
+    else
+        echo -e "${RED}✗${NC} git not found"; ok=0
+    fi
+    if command -v ssh >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} ssh        present"
+    else
+        echo -e "${RED}✗${NC} ssh not found"; ok=0
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo -e "${YELLOW}!${NC} Docker daemon not responding — is Docker running?"; ok=0
+    fi
+    echo ""
+    if [ "$ok" -eq 1 ]; then
+        echo -e "${GREEN}✓${NC} All prerequisites present."
+    else
+        echo -e "${YELLOW}!${NC} Some prerequisites are missing (see above)."
+    fi
+}
+
+dev_status() {
+    echo -e "${CYAN}${BOLD}Container status${NC}"
+    echo ""
+    docker compose ps 2>/dev/null || echo -e "${YELLOW}!${NC} Could not read compose status (no containers yet?)"
+}
+
+dev_doctor() {
+    echo -e "${CYAN}${BOLD}Doctor — scanning recent Odoo logs${NC}"
+    echo ""
+    if ! docker compose ps --status=running 2>/dev/null | grep -q odoo; then
+        echo -e "${YELLOW}!${NC} Odoo container isn't running — start it first: docker compose up -d"
+        return 0
+    fi
+    local LOGS found=0 MISSING
+    LOGS=$(docker compose logs --tail=300 odoo 2>&1 || true)
+    if echo "$LOGS" | grep -q "ModuleNotFoundError"; then
+        found=1
+        MISSING=$(echo "$LOGS" | grep -oP "ModuleNotFoundError: No module named '\K[^']+" | sort -u | tr '\n' ' ')
+        echo -e "${RED}✗${NC} Missing Python module(s): ${BOLD}${MISSING}${NC}"
+        echo "   A custom addon imports a package that isn't in the app image."
+        echo "   Permanent fix: add it to the image (rebuild & push), then: docker compose pull"
+        echo "   Quick local patch:"
+        echo "     docker compose exec -u root odoo pip install --break-system-packages ${MISSING}"
+        echo "     docker compose restart odoo"
+        echo ""
+    fi
+    if echo "$LOGS" | grep -q "Failed to load registry"; then
+        found=1
+        echo -e "${RED}✗${NC} Registry failed to load — every page will return 500."
+        echo "   Usually a module raising on import (see above) or a bad XML/data file."
+        echo ""
+    fi
+    if echo "$LOGS" | grep -qiE "could not translate host name|connection refused.*5432|database .* does not exist"; then
+        found=1
+        echo -e "${RED}✗${NC} Database connectivity/availability issue."
+        echo "   Check:  docker compose ps   and   docker compose logs db"
+        echo ""
+    fi
+    [ "$found" -eq 0 ] && echo -e "${GREEN}✓${NC} No known error signatures in the last 300 log lines."
+}
+
+dev_reset() {
+    echo -e "${CYAN}${BOLD}Reset / clean environment${NC}"
+    echo ""
+    echo -e "${GREEN}Your custom-addons/ is a host folder and is NEVER touched by any option here.${NC}"
+    echo ""
+    echo "  1) Stop containers, keep data    (docker compose down)"
+    echo "  2) Full reset: wipe DB + Odoo filestore volumes, KEEP custom-addons"
+    echo "       (docker compose down -v  — removes postgres-data & odoo-data)"
+    echo "  3) Cancel"
+    echo ""
+    read -p "Choose [1-3]: " R
+    case "${R:-3}" in
+        1) docker compose down && echo -e "${GREEN}✓${NC} Stopped (data preserved)." ;;
+        2)
+            echo ""
+            echo -e "${RED}This deletes the database and Odoo filestore volumes.${NC} custom-addons/ stays."
+            read -p "Type RESET to confirm: " CONF
+            if [ "$CONF" = "RESET" ]; then
+                docker compose down -v && \
+                    echo -e "${GREEN}✓${NC} Volumes wiped, custom-addons/ untouched. Start fresh: docker compose up -d"
+            else
+                echo "  Cancelled."
+            fi
+            ;;
+        *) echo "  Cancelled." ;;
+    esac
+}
+
+dev_preflight_menu() {
+    read -p "Have you already set up the ePHEM dev environment on this machine before? [y/N]: " ALREADY_SETUP
+    echo ""
+    if [[ "${ALREADY_SETUP:-N}" =~ ^[Yy]$ ]]; then
+        echo "Welcome back. Use the menu below, or choose 'Continue' to re-run setup."
+    else
+        echo "First-time setup. Use the menu to check prerequisites, or 'Continue' to install."
+    fi
+    while true; do
+        echo ""
+        echo -e "${BOLD}Developer pre-flight menu${NC}"
+        echo "  1) View relevant commands"
+        echo "  2) Suggest commands (based on current state)"
+        echo "  3) Open GitHub README / docs"
+        echo "  4) Prerequisite check (docker, compose, git, ssh)"
+        echo "  5) Container status / health"
+        echo "  6) Doctor — scan logs for common errors"
+        echo "  7) Reset / clean environment (keeps custom-addons)"
+        echo "  8) Continue with setup"
+        echo "  9) Exit"
+        echo ""
+        read -p "Choose [1-9] (default: 8): " PRE
+        echo ""
+        case "${PRE:-8}" in
+            1) dev_cheatsheet || true ;;
+            2) dev_suggest || true ;;
+            3) dev_readme || true ;;
+            4) dev_prereq_check || true ;;
+            5) dev_status || true ;;
+            6) dev_doctor || true ;;
+            7) dev_reset || true ;;
+            8) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
+            9) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
+            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-9." ;;
+        esac
+    done
+}
+
 echo ""
 echo "========================================="
 echo "  ePHEM Setup"
@@ -60,6 +269,10 @@ if [ "$MODE" = "developer" ]; then
     echo ""
     echo "Prerequisite: your SSH key must be added to your GitHub account"
     echo "and you must be a collaborator on borse/ePHEM."
+    echo ""
+
+    # Pre-flight hub: commands, diagnostics, reset — before any install steps.
+    dev_preflight_menu
     echo ""
 
     echo "Verifying your GitHub SSH access..."
