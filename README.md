@@ -365,6 +365,25 @@ docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
 
 > **Tip:** For Python changes, restart Odoo. For XML/CSS/QWeb changes, a browser reload is often enough with `dev_mode` on.
 
+### Colored Logs + One-Click Restart in PyCharm
+
+In **developer mode**, `setup.sh` sets `ODOO_PY_COLORS=1` in `docker-compose.override.yml`. This makes Odoo emit its own ANSI-colored log output (INFO / WARNING / ERROR), which PyCharm's console renders automatically — **no log-highlighting plugin needed**.
+
+To get a single button that restarts Odoo and streams those colored logs, use the bundled helper script `scripts/dev-logs.sh`:
+
+1. **Run → Edit Configurations… → ➕ → Shell Script**
+2. **Execute:** Script path → select `scripts/dev-logs.sh`
+3. **Name:** e.g. `Odoo: restart + logs` → OK
+4. Click the green ▶ — it restarts Odoo (or starts it if down) and follows the logs.
+
+The red ⏹ stops the *log follow* only; the container keeps running. You can also run the script directly:
+
+```bash
+bash scripts/dev-logs.sh
+```
+
+> Logs not colored? Make sure you're viewing them via `docker logs -f ephem-app` (or this script) — `docker compose logs` adds a `ephem-app |` prefix that some viewers mis-parse. The colors come from Odoo, so they also show in a plain terminal.
+
 ### Useful Developer Commands
 
 | What you want to do | Command |
@@ -372,7 +391,9 @@ docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
 | Start everything | `docker compose up -d` |
 | Stop everything | `docker compose down` |
 | Restart Odoo (after code changes) | `docker compose restart odoo` |
+| Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | View Odoo logs | `docker compose logs -f odoo` |
+| View raw colored logs (no prefix) | `docker logs -f ephem-app` |
 | Open Odoo Python shell | `docker compose exec odoo odoo shell -d YOUR_DB --db_host db --db_user odoo --db_password dev --no-http` |
 | Open PostgreSQL console | `docker compose exec db psql -U odoo` |
 | List databases | `docker compose exec db psql -U odoo -d postgres -c "\l"` |
@@ -566,6 +587,7 @@ Run from inside the `ephem-deploy` folder.
 | Start the system | `docker compose up -d` |
 | Stop the system | `docker compose down` |
 | Restart Odoo | `docker compose restart odoo` |
+| Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
@@ -704,6 +726,7 @@ ephem-deploy/
 │   ├── add-domain.sh               ← Add new domains to an existing installation
 │   ├── duplicate-db.sh             ← Copy a database (for training environments)
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
+│   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)
 │   ├── backup.sh                   ← Backup databases and filestore
 │   ├── clone-addons.sh             ← Clone addons after deploy key access is granted
 │   └── request-addons-access.sh    ← Generate a deploy key manually

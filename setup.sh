@@ -30,9 +30,12 @@ dev_cheatsheet() {
     echo "    docker compose logs -f odoo            # live tail (Ctrl-C to stop)"
     echo "    docker compose logs --tail=100 odoo    # last 100 lines"
     echo "    docker logs -f ephem-app               # raw odoo lines (no compose prefix)"
-    echo "      ↳ PyCharm: add this as a Shell Script run config for colorized logs"
-    echo "        (the Odoo log plugin colors any console with timestamp-prefixed lines)"
+    echo "      ↳ PyCharm: add this as a Shell Script run config for colored logs."
+    echo "        Colors come from Odoo itself (ODOO_PY_COLORS=1, set in the override) —"
+    echo "        no IDE plugin needed; the console just renders the ANSI codes."
     echo "  Service:"
+    echo "    bash scripts/dev-logs.sh               # restart Odoo + follow colored logs"
+    echo "      ↳ PyCharm: point a Shell Script run config at scripts/dev-logs.sh (green ▶)"
     echo "    docker compose restart odoo            # restart Odoo only"
     echo "    docker compose up -d                   # start everything"
     echo "    docker compose down                    # stop (keep data)"
@@ -369,6 +372,11 @@ if [ "$MODE" = "developer" ]; then
 # Do NOT commit this file. Add it to .gitignore.
 services:
   odoo:
+    environment:
+      # Force Odoo's colored log formatter even without a TTY, so `docker logs`
+      # (and PyCharm's console / a Shell Script run config) shows INFO/WARNING/
+      # ERROR in color — no extra IDE plugin needed.
+      ODOO_PY_COLORS: "1"
     volumes:
       - odoo-data:/var/lib/odoo
       - ./custom-addons:/mnt/extra-addons:rw
