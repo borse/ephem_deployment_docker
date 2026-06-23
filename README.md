@@ -13,6 +13,7 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
 
 - [Choose Your Setup](#choose-your-setup)
 - [Requirements](#requirements)
+- [Windows — Run Inside WSL](#windows--run-inside-wsl)
 - [Quick Start](#quick-start)
   - [Step 1 — Install Docker](#step-1--install-docker)
   - [Step 2 — Clone This Repo](#step-2--clone-this-repo)
@@ -25,10 +26,14 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
 - [Mode 3 — Developer](#mode-3--developer)
   - [Developer Prerequisites](#developer-prerequisites)
   - [GitHub SSH Key](#github-ssh-key)
+  - [Developer Pre-Flight Menu](#developer-pre-flight-menu)
   - [What the Script Sets Up](#what-the-script-sets-up)
   - [Open in PyCharm](#open-in-pycharm)
   - [Docker Plugin for PyCharm](#docker-plugin-for-pycharm)
+  - [Colored Logs + One-Click Restart in PyCharm](#colored-logs--one-click-restart-in-pycharm)
   - [Development Cycle](#development-cycle)
+  - [Switching to a New Remote Branch](#switching-to-a-new-remote-branch)
+  - [Multi-Instance Dev — Several Odoo Servers Side by Side](#multi-instance-dev--several-odoo-servers-side-by-side)
   - [Useful Developer Commands](#useful-developer-commands)
   - [Git Workflow](#git-workflow)
 - [ePHEM Custom Modules](#ephem-custom-modules)
@@ -72,14 +77,55 @@ Here's how each mode works:
 - **A server or computer** running one of:
   - **Linux** (Ubuntu 22.04+ recommended) — works out of the box
   - **Mac** (macOS 12+) — install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
-  - **Windows 10/11** — install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) and run all commands inside **WSL**
+  - **Windows 10/11** — see [Windows — Run Inside WSL](#windows--run-inside-wsl) below
 - At least **2 GB RAM**
 - **SSH access** (for remote servers) or a terminal (for local machines)
 - **A domain name** (for production servers with SSL) — pointed at the server's IP via a DNS A record
 
 > **No domain?** Fine for testing and local use. The script detects this and runs on `http://YOUR_IP:8069` or `http://localhost:8069`. You can add a domain later.
 
-> **Windows users:** Open a WSL terminal (search "WSL" or "Ubuntu" in Start) and run all commands there.
+---
+
+## Windows — Run Inside WSL
+
+`setup.sh` is a bash script. On Windows, run it inside **WSL** (Windows Subsystem for Linux). Docker Desktop integrates with WSL out of the box — this setup is well-tested on Windows 11 + Ubuntu + Docker Desktop.
+
+**One-time WSL setup:**
+
+1. Open **PowerShell as Administrator** and install WSL with Ubuntu:
+
+   ```powershell
+   wsl --install
+   ```
+
+   Reboot if asked, then finish the Ubuntu setup (UNIX username + password) when the Ubuntu window opens.
+
+2. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/). After installing, open Docker Desktop → **Settings → Resources → WSL integration** and enable it for your Ubuntu distro. Make sure Docker Desktop is running.
+
+3. Open the **Ubuntu** terminal from the Start menu (not PowerShell) and verify:
+
+   ```bash
+   docker --version
+   docker compose version
+   ```
+
+**From here on, run every command in this README inside the Ubuntu (WSL) terminal**, not PowerShell or CMD.
+
+> **Where to clone the repo:** keep it inside the Linux home folder (e.g. `/home/<you>/ephem-deploy`), not under `/mnt/c/...`. Files under `/mnt/c` work, but bind-mounts and Docker volumes are much slower there.
+
+**Using PyCharm on Windows with WSL:**
+
+- Open the project from the WSL filesystem: `File → Open` and paste `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\custom-addons`.
+- Optional but recommended: configure a **WSL-based Python interpreter** (PyCharm Professional) or just open the WSL path — Community Edition handles it fine for editing.
+- For the Shell Script run config that calls `scripts/dev-logs.sh` (see [Colored Logs + One-Click Restart in PyCharm](#colored-logs--one-click-restart-in-pycharm)), point **Script path** at the WSL form, e.g.:
+
+  ```
+  \\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\scripts\dev-logs.sh
+  ```
+
+  PyCharm executes it through WSL automatically because it lives on the WSL filesystem. The same applies for per-instance configs (`dev-logs.sh a`, `dev-logs.sh b`, …).
+
+> **Editing files from Windows:** any editor (PyCharm, VS Code, Notepad++) can edit the WSL files via `\\wsl.localhost\Ubuntu\...`. Avoid copying the folder to `C:\` and editing there — keep one canonical copy under WSL.
 
 ---
 
@@ -110,7 +156,9 @@ docker --version
 
 > If you skip the `usermod` step, `setup.sh` will detect it and tell you exactly what to do.
 
-**Mac or Windows:** Install [Docker Desktop](https://docs.docker.com/desktop/) and make sure it's running. On Windows, open a **WSL terminal** for all remaining steps.
+**Mac:** Install [Docker Desktop](https://docs.docker.com/desktop/) and make sure it's running.
+
+**Windows:** Follow [Windows — Run Inside WSL](#windows--run-inside-wsl) first, then open the Ubuntu (WSL) terminal for all remaining steps.
 
 ### Step 2 — Clone This Repo
 
@@ -271,6 +319,39 @@ ssh -T git@github.com
 
 The setup script runs this check automatically and stops with clear instructions if it fails.
 
+### Developer Pre-Flight Menu
+
+After choosing mode 3, the script first asks whether you've set up this machine before:
+
+```
+Have you already set up the ePHEM dev environment on this machine before? [y/N]:
+```
+
+- **First-time (`N` or just press Enter)** — installation continues straight away. No menu, no clicks.
+- **Returning (`y`)** — you get a menu of day-to-day developer actions before re-running setup:
+
+```
+  1) View relevant commands
+  2) Suggest commands (based on current state)
+  3) Open GitHub README / docs
+  4) Prerequisite check (docker, compose, git, ssh)
+  5) Container status / health
+  6) Doctor — scan logs for common errors
+  7) Reset / clean environment (keeps custom-addons)
+  8) Multi-instance dev — run several Odoo side by side
+  9) Fetch & switch to a remote branch (custom-addons or other)
+ 10) Continue with setup
+ 11) Exit
+```
+
+Things worth knowing about the menu:
+
+- **6) Doctor** scans the last 300 lines of Odoo's log for common errors (missing Python module, registry failure, DB connectivity) and prints the exact fix command.
+- **7) Reset** is the safe way to wipe DB + filestore volumes when you want a clean start. It **never** touches `custom-addons/`.
+- **8) Multi-instance dev** runs several Odoo servers side by side — see [Multi-Instance Dev](#multi-instance-dev--several-odoo-servers-side-by-side).
+- **9) Fetch & switch to a remote branch** is for the case where a teammate pushed a new branch upstream that your local `git branch -a` doesn't see yet — see [Switching to a New Remote Branch](#switching-to-a-new-remote-branch).
+- You can re-enter this menu any time by re-running `bash setup.sh` and choosing **3 → y**.
+
 ### What the Script Sets Up
 
 When you choose mode 3, `setup.sh`:
@@ -365,6 +446,58 @@ docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
 
 > **Tip:** For Python changes, restart Odoo. For XML/CSS/QWeb changes, a browser reload is often enough with `dev_mode` on.
 
+### Switching to a New Remote Branch
+
+A teammate just pushed a new branch (e.g. `18_national_dev_new_IAP_levels`) and your `git branch -a` doesn't see it? Developer mode clones with `--single-branch`, so the remote refspec only tracks the branch you originally chose. To pull in any other branch, use the pre-flight menu:
+
+```bash
+bash setup.sh    # → 3 (Developer) → y (already set up) → 9 (Fetch & switch)
+```
+
+You'll be prompted for:
+
+- **Repo folder** — defaults to `custom-addons` (just press Enter). Any other path is allowed too.
+- **Branch name** — e.g. `18_national_dev_new_IAP_levels`.
+
+The script then runs, inside that folder:
+
+```bash
+git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+git fetch origin <branch>
+git switch <branch>
+```
+
+The first command rewrites the clone's refspec so future `git fetch` calls pick up **all** remote branches — a one-time fix for the `--single-branch` clone.
+
+> **Manual equivalent:** run the three commands above from inside the target folder (`cd custom-addons` first). The menu option is exactly this, with prompts.
+
+### Multi-Instance Dev — Several Odoo Servers Side by Side
+
+When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_national_dev`, or running a per-developer sandbox — use the pre-flight menu:
+
+```bash
+bash setup.sh    # → 3 (Developer) → y (already set up) → 8 (Multi-instance)
+```
+
+The menu hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs:
+
+| Instance name | URL | Database | Custom-addons folder |
+|---------------|-----|----------|----------------------|
+| `a` | `http://localhost:8069` | `ephem_a` | `custom-addons-a/` |
+| `b` | `http://localhost:8079` | `ephem_b` | `custom-addons-b/` |
+| `c` | `http://localhost:8089` | `ephem_c` | `custom-addons-c/` |
+
+Pin each instance to a branch when you start it:
+
+```bash
+bash scripts/dev-instances.sh up a:18_national_dev b:16_national_dev c
+bash scripts/dev-instances.sh status      # ports + URLs + health
+bash scripts/dev-instances.sh down        # stop (keep data)
+bash scripts/dev-instances.sh down -v     # stop + wipe DB / filestore
+```
+
+In PyCharm, make **one Shell Script run config per instance** — `scripts/dev-logs.sh a`, `scripts/dev-logs.sh b`, `scripts/dev-logs.sh c` — for a dedicated green ▶ + colored log stream per server.
+
 ### Colored Logs + One-Click Restart in PyCharm
 
 In **developer mode**, `setup.sh` sets `ODOO_PY_COLORS=1` in `docker-compose.override.yml`. This makes Odoo emit its own ANSI-colored log output (INFO / WARNING / ERROR), which PyCharm's console renders automatically — **no log-highlighting plugin needed**.
@@ -372,15 +505,22 @@ In **developer mode**, `setup.sh` sets `ODOO_PY_COLORS=1` in `docker-compose.ove
 To get a single button that restarts Odoo and streams those colored logs, use the bundled helper script `scripts/dev-logs.sh`:
 
 1. **Run → Edit Configurations… → ➕ → Shell Script**
-2. **Execute:** Script path → select `scripts/dev-logs.sh`
-3. **Name:** e.g. `Odoo: restart + logs` → OK
-4. Click the green ▶ — it restarts Odoo (or starts it if down) and follows the logs.
+2. **Execute:** Script path:
+   - **Linux / Mac:** `/full/path/to/ephem-deploy/scripts/dev-logs.sh`
+   - **Windows + WSL:** `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\scripts\dev-logs.sh`
+3. **Working directory:** the repo root (same folder, drop the trailing `scripts/dev-logs.sh`).
+4. **Script options** (for a single named multi-instance, optional): the instance name, e.g. `a`.
+5. **Name:** e.g. `Odoo: restart + logs` → OK.
+6. Click the green ▶ — it restarts Odoo (or starts it if down) and follows the logs.
 
 The red ⏹ stops the *log follow* only; the container keeps running. You can also run the script directly:
 
 ```bash
-bash scripts/dev-logs.sh
+bash scripts/dev-logs.sh           # single-instance stack
+bash scripts/dev-logs.sh a         # multi-instance — instance 'a'
 ```
+
+> **Don't point the run config at `dev-instances.sh`.** That script is the multi-instance *orchestrator* and needs a subcommand (`up`, `down`, `status`, `logs`, `list`) — running it with just a name (e.g. `dev-instances.sh 1`) just prints its usage. The per-instance play button always uses `dev-logs.sh <name>`; bring the stack up once with `bash scripts/dev-instances.sh up <names…>` (or via setup menu → 8).
 
 > Logs not colored? Make sure you're viewing them via `docker logs -f ephem-app` (or this script) — `docker compose logs` adds a `ephem-app |` prefix that some viewers mis-parse. The colors come from Odoo, so they also show in a plain terminal.
 
@@ -766,10 +906,4 @@ ephem-deploy/
 2. Run `docker compose logs` and share the output with the ePHEM team
 3. Open an issue: [github.com/borse/ephem_deployment_docker/issues](https://github.com/borse/ephem_deployment_docker/issues)
 
-
-## To switch to testing branch
-```bash
-git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-git fetch origin
-git switch 18_national_test
-```
+> **Developers — need a branch your clone doesn't see?** See [Switching to a New Remote Branch](#switching-to-a-new-remote-branch).

@@ -220,14 +220,52 @@ dev_multi_instance() {
     esac
 }
 
+dev_fetch_branch() {
+    echo -e "${CYAN}${BOLD}Fetch & switch to a remote branch${NC}"
+    echo ""
+    echo "  Use this when a teammate created a new branch upstream and your"
+    echo "  local clone doesn't see it yet (common after a --single-branch clone)."
+    echo ""
+    read -p "  Repo folder [custom-addons]: " REPO
+    REPO="${REPO:-custom-addons}"
+    if [ ! -d "$REPO/.git" ]; then
+        echo -e "${RED}✗${NC} '$REPO' is not a git repository."
+        return 0
+    fi
+    read -p "  Branch name on origin (e.g. 18_national_dev_new): " BR
+    if [ -z "${BR:-}" ]; then
+        echo "  Cancelled — no branch name given."
+        return 0
+    fi
+    echo ""
+    echo "  In $REPO, running:"
+    echo "    git config remote.origin.fetch \"+refs/heads/*:refs/remotes/origin/*\""
+    echo "    git fetch origin $BR"
+    echo "    git switch $BR"
+    echo ""
+    (
+        cd "$REPO" || exit 1
+        git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+        if ! git fetch origin "$BR"; then
+            echo ""
+            echo -e "${RED}✗${NC} Fetch failed — does branch '$BR' exist on origin?"
+            echo "    git ls-remote --heads origin | grep $BR"
+            exit 1
+        fi
+        git switch "$BR"
+    ) && echo -e "${GREEN}✓${NC} $REPO now on branch '$BR'"
+}
+
 dev_preflight_menu() {
     read -p "Have you already set up the ePHEM dev environment on this machine before? [y/N]: " ALREADY_SETUP
     echo ""
-    if [[ "${ALREADY_SETUP:-N}" =~ ^[Yy]$ ]]; then
-        echo "Welcome back. Use the menu below, or choose 'Continue' to re-run setup."
-    else
-        echo "First-time setup. Use the menu to check prerequisites, or 'Continue' to install."
+    if [[ ! "${ALREADY_SETUP:-N}" =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}First-time setup — continuing with installation…${NC}"
+        echo "  (Re-run this script later to access the developer menu:"
+        echo "   prereq checks, doctor, multi-instance, etc.)"
+        return 0
     fi
+    echo "Welcome back. Use the menu below, or choose 'Continue' to re-run setup."
     while true; do
         echo ""
         echo -e "${BOLD}Developer pre-flight menu${NC}"
@@ -239,12 +277,13 @@ dev_preflight_menu() {
         echo "  6) Doctor — scan logs for common errors"
         echo "  7) Reset / clean environment (keeps custom-addons)"
         echo "  8) Multi-instance dev — run several Odoo side by side"
-        echo "  9) Continue with setup"
-        echo " 10) Exit"
+        echo "  9) Fetch & switch to a remote branch (custom-addons or other)"
+        echo " 10) Continue with setup"
+        echo " 11) Exit"
         echo ""
-        read -p "Choose [1-10] (default: 9): " PRE
+        read -p "Choose [1-11] (default: 10): " PRE
         echo ""
-        case "${PRE:-9}" in
+        case "${PRE:-10}" in
             1) dev_cheatsheet || true ;;
             2) dev_suggest || true ;;
             3) dev_readme || true ;;
@@ -253,9 +292,10 @@ dev_preflight_menu() {
             6) dev_doctor || true ;;
             7) dev_reset || true ;;
             8) dev_multi_instance || true ;;
-            9) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
-            10) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
-            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-10." ;;
+            9) dev_fetch_branch || true ;;
+            10) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
+            11) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
+            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-11." ;;
         esac
     done
 }
@@ -424,21 +464,6 @@ OVERRIDE
     echo -e "${GREEN}✓${NC} docker-compose.override.yml created (nginx disabled, Odoo on :8069)"
 
     DEV_MODE=true
-
-    echo ""
-    echo -e "${CYAN}──────────────────────────────────────────────"
-    echo -e "  Open in PyCharm"
-    echo -e "──────────────────────────────────────────────${NC}"
-    echo ""
-    echo "  File → Open → select the custom-addons/ folder"
-    echo ""
-    echo "  Development cycle:"
-    echo "    1. Edit any file in PyCharm"
-    echo "    2. docker compose restart odoo"
-    echo "    3. Test at http://localhost:8069"
-    echo ""
-    echo "  Watch logs:  docker compose logs -f odoo"
-    echo ""
 fi
 
 ERRORS=0
@@ -905,18 +930,32 @@ if [ "$MODE" = "developer" ]; then
     echo ""
     echo "  http://localhost:8069"
     echo ""
-    echo "Open in PyCharm:"
-    echo "  File → Open → custom-addons/"
+    echo -e "${CYAN}${BOLD}Recommended dev workflow — drive Odoo from PyCharm${NC}"
     echo ""
-    echo "Development cycle:"
-    echo "  1. Edit any file in custom-addons/"
-    echo "  2. docker compose restart odoo"
-    echo "  3. Refresh http://localhost:8069"
+    echo "  Instead of typing docker commands, use scripts/dev-logs.sh."
+    echo "  It restarts Odoo and streams colored logs — bind it to PyCharm's"
+    echo "  green ▶ button and the whole dev cycle becomes one click."
     echo ""
-    echo "  docker compose logs -f odoo   (watch logs)"
+    echo "  One-time PyCharm setup:"
+    echo "    1. File → Open → select the custom-addons/ folder"
+    echo "    2. Run → Edit Configurations → + → Shell Script"
+    echo "       • Name:               Odoo (restart + logs)"
+    echo "       • Script path:        $PWD/scripts/dev-logs.sh"
+    echo "       • Working directory:  $PWD"
+    echo "    3. Apply → OK"
     echo ""
-    echo "Need several Odoo servers at once (different addons/ports/DBs)?"
-    echo "  bash scripts/dev-instances.sh up 1 2 3      (then: ... status / down)"
+    echo "  Development cycle (after the one-time setup):"
+    echo "    1. Edit any file in custom-addons/ in PyCharm"
+    echo "    2. Click the green ▶ — Odoo restarts, logs stream in the console"
+    echo "    3. Refresh http://localhost:8069"
+    echo ""
+    echo -e "${CYAN}${BOLD}Need several Odoo servers running at once?${NC}"
+    echo ""
+    echo "  Re-run setup to launch multi-instance dev:"
+    echo "    bash setup.sh   →   3 (Developer)   →   y (already set up)   →   8 (Multi-instance)"
+    echo ""
+    echo "  Then add one PyCharm Shell Script run config per instance, e.g.:"
+    echo "    scripts/dev-logs.sh a     scripts/dev-logs.sh b     scripts/dev-logs.sh c"
 
 elif [ "$MODE" = "demo" ]; then
     DEMO_ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
