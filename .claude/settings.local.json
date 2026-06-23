@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C custom-addons-2 status)",
+      "Bash(git -C custom-addons-3 status)"
+    ]
+  }
+}

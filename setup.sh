@@ -228,13 +228,36 @@ dev_fetch_branch() {
     echo ""
     read -p "  Repo folder [custom-addons]: " REPO
     REPO="${REPO:-custom-addons}"
-    if [ ! -d "$REPO/.git" ]; then
-        echo -e "${RED}✗${NC} '$REPO' is not a git repository."
-        return 0
-    fi
     read -p "  Branch name on origin (e.g. 18_national_dev_new): " BR
     if [ -z "${BR:-}" ]; then
         echo "  Cancelled — no branch name given."
+        return 0
+    fi
+    if [ ! -d "$REPO/.git" ]; then
+        echo ""
+        echo -e "${YELLOW}!${NC} '$REPO' is not a git repository — cloning fresh from origin."
+        if [ -e "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
+            read -p "  '$REPO' exists and is not empty. Delete it and clone fresh? [y/N]: " CONF
+            if [[ ! "${CONF:-N}" =~ ^[Yy]$ ]]; then
+                echo "  Cancelled."
+                return 0
+            fi
+            rm -rf "$REPO"
+        elif [ -e "$REPO" ]; then
+            rm -rf "$REPO"
+        fi
+        echo ""
+        echo "  Cloning git@github.com:borse/ePHEM.git (branch: $BR) into $REPO..."
+        if git clone git@github.com:borse/ePHEM.git \
+               --branch "$BR" \
+               --single-branch \
+               "$REPO" \
+               --progress; then
+            echo -e "${GREEN}✓${NC} $REPO cloned (branch: $BR)"
+        else
+            echo -e "${RED}✗${NC} Clone failed — does branch '$BR' exist on origin, and is your SSH key authorized?"
+            return 1
+        fi
         return 0
     fi
     echo ""
