@@ -8,6 +8,7 @@ backups/*.gz
 backups/*.log
 .env
 custom-addons/
+odoo.conf
 
 # NGINX HTTP-only backup (created by ssl-setup.sh)
 nginx/active.conf
