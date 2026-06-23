@@ -224,6 +224,8 @@ cmd_status() {
             echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: custom-addons-$name/)"
             i=$(( i + 1 ))
         done < "$INSTANCES_FILE"
+        echo ""
+        echo "Restart + tail one instance:  bash scripts/dev-logs.sh <name>   (e.g. dev-logs.sh a)"
     fi
 }
 
