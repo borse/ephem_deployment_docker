@@ -197,6 +197,28 @@ dev_reset() {
     esac
 }
 
+dev_multi_instance() {
+    echo -e "${CYAN}${BOLD}Multi-instance dev — run several Odoo servers side by side${NC}"
+    echo ""
+    echo "  Runs N Odoo containers sharing ONE Postgres, each with its own:"
+    echo "    • port            (8069, 8079, 8089, …)"
+    echo "    • custom-addons   (custom-addons-<name>/)"
+    echo "    • config + DB     (odoo-<name>.conf, database ephem_<name>)"
+    echo ""
+    echo "  This is separate from the single-instance stack. Examples:"
+    echo "    bash scripts/dev-instances.sh up 1 2 3"
+    echo "    bash scripts/dev-instances.sh up a:18_national_dev b:16_national_dev c"
+    echo "    bash scripts/dev-instances.sh status   # ports + URLs"
+    echo "    bash scripts/dev-instances.sh down     # stop (keep data)"
+    echo ""
+    read -p "  Start instances now? Enter names (space-separated) or blank for '1 2 3', or 'n' to skip: " MI
+    case "${MI:-}" in
+        n|N) echo "  Skipped." ;;
+        "")  bash scripts/dev-instances.sh up 1 2 3 ;;
+        *)   bash scripts/dev-instances.sh up $MI ;;
+    esac
+}
+
 dev_preflight_menu() {
     read -p "Have you already set up the ePHEM dev environment on this machine before? [y/N]: " ALREADY_SETUP
     echo ""
@@ -215,12 +237,13 @@ dev_preflight_menu() {
         echo "  5) Container status / health"
         echo "  6) Doctor — scan logs for common errors"
         echo "  7) Reset / clean environment (keeps custom-addons)"
-        echo "  8) Continue with setup"
-        echo "  9) Exit"
+        echo "  8) Multi-instance dev — run several Odoo side by side"
+        echo "  9) Continue with setup"
+        echo " 10) Exit"
         echo ""
-        read -p "Choose [1-9] (default: 8): " PRE
+        read -p "Choose [1-10] (default: 9): " PRE
         echo ""
-        case "${PRE:-8}" in
+        case "${PRE:-9}" in
             1) dev_cheatsheet || true ;;
             2) dev_suggest || true ;;
             3) dev_readme || true ;;
@@ -228,9 +251,10 @@ dev_preflight_menu() {
             5) dev_status || true ;;
             6) dev_doctor || true ;;
             7) dev_reset || true ;;
-            8) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
-            9) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
-            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-9." ;;
+            8) dev_multi_instance || true ;;
+            9) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
+            10) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
+            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-10." ;;
         esac
     done
 }
@@ -671,7 +695,8 @@ fi
 # ── Scripts ───────────────────────────────────
 for script in scripts/backup.sh scripts/ssl-setup.sh scripts/add-domain.sh \
               scripts/duplicate-db.sh scripts/update-modules.sh \
-              scripts/request-addons-access.sh scripts/clone-addons.sh; do
+              scripts/request-addons-access.sh scripts/clone-addons.sh \
+              scripts/dev-instances.sh scripts/dev-logs.sh; do
     [ -f "$script" ] && chmod +x "$script"
 done
 echo -e "${GREEN}✓${NC} Scripts are executable"
@@ -888,6 +913,9 @@ if [ "$MODE" = "developer" ]; then
     echo "  3. Refresh http://localhost:8069"
     echo ""
     echo "  docker compose logs -f odoo   (watch logs)"
+    echo ""
+    echo "Need several Odoo servers at once (different addons/ports/DBs)?"
+    echo "  bash scripts/dev-instances.sh up 1 2 3      (then: ... status / down)"
 
 elif [ "$MODE" = "demo" ]; then
     DEMO_ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)

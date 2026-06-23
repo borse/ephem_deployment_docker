@@ -22,3 +22,9 @@ Thumbs.db
 *.swp
 *~
 /docker-compose.override.yml
+
+# Multi-instance dev mode (scripts/dev-instances.sh)
+/docker-compose.dev-multi.yml
+/.dev-instances
+custom-addons-*/
+odoo-*.conf
