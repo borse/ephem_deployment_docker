@@ -29,7 +29,4 @@ Thumbs.db
 custom-addons-*/
 odoo-*.conf
 
-/custom-addons-1
-/custom-addons-2
-/custom-addons*
-/custom-addons-3
+
