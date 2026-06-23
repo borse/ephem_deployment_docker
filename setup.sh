@@ -279,6 +279,28 @@ dev_fetch_branch() {
     ) && echo -e "${GREEN}✓${NC} $REPO now on branch '$BR'"
 }
 
+select_instance_layout() {
+    # Sets DEV_LAYOUT to "single" or "multi". Auto-detects an existing
+    # multi-instance setup so re-running setup doesn't silently clobber it.
+    echo ""
+    echo -e "${BOLD}Are you running a single Odoo or multiple Odoos side by side?${NC}"
+    echo ""
+    local default_choice=1 default_label="single-instance"
+    if [ -f docker-compose.dev-multi.yml ] && [ -f .dev-instances ] && [ -s .dev-instances ]; then
+        default_choice=2
+        default_label="multi-instance (detected: $(tr '\n' ' ' < .dev-instances | sed 's/ *$//'))"
+    fi
+    echo "  1) Single-instance — one Odoo on :8069"
+    echo "  2) Multi-instance  — several Odoos on :8069, :8079, …  (scripts/dev-instances.sh)"
+    echo ""
+    echo "  Detected default: ${default_label}"
+    read -p "Choose [1-2] (default: $default_choice): " LAYOUT_CHOICE
+    case "${LAYOUT_CHOICE:-$default_choice}" in
+        2) DEV_LAYOUT="multi" ;;
+        *) DEV_LAYOUT="single" ;;
+    esac
+}
+
 dev_preflight_menu() {
     read -p "Have you already set up the ePHEM dev environment on this machine before? [y/N]: " ALREADY_SETUP
     echo ""
@@ -368,6 +390,142 @@ if [ "$MODE" = "developer" ]; then
     # Pre-flight hub: commands, diagnostics, reset — before any install steps.
     dev_preflight_menu
     echo ""
+
+    # Ask single vs multi BEFORE any single-instance work — so re-running
+    # setup against an existing multi-instance stack doesn't clobber it.
+    select_instance_layout
+
+    if [ "$DEV_LAYOUT" = "multi" ]; then
+        echo ""
+        echo -e "${CYAN}${BOLD}Multi-instance mode${NC}"
+        echo ""
+        echo "  Single-instance steps (override file, odoo.conf, custom-addons/, "
+        echo "  single 'docker compose up -d') will be SKIPPED — they would fight"
+        echo "  the multi-instance stack. Delegating to scripts/dev-instances.sh."
+        echo ""
+
+        if [ ! -f .env ]; then
+            echo -e "${RED}✗${NC} .env not found."
+            echo "  Run this script once in single-instance mode first to create .env,"
+            echo "  then come back and choose multi-instance."
+            exit 1
+        fi
+
+        if [ -f .dev-instances ] && [ -s .dev-instances ]; then
+            INSTANCE_NAMES=$(tr '\n' ' ' < .dev-instances | sed 's/ *$//')
+            echo "  Configured instances: ${BOLD}${INSTANCE_NAMES}${NC}"
+            read -p "  Use these names? [Y/n]: " USE_EXISTING
+            if [[ "${USE_EXISTING:-Y}" =~ ^[Nn]$ ]]; then
+                read -p "  Enter instance names (space-separated, e.g. '1 2 3' or 'a:18_national_dev b'): " INSTANCE_NAMES
+            fi
+        else
+            read -p "  Enter instance names (space-separated, default: 1 2 3): " INSTANCE_NAMES
+            INSTANCE_NAMES="${INSTANCE_NAMES:-1 2 3}"
+        fi
+
+        echo ""
+        read -p "  Pull latest Odoo image first? [y/N]: " PULL_IMG
+        if [[ "${PULL_IMG:-N}" =~ ^[Yy]$ ]]; then
+            echo "  Pulling borrs/ephem:latest (this may take a few minutes)..."
+            if [ -f docker-compose.dev-multi.yml ]; then
+                docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml pull \
+                    || docker compose pull odoo || true
+            else
+                docker compose pull odoo || true
+            fi
+        fi
+
+        # ── Sync Postgres 'odoo' password to current .env BEFORE refreshing ──
+        # Why this matters: the Postgres data volume persists the password set
+        # when 'odoo' was first created. If .env's POSTGRES_PASSWORD has changed
+        # since (e.g. via the auto-fix in single-instance mode, or a manual
+        # edit), the recreated odoo_<name> containers will hit:
+        #   FATAL: password authentication failed for user "odoo"
+        # `docker compose exec` uses the unix socket inside the db container,
+        # which is `trust` auth — no password needed — so this works even when
+        # the cached one is wrong.
+        echo ""
+        echo "Ensuring Postgres is up so we can sync the 'odoo' password to current .env…"
+        docker compose up -d db >/dev/null 2>&1 || true
+
+        echo "Waiting for database…"
+        DB_READY=0
+        for i in $(seq 1 30); do
+            if docker compose exec -T db pg_isready -U odoo -q 2>/dev/null; then
+                DB_READY=1
+                break
+            fi
+            sleep 2
+        done
+
+        if [ "$DB_READY" -eq 1 ]; then
+            ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- | xargs)
+            if [ -n "$ENV_PASSWORD" ]; then
+                if docker compose exec -T db psql -U odoo -d postgres \
+                       -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" >/dev/null 2>&1; then
+                    echo -e "${GREEN}✓${NC} Postgres 'odoo' password synced to current .env"
+                else
+                    echo -e "${YELLOW}!${NC} Could not sync password automatically. If you still get"
+                    echo "    'password authentication failed for user \"odoo\"' after this,"
+                    echo "    your db volume was likely initialized with a different POSTGRES_USER."
+                    echo "    Last-resort reset (DESTROYS dev databases):  docker compose down -v"
+                fi
+            else
+                echo -e "${YELLOW}!${NC} POSTGRES_PASSWORD is empty in .env — skipping password sync."
+            fi
+        else
+            echo -e "${YELLOW}!${NC} db did not become ready — skipping password sync."
+            echo "    Inspect: docker compose logs db"
+        fi
+
+        echo ""
+        echo "Refreshing multi-instance stack against current .env (recreates containers"
+        echo "so they pick up POSTGRES_PASSWORD changes)…"
+        echo ""
+        # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
+        bash scripts/dev-instances.sh up $INSTANCE_NAMES
+
+        # ── Post-check: catch the auth error if any instance is still broken ──
+        echo ""
+        echo "Verifying multi-instance database connection…"
+        sleep 5
+        FIRST_NAME=$(printf '%s' "$INSTANCE_NAMES" | awk '{print $1}' | cut -d':' -f1 | tr -c 'a-zA-Z0-9_-' '_')
+        if [ -n "$FIRST_NAME" ]; then
+            INST_LOG=$(docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml \
+                       logs --tail=20 "odoo_$FIRST_NAME" 2>&1 || true)
+            if echo "$INST_LOG" | grep -q "password authentication failed"; then
+                echo -e "${YELLOW}! odoo_$FIRST_NAME still reports auth failure. Forcing a recreate of all instances…${NC}"
+                # shellcheck disable=SC2086
+                for SPEC in $INSTANCE_NAMES; do
+                    SAN=$(printf '%s' "$SPEC" | cut -d':' -f1 | tr -c 'a-zA-Z0-9_-' '_')
+                    docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml \
+                        up -d --force-recreate --no-deps "odoo_$SAN" 2>/dev/null || true
+                done
+                sleep 3
+                INST_LOG=$(docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml \
+                           logs --tail=10 "odoo_$FIRST_NAME" 2>&1 || true)
+                if echo "$INST_LOG" | grep -q "password authentication failed"; then
+                    echo -e "${RED}✗${NC} Auth still failing. Run:"
+                    echo "    bash scripts/dev-logs.sh $FIRST_NAME"
+                    echo "  Or as a last resort (DESTROYS dev DBs):"
+                    echo "    docker compose down -v"
+                else
+                    echo -e "${GREEN}✓${NC} odoo_$FIRST_NAME is connecting now."
+                fi
+            else
+                echo -e "${GREEN}✓${NC} odoo_$FIRST_NAME is connecting to the database."
+            fi
+        fi
+
+        echo ""
+        echo -e "${GREEN}✓ Multi-instance dev is up.${NC}"
+        echo ""
+        echo "  Status:                  bash scripts/dev-instances.sh status"
+        echo "  Restart + tail one:      bash scripts/dev-logs.sh <name>"
+        echo "  Stop (keep data):        bash scripts/dev-instances.sh down"
+        echo ""
+        exit 0
+    fi
 
     echo "Verifying your GitHub SSH access..."
     SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
