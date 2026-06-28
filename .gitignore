@@ -28,6 +28,9 @@ Thumbs.db
 /.dev-instances
 custom-addons-*/
 odca*/
+odca1/
+odca2/
+odca3/
 odoo-*.conf
 
 
