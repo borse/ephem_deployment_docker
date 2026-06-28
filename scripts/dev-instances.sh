@@ -4,8 +4,8 @@
 # all sharing ONE Postgres container but using SEPARATE databases.
 #
 # Each instance gets:
-#   • its own host port            (8069, 8079, 8089, …)
-#   • its own custom-addons folder (custom-addons-<name>/)
+#   • its own host port            (8010, 8020, 8030, …)
+#   • its own custom-addons folder (odca<name>/)
 #   • its own odoo config          (odoo-<name>.conf)
 #   • its own database + filestore (DB "ephem_<name>", volume odoo-data-<name>)
 #
@@ -35,8 +35,8 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BO
 MULTI_FILE="docker-compose.dev-multi.yml"
 COMPOSE=(docker compose -f docker-compose.yml -f "$MULTI_FILE")
 
-WEB_BASE=8069     # first instance HTTP port
-LONG_BASE=8072    # first instance longpolling/gevent port
+WEB_BASE=8010     # first instance HTTP port
+LONG_BASE=8012    # first instance longpolling/gevent port (sits next to its web port)
 STEP=10           # port gap between instances
 
 # Comma-free record of which instances the generated file describes.
@@ -57,7 +57,7 @@ san() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_'; }
 
 ensure_addons() {
     # $1 = instance name (sanitised), $2 = optional branch
-    local name="$1" branch="${2:-}" dir="custom-addons-$1"
+    local name="$1" branch="${2:-}" dir="odca$1"
     if [ -d "$dir/.git" ]; then
         echo -e "  ${GREEN}✓${NC} $dir (git: $(git -C "$dir" branch --show-current 2>/dev/null || echo '?'))"
         return
@@ -152,7 +152,7 @@ cmd_up() {
       ODOO_PY_COLORS: \"1\"
     volumes:
       - odoo-data-$name:/var/lib/odoo
-      - ./custom-addons-$name:/mnt/extra-addons:rw
+      - ./odca$name:/mnt/extra-addons:rw
       - ./odoo-$name.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal
@@ -221,7 +221,7 @@ cmd_status() {
         echo "URLs:"
         while IFS= read -r name; do
             [ -z "$name" ] && continue
-            echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: custom-addons-$name/)"
+            echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: odca$name/)"
             i=$(( i + 1 ))
         done < "$INSTANCES_FILE"
         echo ""

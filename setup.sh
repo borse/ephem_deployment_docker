@@ -202,8 +202,8 @@ dev_multi_instance() {
     echo -e "${CYAN}${BOLD}Multi-instance dev — run several Odoo servers side by side${NC}"
     echo ""
     echo "  Runs N Odoo containers sharing ONE Postgres, each with its own:"
-    echo "    • port            (8069, 8079, 8089, …)"
-    echo "    • custom-addons   (custom-addons-<name>/)"
+    echo "    • port            (8010, 8020, 8030, …)"
+    echo "    • custom-addons   (odca<name>/)"
     echo "    • config + DB     (odoo-<name>.conf, database ephem_<name>)"
     echo ""
     echo "  This is separate from the single-instance stack. Examples:"
@@ -291,7 +291,7 @@ select_instance_layout() {
         default_label="multi-instance (detected: $(tr '\n' ' ' < .dev-instances | sed 's/ *$//'))"
     fi
     echo "  1) Single-instance — one Odoo on :8069"
-    echo "  2) Multi-instance  — several Odoos on :8069, :8079, …  (scripts/dev-instances.sh)"
+    echo "  2) Multi-instance  — several Odoos on :8010, :8020, …  (scripts/dev-instances.sh)"
     echo ""
     echo "  Detected default: ${default_label}"
     read -p "Choose [1-2] (default: $default_choice): " LAYOUT_CHOICE

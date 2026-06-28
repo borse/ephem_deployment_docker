@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────
 # Bash completion for scripts/dev-logs.sh
 # Lists Odoo module names after -u / -i (and --update / --init),
-# scoped to the right custom-addons-<name>/ folder based on the
+# scoped to the right odca<name>/ folder based on the
 # multi-instance name you typed.
 #
 # Handles comma-separated values: complete after the last comma,
@@ -13,7 +13,7 @@
 #   exec bash    # or open a new terminal
 #
 # ── Use ───────────────────────────────────────────────────────
-#   ./scripts/dev-logs.sh 1 -u eoc_<TAB>           # modules in custom-addons-1/
+#   ./scripts/dev-logs.sh 1 -u eoc_<TAB>           # modules in odca1/
 #   ./scripts/dev-logs.sh 1 -u mod1,mod2,<TAB>     # complete after last comma
 #   ./scripts/dev-logs.sh -u <TAB>                 # single-instance → custom-addons/
 #
@@ -29,7 +29,7 @@ _dev_logs_list_modules() {
     # $1 = repo root, $2 = instance name (may be empty → single-instance)
     local addons_dir
     if [ -n "$2" ]; then
-        addons_dir="$1/custom-addons-$2"
+        addons_dir="$1/odca$2"
     else
         addons_dir="$1/custom-addons"
     fi

@@ -483,14 +483,14 @@ The menu hands off to `scripts/dev-instances.sh`, which spins up named instances
 
 | Instance name | URL | Database | Custom-addons folder |
 |---------------|-----|----------|----------------------|
-| `a` | `http://localhost:8069` | `ephem_a` | `custom-addons-a/` |
-| `b` | `http://localhost:8079` | `ephem_b` | `custom-addons-b/` |
-| `c` | `http://localhost:8089` | `ephem_c` | `custom-addons-c/` |
+| `1` | `http://localhost:8010` | `ephem_1` | `odca1/` |
+| `2` | `http://localhost:8020` | `ephem_2` | `odca2/` |
+| `3` | `http://localhost:8030` | `ephem_3` | `odca3/` |
 
 Pin each instance to a branch when you start it:
 
 ```bash
-bash scripts/dev-instances.sh up a:18_national_dev b:16_national_dev c
+bash scripts/dev-instances.sh up 1:18_national_dev 2:16_national_dev 3
 bash scripts/dev-instances.sh status      # ports + URLs + health
 bash scripts/dev-instances.sh down        # stop (keep data)
 bash scripts/dev-instances.sh down -v     # stop + wipe DB / filestore

@@ -27,6 +27,7 @@ Thumbs.db
 /docker-compose.dev-multi.yml
 /.dev-instances
 custom-addons-*/
+odca*/
 odoo-*.conf
 
 
