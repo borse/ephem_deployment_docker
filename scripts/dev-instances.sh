@@ -104,7 +104,10 @@ xmlrpc_port = 8069
 gevent_port = 8072
 
 log_level = debug
-dev_mode = reload,qweb,werkzeug,xml
+; 'assets' makes Odoo regenerate JS/SCSS/OWL-template bundles when those source
+; files change, so frontend edits show on a plain reload instead of needing a
+; restart or module update.
+dev_mode = reload,qweb,werkzeug,xml,assets
 
 list_db = True
 ; Pin this instance to its own database so you can't log into the wrong one.
