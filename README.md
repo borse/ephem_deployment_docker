@@ -95,7 +95,7 @@ Here's how each mode works:
 1. Open **PowerShell as Administrator** and install WSL with Ubuntu:
 
    ```powershell
-   wsl --install
+   wsl --install -d Ubuntu
    ```
 
    Reboot if asked, then finish the Ubuntu setup (UNIX username + password) when the Ubuntu window opens.
