@@ -700,7 +700,7 @@ if [ -f ".env" ]; then
     if grep -q "CHANGE_ME" .env; then
         if [ "$MODE" = "demo" ] || [ "$MODE" = "developer" ]; then
             echo -e "${YELLOW}!${NC} .env has CHANGE_ME — auto-generating passwords for local use..."
-            AUTO_PG_PASS=$(openssl rand -base64 12 2>/dev/null || echo "ephem-$(date +%s)")
+            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
             else
@@ -754,7 +754,7 @@ else
     cp .env.example .env
 
     if [ "$MODE" = "demo" ] || [ "$MODE" = "developer" ]; then
-        AUTO_PG_PASS=$(openssl rand -base64 12 2>/dev/null || echo "ephem-$(date +%s)")
+        AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
         if sed --version 2>/dev/null | grep -q GNU; then
             sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
         else
