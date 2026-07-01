@@ -5,7 +5,8 @@
       "Bash(git -C custom-addons-3 status)",
       "Bash(mkdir -p custom-addons-2/.claude/skills/ephem_ali_IAP_levels)",
       "Bash(cp custom-addons-1/.claude/skills/ephem_ali_IAP_levels/SKILL.md custom-addons-2/.claude/skills/ephem_ali_IAP_levels/SKILL.md)",
-      "Read(//home/ephem/.claude/**)"
+      "Read(//home/ephem/.claude/**)",
+      "Workflow(code-review)"
     ]
   }
 }
