@@ -23,6 +23,12 @@ Thumbs.db
 *~
 /docker-compose.override.yml
 
+# Claude Code — personal, machine-local settings (shared ones go in settings.json)
+.claude/settings.local.json
+
+# Stray sandbox/agent output — never belongs in the repo
+/mnt/
+
 # Multi-instance dev mode (scripts/dev-instances.sh)
 /docker-compose.dev-multi.yml
 /.dev-instances
