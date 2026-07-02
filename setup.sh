@@ -279,6 +279,82 @@ dev_fetch_branch() {
     ) && echo -e "${GREEN}✓${NC} $REPO now on branch '$BR'"
 }
 
+# Sanitise an instance name into the folder/service-safe form dev-instances.sh uses.
+san_name() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_'; }
+
+multi_switch_branch() {
+    # $1 = dir, $2 = branch. Widen the fetch refspec (single-branch clones only
+    # track one branch), fetch that branch, then switch/checkout to it.
+    local dir="$1" branch="$2"
+    (
+        cd "$dir" || exit 1
+        git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+        git fetch origin "$branch" || exit 1
+        git switch "$branch" 2>/dev/null || git checkout "$branch"
+    )
+}
+
+prepare_multi_addons() {
+    # $1 = branch, remaining args = instance names.
+    #
+    # Downloads ePHEM ONCE into the first instance's odca dir, then copies that
+    # folder (including its .git) to the other instances — so the branch is
+    # cloned a single time, not once per instance.
+    #
+    # On a re-run where a dir already has .git, it fetches + switches to the
+    # requested branch instead of copying. That's why we keep .git around: the
+    # second time you pick a branch it's an incremental fetch, not a full clone.
+    local branch="$1"; shift
+    local repo="git@github.com:borse/ePHEM.git"
+    local first="" first_dir="" name dir
+
+    echo ""
+    echo -e "${CYAN}${BOLD}Preparing custom-addons for each instance (branch: $branch)${NC}"
+    echo ""
+
+    for raw in "$@"; do
+        name=$(san_name "$raw")
+        dir="odca$name"
+
+        if [ -z "$first" ]; then
+            first="$name"; first_dir="$dir"
+            if [ -d "$dir/.git" ]; then
+                echo -e "  ${CYAN}↻${NC} $dir exists — fetching & switching to '$branch'…"
+                if ! multi_switch_branch "$dir" "$branch"; then
+                    echo -e "  ${RED}✗${NC} Could not switch $dir to '$branch'."
+                    echo "     Check the branch name and your SSH access to borse/ePHEM."
+                    return 1
+                fi
+            else
+                echo -e "  ${CYAN}⬇${NC} Cloning ePHEM ($branch) into $dir (one download for all instances)…"
+                rm -rf "$dir"
+                if ! git clone "$repo" --branch "$branch" --single-branch "$dir" --progress; then
+                    echo -e "  ${RED}✗${NC} Clone failed — does branch '$branch' exist, and is your SSH key authorized?"
+                    rm -rf "$dir"
+                    return 1
+                fi
+            fi
+            echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
+            continue
+        fi
+
+        # Subsequent instances: reuse the first clone.
+        if [ -d "$dir/.git" ]; then
+            echo -e "  ${CYAN}↻${NC} $dir exists — fetching & switching to '$branch'…"
+            if multi_switch_branch "$dir" "$branch"; then
+                echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
+            else
+                echo -e "  ${YELLOW}!${NC} $dir could not switch to '$branch' — leaving it as-is."
+            fi
+        else
+            echo -e "  ${CYAN}⧉${NC} Copying $first_dir → $dir (no re-download)…"
+            rm -rf "$dir"
+            cp -a "$first_dir" "$dir"
+            echo -e "  ${GREEN}✓${NC} $dir ready (copied from $first_dir, branch: $branch)"
+        fi
+    done
+}
+
 select_instance_layout() {
     # Sets DEV_LAYOUT to "single" or "multi". Auto-detects an existing
     # multi-instance setup so re-running setup doesn't silently clobber it.
@@ -404,23 +480,93 @@ if [ "$MODE" = "developer" ]; then
         echo "  the multi-instance stack. Delegating to scripts/dev-instances.sh."
         echo ""
 
+        # ── Ensure .env exists (self-contained — no single-instance run needed) ──
+        # Multi-instance is local dev, so we auto-generate passwords the same way
+        # demo/developer single-instance mode does, instead of bailing out.
         if [ ! -f .env ]; then
-            echo -e "${RED}✗${NC} .env not found."
-            echo "  Run this script once in single-instance mode first to create .env,"
-            echo "  then come back and choose multi-instance."
-            exit 1
+            echo "  .env not found — creating it from .env.example (local dev passwords)…"
+            cp .env.example .env
+            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+            if sed --version 2>/dev/null | grep -q GNU; then
+                sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+            else
+                sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+            fi
+            echo -e "  ${GREEN}✓${NC} .env created with auto-generated passwords"
+        elif grep -q "CHANGE_ME" .env; then
+            echo "  .env has placeholder passwords — auto-filling them for local dev…"
+            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+            if sed --version 2>/dev/null | grep -q GNU; then
+                sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+            else
+                sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+            fi
+            echo -e "  ${GREEN}✓${NC} Passwords auto-set (fine for local use)"
+        else
+            echo -e "  ${GREEN}✓${NC} .env already present"
         fi
 
+        # ── Instance names (default 1 2 3 → odca1, odca2, odca3) ────────────
+        echo ""
         if [ -f .dev-instances ] && [ -s .dev-instances ]; then
             INSTANCE_NAMES=$(tr '\n' ' ' < .dev-instances | sed 's/ *$//')
             echo "  Configured instances: ${BOLD}${INSTANCE_NAMES}${NC}"
             read -p "  Use these names? [Y/n]: " USE_EXISTING
             if [[ "${USE_EXISTING:-Y}" =~ ^[Nn]$ ]]; then
-                read -p "  Enter instance names (space-separated, e.g. '1 2 3' or 'a:18_national_dev b'): " INSTANCE_NAMES
+                read -p "  Enter instance names (space-separated, default: 1 2 3): " INSTANCE_NAMES
+                INSTANCE_NAMES="${INSTANCE_NAMES:-1 2 3}"
             fi
         else
             read -p "  Enter instance names (space-separated, default: 1 2 3): " INSTANCE_NAMES
             INSTANCE_NAMES="${INSTANCE_NAMES:-1 2 3}"
+        fi
+        # The branch is chosen once below and applied to every instance, so drop
+        # any legacy 'name:branch' suffix a user might type.
+        CLEAN_NAMES=""
+        for _spec in $INSTANCE_NAMES; do
+            CLEAN_NAMES="$CLEAN_NAMES ${_spec%%:*}"
+        done
+        INSTANCE_NAMES="$(echo "$CLEAN_NAMES" | xargs)"
+
+        # ── Verify GitHub SSH access before we try to clone addons ──────────
+        echo ""
+        echo "  Verifying your GitHub SSH access…"
+        SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
+        if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
+            GH_USER=$(echo "$SSH_TEST" | grep -oP "(?<=Hi )[^!]+" 2>/dev/null || echo "you")
+            echo -e "  ${GREEN}✓${NC} Authenticated as: ${BOLD}$GH_USER${NC}"
+        else
+            echo -e "  ${RED}✗${NC} Could not authenticate with GitHub via SSH."
+            echo "    Add an SSH key to your GitHub account: https://github.com/settings/keys"
+            echo "    Generate one with: ssh-keygen -t ed25519 -C \"your@email.com\""
+            exit 1
+        fi
+
+        # ── Choose the branch (downloaded once, shared by all instances) ────
+        echo ""
+        echo "  Which branch do you want to work on?"
+        echo "  It is downloaded once into odca${INSTANCE_NAMES%% *} and copied to the other instances."
+        echo ""
+        echo "    1) 18_national_dev    — Odoo 18 development (recommended)"
+        echo "    2) 18_national_master — Odoo 18 stable"
+        echo "    3) 16_national_dev    — Odoo 16 development"
+        echo "    4) 16_national_master — Odoo 16 stable"
+        echo "    5) Other (type a branch name)"
+        echo ""
+        read -p "  Choose [1-5] (default: 1): " BRANCH_CHOICE
+        case "${BRANCH_CHOICE:-1}" in
+            2) BRANCH="18_national_master" ;;
+            3) BRANCH="16_national_dev" ;;
+            4) BRANCH="16_national_master" ;;
+            5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-18_national_dev}" ;;
+            *) BRANCH="18_national_dev" ;;
+        esac
+
+        # ── Clone once, copy to the rest (or fetch+switch if already cloned) ─
+        # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
+        if ! prepare_multi_addons "$BRANCH" $INSTANCE_NAMES; then
+            echo -e "${RED}✗${NC} Could not prepare custom-addons — see the error above. Aborting."
+            exit 1
         fi
 
         echo ""
@@ -520,9 +666,58 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo -e "${GREEN}✓ Multi-instance dev is up.${NC}"
         echo ""
-        echo "  Status:                  bash scripts/dev-instances.sh status"
-        echo "  Restart + tail one:      bash scripts/dev-logs.sh <name>"
-        echo "  Stop (keep data):        bash scripts/dev-instances.sh down"
+        echo "  Instances created:"
+        _pi=0
+        for _n in $INSTANCE_NAMES; do
+            _port=$(( 8010 + 10 * _pi ))
+            echo "    • odca$_n  →  http://localhost:$_port   (db: ephem_$_n, addons: odca$_n/)"
+            _pi=$(( _pi + 1 ))
+        done
+        echo ""
+        echo "  Manage the stack:"
+        echo "    Status:               bash scripts/dev-instances.sh status"
+        echo "    Restart + tail one:   bash scripts/dev-logs.sh <name>"
+        echo "    Stop (keep data):     bash scripts/dev-instances.sh down"
+        echo ""
+        echo -e "  ${CYAN}Fetch a different branch later?${NC} Just re-run this script and choose"
+        echo "  multi-instance again — the git history is already on disk, so it's an"
+        echo "  incremental fetch, not a fresh download."
+
+        # ── PyCharm handoff — copy/paste-ready run-config guidance ──────────
+        # Build the Windows-side UNC path to dev-logs.sh so PyCharm on Windows
+        # can reach the script living inside WSL.
+        WIN_SCRIPT="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}${BOLD}  NEXT: drive each instance from PyCharm${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "  ${BOLD}1) Install PyCharm${NC} (Professional recommended) on Windows:"
+        echo "       https://www.jetbrains.com/pycharm/download/"
+        echo ""
+        echo -e "  ${BOLD}2) Open your addons folder${NC} (File → Open), for example:"
+        echo "       \\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/odca${INSTANCE_NAMES%% *}" | tr '/' '\\')"
+        echo ""
+        echo -e "  ${BOLD}3) Add one Shell Script run configuration per instance${NC}"
+        echo "       Run → Edit Configurations → + → Shell Script → 'Script path'"
+        echo ""
+        echo "       Use this SAME script path for every configuration:"
+        echo ""
+        echo -e "         ${BOLD}${GREEN}$WIN_SCRIPT${NC}"
+        echo ""
+        echo "       Set 'Script options' differently per instance. Each one restarts"
+        echo "       the instance, updates a module, then tails its colored logs:"
+        echo ""
+        for _n in $INSTANCE_NAMES; do
+            printf "         odca%-4s →  Script options:  ${BOLD}%s -u eoc_base${NC}\n" "$_n" "$_n"
+        done
+        echo ""
+        echo "       Tips for 'Script options':"
+        echo -e "         • Plain restart + logs:    ${BOLD}${INSTANCE_NAMES%% *}${NC}"
+        echo -e "         • Update several modules:   ${BOLD}${INSTANCE_NAMES%% *} -u eoc_base,eoc_signals${NC}"
+        echo -e "         • Install a new module:     ${BOLD}${INSTANCE_NAMES%% *} -i my_new_module${NC}"
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         exit 0
     fi
