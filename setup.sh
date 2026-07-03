@@ -470,6 +470,73 @@ dev_reset() {
     esac
 }
 
+# Pull compose service image(s) and, on failure, explain the ACTUAL cause
+# instead of blaming "docker login". Handles the classic WSL breakage where
+# ~/.docker/config.json points 'credsStore' at a Windows .exe that can't run in
+# Linux — for a public image that's not an auth problem, so it offers to fix it.
+# Usage: docker_pull_with_diagnosis <compose pull args…>   (e.g. odoo)
+docker_pull_with_diagnosis() {
+    local tmp rc out
+    tmp="$(mktemp 2>/dev/null || echo "/tmp/ephem-pull.$$")"
+    docker compose pull "$@" 2>&1 | tee "$tmp"
+    rc=${PIPESTATUS[0]}
+    out="$(cat "$tmp" 2>/dev/null)"; rm -f "$tmp"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo ""
+    # ── Broken credential helper (not an auth problem for a public image) ──
+    if printf '%s' "$out" | grep -qiE "error getting credentials|resolve credential|docker-credential-[a-z.]*: (exec format error|not found|no such file|executable file not found)|exec format error"; then
+        echo -e "  ${YELLOW}!${NC} This is NOT a login problem — borrs/ephem is public. Docker's"
+        echo "    credential helper is misconfigured (common in WSL: ~/.docker/config.json"
+        echo "    sets 'credsStore' to a Windows .exe that can't run inside Linux)."
+        local cfg="$HOME/.docker/config.json"
+        if [ -f "$cfg" ] && grep -qE '"credsStore"|"credHelpers"' "$cfg" 2>/dev/null; then
+            read -p "    Fix it now (back up config.json, drop the credential helper, retry)? [Y/n]: " FIXCRED
+            if [[ ! "${FIXCRED:-Y}" =~ ^[Nn]$ ]]; then
+                cp "$cfg" "$cfg.bak" 2>/dev/null || true
+                if command -v python3 >/dev/null 2>&1; then
+                    python3 - "$cfg" <<'PY'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+d.pop('credsStore', None); d.pop('credHelpers', None)
+json.dump(d, open(p, 'w'), indent=2)
+PY
+                else
+                    sed -i.sedbak '/"credsStore"/d; /"credHelpers"/d' "$cfg" 2>/dev/null || true
+                fi
+                echo -e "    ${GREEN}✓${NC} Credential helper removed (backup: $cfg.bak). Retrying…"
+                if docker compose pull "$@"; then
+                    return 0
+                fi
+                echo -e "    ${RED}✗${NC} Still failing after the fix — see output above."
+                return 1
+            fi
+        fi
+        echo "    Manual fix: remove the \"credsStore\" line from ~/.docker/config.json"
+        echo "    (or re-enable WSL interop), then try again."
+        return 1
+    fi
+    # ── Genuine auth failure → THIS is when to log in (private image) ──
+    if printf '%s' "$out" | grep -qiE "unauthorized|authentication required|access to the resource is denied|denied: |forbidden|pull access denied"; then
+        echo -e "  ${YELLOW}!${NC} The registry denied access. If the image is private, log in first:"
+        echo "        docker login"
+        echo "    then try again. (The public borrs/ephem image needs no login.)"
+        return 1
+    fi
+    # ── Network / DNS ──
+    if printf '%s' "$out" | grep -qiE "no such host|lookup .*: | timeout|temporary failure|connection refused|network is unreachable|TLS handshake|i/o timeout"; then
+        echo -e "  ${YELLOW}!${NC} Looks like a network problem reaching Docker Hub — check your"
+        echo "    internet connection / proxy / VPN, then try again."
+        return 1
+    fi
+    echo -e "  ${YELLOW}!${NC} Pull failed — see the output above for the cause."
+    return 1
+}
+
 dev_update_image() {
     echo -e "${CYAN}${BOLD}Update / repair app image${NC}"
     echo ""
@@ -485,10 +552,8 @@ dev_update_image() {
         return 0
     fi
     echo "  Pulling borrs/ephem:latest (this may take a few minutes)…"
-    if docker compose pull odoo; then
+    if docker_pull_with_diagnosis odoo; then
         echo -e "  ${GREEN}✓${NC} Image up to date. Apply it:  docker compose up -d"
-    else
-        echo -e "  ${YELLOW}!${NC} Pull failed — check your network and 'docker login' status."
     fi
 }
 
