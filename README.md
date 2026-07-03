@@ -15,9 +15,9 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
 - [Requirements](#requirements)
 - [Windows — Run Inside WSL](#windows--run-inside-wsl)
 - [Quick Start](#quick-start)
-  - [Step 1 — Install Docker](#step-1--install-docker)
-  - [Step 2 — Clone This Repo](#step-2--clone-this-repo)
-  - [Step 3 — Run Setup](#step-3--run-setup)
+  - [Step 1 — Install Git](#step-1--install-git)
+  - [Step 2 — Clone the repo](#step-2--clone-the-repo)
+  - [Step 3 — Run setup](#step-3--run-setup)
 - [Mode 1 — Server Deploy](#mode-1--server-deploy)
   - [Configure Your Settings](#configure-your-settings)
   - [Set Up SSL](#set-up-ssl)
@@ -90,6 +90,8 @@ Here's how each mode works:
 
 `setup.sh` is a bash script. On Windows, run it inside **WSL** (Windows Subsystem for Linux). Docker Desktop integrates with WSL out of the box — this setup is well-tested on Windows 11 + Ubuntu + Docker Desktop.
 
+Because `setup.sh` runs *inside* WSL, it can't install WSL itself — that one bootstrap happens on the Windows side first. After that, the steps are identical to Linux (install git → clone → `bash setup.sh`), just run inside the Ubuntu terminal.
+
 **One-time WSL setup:**
 
 1. Open **PowerShell as Administrator** and install WSL with Ubuntu:
@@ -100,14 +102,9 @@ Here's how each mode works:
 
    Reboot if asked, then finish the Ubuntu setup (UNIX username + password) when the Ubuntu window opens.
 
-2. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/). After installing, open Docker Desktop → **Settings → Resources → WSL integration** and enable it for your Ubuntu distro. Make sure Docker Desktop is running.
+2. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) (or, in an Administrator PowerShell: `winget install -e --id Docker.DockerDesktop`). Then open Docker Desktop → **Settings → Resources → WSL integration** and enable it for your Ubuntu distro. Make sure Docker Desktop is running.
 
-3. Open the **Ubuntu** terminal from the Start menu (not PowerShell) and verify:
-
-   ```bash
-   docker --version
-   docker compose version
-   ```
+3. Open the **Ubuntu** terminal from the Start menu (not PowerShell) and continue with the [Quick Start](#quick-start) below — install git, clone, and run `bash setup.sh`. `setup.sh` verifies Docker is reachable from WSL and tells you exactly what to fix if not.
 
 **From here on, run every command in this README inside the Ubuntu (WSL) terminal**, not PowerShell or CMD.
 
@@ -131,53 +128,38 @@ Here's how each mode works:
 
 ## Quick Start
 
-These three steps apply to all modes. After cloning and running setup, the script guides you through the rest.
+The whole process is three steps, the same on every platform:
 
-### Step 1 — Install Docker
+**1. Install git → 2. Clone the repo → 3. Run `bash setup.sh` → follow the prompts.**
 
-**Linux (Ubuntu/Debian):**
+`setup.sh` does everything else — it checks and installs Docker, downloads images, clones the ePHEM addons, and starts the containers.
 
-```bash
-curl -fsSL https://get.docker.com | sh
-```
+> **Windows:** do the [one-time WSL setup](#windows--run-inside-wsl) first, then run these three steps **inside the Ubuntu (WSL) terminal**.
 
-```bash
-sudo usermod -aG docker $USER
-```
+### Step 1 — Install Git
 
-**Log out and log back in** — this is required for the group change to take effect. A new terminal alone is not enough.
+- **Linux (Ubuntu/Debian):** `sudo apt update && sudo apt install -y git`
+- **Mac:** `xcode-select --install` (Apple's command-line tools include git), or `brew install git`
+- **Windows (WSL):** in the Ubuntu terminal — `sudo apt update && sudo apt install -y git`
 
-Verify it worked:
+> Git comes first because you need it to clone the repo that contains `setup.sh` — the script can't install git for that first clone.
 
-```bash
-groups        # should include: docker
-docker --version
-```
-
-> If you skip the `usermod` step, `setup.sh` will detect it and tell you exactly what to do.
-
-**Mac:** Install [Docker Desktop](https://docs.docker.com/desktop/) and make sure it's running.
-
-**Windows:** Follow [Windows — Run Inside WSL](#windows--run-inside-wsl) first, then open the Ubuntu (WSL) terminal for all remaining steps.
-
-### Step 2 — Clone This Repo
+### Step 2 — Clone the repo
 
 ```bash
 git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
 cd ephem-deploy
 ```
 
-> **If you see "git: command not found":** `sudo apt install -y git`
-
-### Step 3 — Run Setup
+### Step 3 — Run setup
 
 ```bash
 bash setup.sh
 ```
 
-The script asks which mode you want, then handles everything from there — creating config files, downloading images, cloning addons, and starting containers.
+The script asks which mode you want (**Server / Demo / Developer**), then handles the rest: it checks or installs Docker, creates config files, downloads images, clones addons, and starts the containers. Just follow the prompts.
 
-> **First run:** Takes 2–5 minutes to download (~1 GB of Docker images). Future runs are instant.
+> **First run:** downloads ~1 GB of Docker images (2–5 minutes). Future runs are quick.
 
 ---
 
@@ -283,9 +265,10 @@ For collaborators who want to edit ePHEM custom addons locally, with live reload
 
 ### Developer Prerequisites
 
-- **Docker** — installed and your user in the `docker` group (see [Step 1](#step-1--install-docker))
+- **Docker** — `setup.sh` installs/checks it for you (see [Quick Start](#quick-start)); on Linux it also adds you to the `docker` group
+- **Git** — install it first (see [Step 1 — Install Git](#step-1--install-git)); on Windows, use git inside WSL
 - **PyCharm** — [Community Edition](https://www.jetbrains.com/pycharm/download/) (free) or Professional
-- **Git** — pre-installed on Mac/Linux. Windows: [git-scm.com](https://git-scm.com/download/win) or WSL
+- **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team before running setup
 - **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team before running setup
 
 ### GitHub SSH Key

@@ -14,10 +14,201 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 get_server_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}' ||
-    ipconfig getifaddr en0 2>/dev/null ||
-    ip route get 1 2>/dev/null | awk '{print $7; exit}' ||
-    echo "127.0.0.1"
+    # Try each source in turn, checking OUTPUT (not exit code): on macOS
+    # `hostname -I` fails but the awk pipeline still exits 0, so an exit-code
+    # `||` chain would never reach the BSD/`ipconfig` fallbacks.
+    local ip=""
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+    [ -n "$ip" ] || ip=$(ipconfig getifaddr en0 2>/dev/null) || true   # macOS (Ethernet/primary)
+    [ -n "$ip" ] || ip=$(ipconfig getifaddr en1 2>/dev/null) || true   # macOS (Wi-Fi on some models)
+    [ -n "$ip" ] || ip=$(ip route get 1 2>/dev/null | awk '{print $7; exit}') || true
+    [ -n "$ip" ] || ip="127.0.0.1"
+    printf '%s\n' "$ip"
+}
+
+# True when running inside WSL (Docker is Docker Desktop on the Windows host).
+is_wsl() {
+    grep -qiE "microsoft|wsl" /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
+}
+
+# Cross-platform URL opener: macOS `open`, WSL `wslview`/`explorer.exe`,
+# Linux `xdg-open`. Returns non-zero if no opener is available.
+open_url() {
+    local url="$1"
+    if command -v open >/dev/null 2>&1; then open "$url" >/dev/null 2>&1
+    elif command -v wslview >/dev/null 2>&1; then wslview "$url" >/dev/null 2>&1
+    elif command -v explorer.exe >/dev/null 2>&1; then explorer.exe "$url" >/dev/null 2>&1
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1
+    else return 1; fi
+}
+have_opener() {
+    command -v open >/dev/null 2>&1 || command -v wslview >/dev/null 2>&1 \
+        || command -v explorer.exe >/dev/null 2>&1 || command -v xdg-open >/dev/null 2>&1
+}
+
+# Echoes the platform family: mac | windows | wsl | linux | unknown.
+detect_platform() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin) echo mac ;;
+        MINGW*|MSYS*|CYGWIN*) echo windows ;;
+        Linux) if is_wsl; then echo wsl; else echo linux; fi ;;
+        *) echo unknown ;;
+    esac
+}
+
+# Poll until the Docker daemon answers, or time out. $1 = number of 3s tries.
+wait_for_docker() {
+    local tries="${1:-40}" i
+    for i in $(seq 1 "$tries"); do
+        docker info >/dev/null 2>&1 && return 0
+        printf '.'
+        sleep 3
+    done
+    return 1
+}
+
+# Make sure a working Docker Engine + Compose v2 exist BEFORE the rest of setup.
+# Installing is opt-in (always asks first). On macOS/Windows/WSL, Docker Desktop
+# is a GUI app on the host, so there we can only guide + wait for it to come up.
+ensure_docker_ready() {
+    local plat SUDO=""
+    plat="$(detect_platform)"
+    [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+
+    # Running under Git Bash / MSYS on bare Windows (not WSL). ePHEM expects a
+    # Linux environment — point the user at WSL before going further.
+    if [ "$plat" = "windows" ]; then
+        echo -e "${YELLOW}!${NC} You're running in Git Bash / MSYS, not WSL."
+        echo "  ePHEM is designed to run inside WSL (Ubuntu). Set it up once:"
+        echo ""
+        echo "    1. Open PowerShell as Administrator and run:"
+        echo -e "         ${BOLD}wsl --install -d Ubuntu${NC}"
+        echo "    2. Reboot if asked, then open the 'Ubuntu' app from the Start menu."
+        echo "    3. Inside Ubuntu, install git, clone the repo, and run: bash setup.sh"
+        echo ""
+        echo "  (Bind-mounts and Docker volumes are much faster under WSL than Git Bash.)"
+        exit 1
+    fi
+
+    # ── 1. Is the docker CLI present at all? ──────────────────
+    if ! command -v docker >/dev/null 2>&1; then
+        echo -e "${YELLOW}!${NC} Docker is not installed on this machine."
+        case "$plat" in
+            linux)
+                echo "  I can install Docker Engine for you using Docker's official script."
+                read -p "  Install Docker now? [Y/n]: " DO_INSTALL
+                if [[ "${DO_INSTALL:-Y}" =~ ^[Nn]$ ]]; then
+                    echo "  No problem — install it yourself, then re-run this script:"
+                    echo "    curl -fsSL https://get.docker.com | sh"
+                    exit 1
+                fi
+                echo "  Installing Docker Engine (you may be prompted for your sudo password)…"
+                if curl -fsSL https://get.docker.com | sh; then
+                    echo -e "  ${GREEN}✓${NC} Docker Engine installed"
+                    $SUDO systemctl enable --now docker >/dev/null 2>&1 \
+                        || $SUDO service docker start >/dev/null 2>&1 || true
+                    if ! groups 2>/dev/null | grep -q '\bdocker\b'; then
+                        $SUDO usermod -aG docker "$USER" 2>/dev/null || true
+                        echo ""
+                        echo -e "  ${YELLOW}!${NC} Added '$USER' to the docker group — this needs a full re-login."
+                        echo "     Log out and back in, then run:  bash setup.sh"
+                        exit 0
+                    fi
+                else
+                    echo -e "  ${RED}✗${NC} Automatic install failed."
+                    echo "     Install manually: https://docs.docker.com/engine/install/"
+                    exit 1
+                fi
+                ;;
+            mac)
+                if command -v brew >/dev/null 2>&1; then
+                    echo "  Docker Desktop can be installed with Homebrew."
+                    read -p "  Install it now (brew install --cask docker)? [Y/n]: " DO_INSTALL
+                    if [[ "${DO_INSTALL:-Y}" =~ ^[Nn]$ ]]; then
+                        echo "  Download it instead: https://docs.docker.com/desktop/install/mac-install/"
+                        exit 1
+                    fi
+                    if brew install --cask docker; then
+                        echo -e "  ${GREEN}✓${NC} Docker Desktop installed — launching it…"
+                        open -a Docker 2>/dev/null || true
+                    else
+                        echo -e "  ${RED}✗${NC} brew install failed."
+                        echo "     Download it: https://docs.docker.com/desktop/install/mac-install/"
+                        exit 1
+                    fi
+                else
+                    echo "  Install Docker Desktop for Mac, then re-run this script:"
+                    echo "    https://docs.docker.com/desktop/install/mac-install/"
+                    open_url "https://docs.docker.com/desktop/install/mac-install/" || true
+                    exit 1
+                fi
+                ;;
+            wsl)
+                echo "  Inside WSL, Docker is provided by Docker Desktop on Windows:"
+                echo "    1. Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
+                echo "    2. Docker Desktop → Settings → Resources → WSL Integration → enable this distro."
+                echo "    3. Make sure Docker Desktop is running."
+                echo "  Then re-run this script."
+                exit 1
+                ;;
+            *)
+                echo "  Install Docker, then re-run this script: https://docs.docker.com/get-docker/"
+                exit 1
+                ;;
+        esac
+    fi
+
+    # ── 2. Is the daemon reachable? (start it / wait for Desktop) ──
+    if ! docker info >/dev/null 2>&1; then
+        case "$plat" in
+            mac)
+                echo -e "${YELLOW}!${NC} Docker Desktop isn't running yet — please start it (whale icon)."
+                printf "  Waiting for Docker to become ready"
+                if wait_for_docker 40; then
+                    echo -e "\n  ${GREEN}✓${NC} Docker is running"
+                else
+                    echo -e "\n  ${RED}✗${NC} Docker is still unreachable. Start Docker Desktop, then re-run: bash setup.sh"
+                    exit 1
+                fi
+                ;;
+            wsl)
+                echo -e "${YELLOW}!${NC} Can't reach Docker from WSL. Start Docker Desktop on Windows and enable"
+                echo "     WSL integration (Settings → Resources → WSL Integration → this distro)."
+                printf "  Waiting for Docker to become ready"
+                if wait_for_docker 40; then
+                    echo -e "\n  ${GREEN}✓${NC} Docker is reachable from WSL"
+                else
+                    echo -e "\n  ${RED}✗${NC} Still unreachable. Fix WSL integration, then re-run: bash setup.sh"
+                    exit 1
+                fi
+                ;;
+            *)
+                echo -e "${YELLOW}!${NC} Docker daemon isn't running — trying to start it…"
+                $SUDO systemctl start docker >/dev/null 2>&1 \
+                    || $SUDO service docker start >/dev/null 2>&1 || true
+                if ! docker info >/dev/null 2>&1; then
+                    if ! groups 2>/dev/null | grep -q '\bdocker\b'; then
+                        echo -e "  ${YELLOW}!${NC} '$USER' isn't in the docker group:  sudo usermod -aG docker $USER"
+                        echo "     Then log out/in and re-run: bash setup.sh"
+                    else
+                        echo -e "  ${RED}✗${NC} Could not start Docker. Check: sudo systemctl status docker"
+                    fi
+                    exit 1
+                fi
+                echo -e "  ${GREEN}✓${NC} Docker daemon started"
+                ;;
+        esac
+    fi
+
+    # ── 3. Compose v2 present? ────────────────────────────────
+    if ! docker compose version >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} Docker Compose v2 is not available."
+        echo "  Linux:        $SUDO apt-get install -y docker-compose-plugin"
+        echo "  Mac/Windows:  update Docker Desktop to a recent version."
+        exit 1
+    fi
+
+    echo -e "${GREEN}✓${NC} Docker is installed, running, and Compose v2 is available"
 }
 
 # ── Architecture guard ────────────────────────
@@ -134,9 +325,9 @@ dev_readme() {
             ${PAGER:-less} README.md 2>/dev/null || cat README.md
         fi
     fi
-    if command -v xdg-open >/dev/null 2>&1; then
+    if have_opener; then
         read -p "  Open the deployment README in a browser? [y/N]: " O
-        [[ "${O:-N}" =~ ^[Yy]$ ]] && xdg-open "https://github.com/borse/ephem_deployment_docker#readme" >/dev/null 2>&1 || true
+        [[ "${O:-N}" =~ ^[Yy]$ ]] && open_url "https://github.com/borse/ephem_deployment_docker#readme" || true
     fi
 }
 
@@ -192,7 +383,7 @@ dev_doctor() {
     LOGS=$(docker compose logs --tail=300 odoo 2>&1 || true)
     if echo "$LOGS" | grep -q "ModuleNotFoundError"; then
         found=1
-        MISSING=$(echo "$LOGS" | grep -oP "ModuleNotFoundError: No module named '\K[^']+" | sort -u | tr '\n' ' ')
+        MISSING=$(echo "$LOGS" | sed -n "s/.*ModuleNotFoundError: No module named '\([^']*\)'.*/\1/p" | sort -u | tr '\n' ' ')
         echo -e "${RED}✗${NC} Missing Python module(s): ${BOLD}${MISSING}${NC}"
         echo "   A custom addon imports a package that isn't in the app image."
         echo "   Permanent fix: add it to the image (rebuild & push), then: docker compose pull"
@@ -516,6 +707,13 @@ esac
 
 echo ""
 echo "─────────────────────────────────────────"
+
+# ── Prerequisite: make sure Docker is installed, running, and has Compose v2 ──
+# (Offers to install it on Linux/Mac; guides + waits on WSL/Windows.) Runs before
+# the developer block because multi-instance dev uses Docker inside that block.
+ensure_docker_ready
+
+echo "─────────────────────────────────────────"
 DEV_MODE=false
 
 # ══════════════════════════════════════════════
@@ -603,7 +801,8 @@ if [ "$MODE" = "developer" ]; then
         echo "  Verifying your GitHub SSH access…"
         SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
         if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
-            GH_USER=$(echo "$SSH_TEST" | grep -oP "(?<=Hi )[^!]+" 2>/dev/null || echo "you")
+            GH_USER=$(printf '%s' "$SSH_TEST" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)
+        [ -n "$GH_USER" ] || GH_USER="you"
             echo -e "  ${GREEN}✓${NC} Authenticated as: ${BOLD}$GH_USER${NC}"
         else
             echo -e "  ${RED}✗${NC} Could not authenticate with GitHub via SSH."
@@ -755,26 +954,36 @@ if [ "$MODE" = "developer" ]; then
         echo "  incremental fetch, not a fresh download."
 
         # ── PyCharm handoff — copy/paste-ready run-config guidance ──────────
-        # Build the Windows-side UNC path to dev-logs.sh so PyCharm on Windows
-        # can reach the script living inside WSL.
-        WIN_SCRIPT="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
+        # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches
+        # WSL files via a \\wsl.localhost UNC path; on macOS/Linux PyCharm sees
+        # the same POSIX paths this script already uses.
+        _addons_dir="$PWD/odca${INSTANCE_NAMES%% *}"
+        if is_wsl; then
+            SCRIPT_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
+            ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$_addons_dir" | tr '/' '\\')"
+            PYCHARM_HOST="Windows"
+        else
+            SCRIPT_DISPLAY="$PWD/scripts/dev-logs.sh"
+            ADDONS_DISPLAY="$_addons_dir"
+            PYCHARM_HOST="this machine"
+        fi
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "${CYAN}${BOLD}  NEXT: drive each instance from PyCharm${NC}"
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
-        echo -e "  ${BOLD}1) Install PyCharm${NC} (Professional recommended) on Windows:"
+        echo -e "  ${BOLD}1) Install PyCharm${NC} (Professional recommended) on ${PYCHARM_HOST}:"
         echo "       https://www.jetbrains.com/pycharm/download/"
         echo ""
         echo -e "  ${BOLD}2) Open your addons folder${NC} (File → Open), for example:"
-        echo "       \\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/odca${INSTANCE_NAMES%% *}" | tr '/' '\\')"
+        echo "       $ADDONS_DISPLAY"
         echo ""
         echo -e "  ${BOLD}3) Add one Shell Script run configuration per instance${NC}"
         echo "       Run → Edit Configurations → + → Shell Script → 'Script path'"
         echo ""
         echo "       Use this SAME script path for every configuration:"
         echo ""
-        echo -e "         ${BOLD}${GREEN}$WIN_SCRIPT${NC}"
+        echo -e "         ${BOLD}${GREEN}$SCRIPT_DISPLAY${NC}"
         echo ""
         echo "       Set 'Script options' differently per instance. Each one restarts"
         echo "       the instance, updates a module, then tails its colored logs:"
@@ -797,7 +1006,8 @@ if [ "$MODE" = "developer" ]; then
     SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
 
     if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
-        GH_USER=$(echo "$SSH_TEST" | grep -oP "(?<=Hi )[^!]+" 2>/dev/null || echo "you")
+        GH_USER=$(printf '%s' "$SSH_TEST" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)
+        [ -n "$GH_USER" ] || GH_USER="you"
         echo -e "${GREEN}✓${NC} Authenticated as: ${BOLD}$GH_USER${NC}"
     else
         echo -e "${RED}✗${NC} Could not authenticate with GitHub via SSH."
@@ -917,47 +1127,9 @@ ERRORS=0
 ADDONS_UPDATED=false
 IMAGE_UPDATED=false
 
-# ── Check Docker ──────────────────────────────
-if command -v docker &> /dev/null; then
-    echo -e "${GREEN}✓${NC} Docker is installed"
-else
-    echo -e "${RED}✗${NC} Docker is not installed. Run: curl -fsSL https://get.docker.com | sh"
-    ERRORS=$((ERRORS + 1))
-fi
-
-if docker compose version &> /dev/null; then
-    echo -e "${GREEN}✓${NC} Docker Compose is available"
-else
-    echo -e "${RED}✗${NC} Docker Compose is not available. Update Docker."
-    ERRORS=$((ERRORS + 1))
-fi
-
-# ── Check Docker socket access ────────────────
-# If the user can't reach the Docker socket, add them to the docker group
-# and re-exec this script in a new shell so the group takes effect immediately.
-if ! docker info &> /dev/null; then
-    if groups 2>/dev/null | grep -q '\bdocker\b'; then
-        # Already in the group but still can't connect — something else is wrong
-        echo -e "${RED}✗${NC} Cannot connect to Docker. Is the Docker daemon running?"
-        echo "  Try: sudo systemctl start docker"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${YELLOW}!${NC} User '$USER' is not in the docker group."
-        echo ""
-        echo "  Run this command:"
-        echo ""
-        echo -e "  ${BOLD}sudo usermod -aG docker $USER${NC}"
-        echo ""
-        echo -e "  ${YELLOW}Then log out and log back in — this is required.${NC}"
-        echo "  A new terminal or 'newgrp docker' is not enough;"
-        echo "  you need a full logout so the group takes effect system-wide."
-        echo ""
-        echo "  After logging back in, run setup.sh again."
-        echo ""
-        exit 1
-    fi
-fi
-echo -e "${GREEN}✓${NC} Docker socket is accessible"
+# ── Docker ────────────────────────────────────
+# Already fully verified above by ensure_docker_ready (installed + daemon
+# reachable + Compose v2), which exits with platform-specific guidance if not.
 
 # ── Check .env ────────────────────────────────
 if [ -f ".env" ]; then
@@ -1279,7 +1451,6 @@ ensure_native_image_arch
 echo ""
 echo "Checking for Docker image updates..."
 CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' borrs/ephem:latest 2>/dev/null || echo "none")
-REMOTE_DIGEST=$(docker manifest inspect borrs/ephem:latest 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('config',{}).get('digest','unknown'))" 2>/dev/null || echo "unknown")
 
 if [ "$CURRENT_IMAGE" = "none" ]; then
     # Image not present at all — will be pulled automatically by docker compose
