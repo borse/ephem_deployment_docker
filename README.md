@@ -402,42 +402,46 @@ From the Services panel you can:
 
 ### Development Cycle
 
+The whole loop is one command: **`scripts/dev-logs.sh`** restarts Odoo and streams the colored logs — and can update or install modules first. Wire it to a green ▶ in PyCharm (see [Colored Logs + One-Click Restart in PyCharm](#colored-logs--one-click-restart-in-pycharm)) and each step below becomes a single click.
+
 **Edit → Restart → Test:**
 
-1. Edit any file in `custom-addons/` in PyCharm
-2. Restart Odoo — either from the Services panel in PyCharm, or in the terminal:
+1. Edit any file in `custom-addons/` in PyCharm.
+2. Restart Odoo and watch the logs:
+
+   ```bash
+   bash scripts/dev-logs.sh          # restart + tail colored logs
+   ```
+
+3. Test at `http://localhost:8069`.
+
+**Update a specific module** (needed after XML / view / data-file changes — `-d` is your database name):
+
+```bash
+bash scripts/dev-logs.sh -u your_module -d yourdb      # update, restart, then tail
+bash scripts/dev-logs.sh -u mod1,mod2 -d yourdb        # several at once
+```
+
+> **Multi-instance?** Put the instance name first — the database is filled in for you: `bash scripts/dev-logs.sh 1 -u your_module`.
+
+**Watch logs / filter for errors:**
+
+```bash
+docker compose logs -f odoo                                          # all logs
+docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING" # errors only
+```
+
+**Under the hood** — if you ever need the raw commands `dev-logs.sh` wraps:
 
 ```bash
 docker compose restart odoo
-```
-
-3. Test at `http://localhost:8069`
-
-**Update a specific module** (re-reads views, data files, and migrations):
-
-```bash
-docker compose exec odoo odoo -u your_module_name -d YOUR_DB --db_host db --db_user odoo --db_password dev --stop-after-init --no-http
-```
-
-Or use the interactive script:
-
-```bash
+docker compose exec odoo odoo -u your_module -d yourdb --db_host db --db_user odoo \
+  --db_password "$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2-)" --stop-after-init --no-http
+# or the interactive helper:
 bash scripts/update-modules.sh
 ```
 
-**Watch logs in real time:**
-
-```bash
-docker compose logs -f odoo
-```
-
-**Filter for errors only:**
-
-```bash
-docker compose logs -f odoo 2>&1 | grep -E "ERROR|Traceback|WARNING"
-```
-
-> **Tip:** For Python changes, restart Odoo. For XML/CSS/QWeb changes, a browser reload is often enough with `dev_mode` on.
+> **Tip:** Python changes reload on restart (dev mode, `workers=0`). XML / CSS / QWeb changes need `-u <module>` (or a browser reload with `dev_mode` on).
 
 ### Switching to a New Remote Branch
 
