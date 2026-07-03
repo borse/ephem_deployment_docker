@@ -1,0 +1,10 @@
+# Keep shell scripts LF-only so they run under bash even when cloned on Windows
+# with core.autocrlf=true (a CRLF in setup.sh breaks the #!/bin/bash shebang).
+*.sh text eol=lf
+setup.sh text eol=lf
+
+# Config/compose files the container reads should also stay LF.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf
+.env.example text eol=lf
