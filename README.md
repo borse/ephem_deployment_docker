@@ -269,38 +269,48 @@ For collaborators who want to edit ePHEM custom addons locally, with live reload
 - **Git** — install it first (see [Step 1 — Install Git](#step-1--install-git)); on Windows, use git inside WSL
 - **PyCharm** — [Community Edition](https://www.jetbrains.com/pycharm/download/) (free) or Professional
 - **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team before running setup
-- **Collaborator access** on `borse/ePHEM` — request this from the ePHEM team before running setup
 
 ### GitHub SSH Key
 
-Developer mode uses your personal SSH key — the same one you use to push to GitHub. You do **not** get a deploy key; you use your own identity.
+New to SSH keys? An SSH key is a passwordless way to prove who you are to GitHub. Developer mode uses **your personal key** — the same identity you'd use to push code. `setup.sh` checks this automatically and, if it fails, prints these exact steps, so you can also just run setup and follow along.
 
-**Check if you already have a key:**
+For it to work, **both** of these must be true:
+
+1. An SSH key exists on this machine and is added to your GitHub account.
+2. Your GitHub username has **collaborator access** to `borse/ePHEM` (ask the ePHEM team to add you).
+
+> **On Windows:** do all of this inside the **Ubuntu (WSL)** terminal, not PowerShell. The key must live in WSL's `~/.ssh` — that's the one `setup.sh` uses.
+
+**Step 1 — Do you already have a key?** If this prints a line, skip to Step 3:
 
 ```bash
 cat ~/.ssh/id_ed25519.pub
 ```
 
-**If not, generate one:**
+**Step 2 — If not, create one** (press Enter at every prompt to accept defaults):
 
 ```bash
 ssh-keygen -t ed25519 -C "your@email.com"
 ```
 
-**Add it to GitHub:**
+**Step 3 — Add the public key to GitHub:**
 
-1. Copy the output of `cat ~/.ssh/id_ed25519.pub`
+1. Copy the full output of `cat ~/.ssh/id_ed25519.pub`
 2. Go to [github.com/settings/keys](https://github.com/settings/keys)
-3. Click **New SSH key**, paste, save
+3. Click **New SSH key**, paste, and save
 
-**Verify it works:**
+**Step 4 — Verify it works:**
 
 ```bash
 ssh -T git@github.com
 # Hi yourname! You've successfully authenticated...
 ```
 
-The setup script runs this check automatically and stops with clear instructions if it fails.
+**Troubleshooting**
+
+- **`Permission denied (publickey)`** — the key isn't on your GitHub account (redo Step 3), or you're on Windows but generated the key outside WSL (regenerate it in the Ubuntu terminal).
+- **Authenticates as the wrong user, or "Repository not found" when cloning** — that account isn't a collaborator on `borse/ePHEM` yet. Send your GitHub username to the ePHEM team.
+- **Have several keys?** Make sure the right one is offered: `ssh-add ~/.ssh/id_ed25519` (start the agent first with `eval "$(ssh-agent -s)"`).
 
 ### Developer Pre-Flight Menu
 
@@ -483,29 +493,58 @@ In PyCharm, make **one Shell Script run config per instance** — `scripts/dev-l
 
 ### Colored Logs + One-Click Restart in PyCharm
 
-In **developer mode**, `setup.sh` sets `ODOO_PY_COLORS=1` in `docker-compose.override.yml`. This makes Odoo emit its own ANSI-colored log output (INFO / WARNING / ERROR), which PyCharm's console renders automatically — **no log-highlighting plugin needed**.
+`scripts/dev-logs.sh` is the one command you'll use all day. It **restarts Odoo and streams its colored logs**, and can optionally **update or install modules first** — all in one step. Bind it to PyCharm's green ▶ and your whole edit → restart → test loop becomes one click. (In developer mode `setup.sh` sets `ODOO_PY_COLORS=1`, so the colors come from Odoo itself — no log-highlighting plugin needed.)
 
-To get a single button that restarts Odoo and streams those colored logs, use the bundled helper script `scripts/dev-logs.sh`:
+**What to type where — the script path depends on your OS:**
+
+| Your machine | Script path to paste into PyCharm |
+|--------------|-----------------------------------|
+| **Linux / Mac** | `/full/path/to/ephem-deploy/scripts/dev-logs.sh` |
+| **Windows (WSL)** | `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\scripts\dev-logs.sh` |
+
+> The Windows form is a UNC path — PyCharm runs on Windows but the script lives inside WSL, so it reaches it over `\\wsl.localhost\...`. `setup.sh` prints the exact path for your machine at the end of developer setup; copy it from there.
+
+**Make the ▶ button (one time):**
 
 1. **Run → Edit Configurations… → ➕ → Shell Script**
-2. **Execute:** Script path:
-   - **Linux / Mac:** `/full/path/to/ephem-deploy/scripts/dev-logs.sh`
-   - **Windows + WSL:** `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\scripts\dev-logs.sh`
-3. **Working directory:** the repo root (same folder, drop the trailing `scripts/dev-logs.sh`).
-4. **Script options** (for a single named multi-instance, optional): the instance name, e.g. `a`.
-5. **Name:** e.g. `Odoo: restart + logs` → OK.
-6. Click the green ▶ — it restarts Odoo (or starts it if down) and follows the logs.
+2. **Script path:** paste the path for your OS from the table above
+3. **Script options:** what to do — see the table below (leave empty for a plain restart)
+4. **Name:** e.g. `Odoo: restart + logs` → **OK**
+5. Click the green ▶. The red ⏹ stops the *log view* only — the container keeps running.
 
-The red ⏹ stops the *log follow* only; the container keeps running. You can also run the script directly:
+**What goes in "Script options":**
+
+*Single-instance* (the normal developer setup) — updates need your database name via `-d` (the DB you created in the browser; leave it out for a plain restart):
+
+| Script options | What happens |
+|----------------|--------------|
+| *(empty)* | restart Odoo + tail logs |
+| `-u eoc_signals -d yourdb` | update one module in `yourdb`, then restart + tail |
+| `-u eoc_base,eoc_incident_management -d yourdb` | update several modules at once |
+| `-i my_new_module -d yourdb` | install a new module, then restart + tail |
+
+*Multi-instance* — put the **instance name first**; the database (`ephem_1`, `ephem_2`, …) is added for you:
+
+| Script options | What happens |
+|----------------|--------------|
+| `1` | restart + tail **instance 1** |
+| `1 -u eoc_signals` | update a module on instance 1 |
+| `2 -u eoc_base,eoc_incident_management` | update several on instance 2 |
+
+Make **one run config per scenario** — a labelled ▶ each — reusing the same script path.
+
+**Prefer the terminal?** Identical behaviour:
 
 ```bash
-bash scripts/dev-logs.sh           # single-instance stack
-bash scripts/dev-logs.sh a         # multi-instance — instance 'a'
+bash scripts/dev-logs.sh                                   # single-instance: restart + tail
+bash scripts/dev-logs.sh -u eoc_signals -d yourdb          # single-instance: update, then restart + tail
+bash scripts/dev-logs.sh 1                                 # multi-instance: restart instance 1
+bash scripts/dev-logs.sh 1 -u eoc_base,eoc_incident_management   # update modules on instance 1 (db auto)
 ```
 
-> **Don't point the run config at `dev-instances.sh`.** That script is the multi-instance *orchestrator* and needs a subcommand (`up`, `down`, `status`, `logs`, `list`) — running it with just a name (e.g. `dev-instances.sh 1`) just prints its usage. The per-instance play button always uses `dev-logs.sh <name>`; bring the stack up once with `bash scripts/dev-instances.sh up <names…>` (or via setup menu → 8).
+> **Don't point the run config at `dev-instances.sh`.** That's the multi-instance *orchestrator* and needs a subcommand (`up`, `down`, `status`, `logs`) — running it with just a name prints usage. Bring the stack up once with `bash scripts/dev-instances.sh up <names…>` (or setup menu → 8); the per-instance ▶ always uses `dev-logs.sh <name>`.
 
-> Logs not colored? Make sure you're viewing them via `docker logs -f ephem-app` (or this script) — `docker compose logs` adds a `ephem-app |` prefix that some viewers mis-parse. The colors come from Odoo, so they also show in a plain terminal.
+> Logs not colored? View them via `docker logs -f ephem-app` (or this script), not `docker compose logs` — the latter adds an `ephem-app |` prefix some viewers mis-parse. The colors come from Odoo, so they show in a plain terminal too.
 
 ### Useful Developer Commands
 

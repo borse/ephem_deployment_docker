@@ -56,6 +56,41 @@ detect_platform() {
     esac
 }
 
+# Beginner-friendly, step-by-step guidance shown when `ssh -T git@github.com`
+# does not authenticate. Used by both the single- and multi-instance dev flows.
+github_ssh_help() {
+    local plat; plat="$(detect_platform)"
+    echo ""
+    echo -e "  ${BOLD}What developer mode needs (one-time):${NC}"
+    echo "    Developer mode clones the ePHEM addons with YOUR personal GitHub"
+    echo "    identity over SSH. Two things must both be true:"
+    echo "      1. An SSH key exists on this machine and is added to your GitHub account."
+    echo "      2. Your GitHub account has collaborator access to borse/ePHEM."
+    echo ""
+    if [ "$plat" = "wsl" ]; then
+        echo -e "  ${YELLOW}On Windows:${NC} run every command below in the ${BOLD}Ubuntu${NC} terminal, not"
+        echo "    PowerShell — the key must live in WSL's ~/.ssh (that's what setup.sh uses)."
+        echo ""
+    fi
+    echo -e "  ${BOLD}Step 1${NC}  See if you already have a key (if it prints one, skip Step 2):"
+    echo "            cat ~/.ssh/id_ed25519.pub"
+    echo ""
+    echo -e "  ${BOLD}Step 2${NC}  Create one (just press Enter at every prompt):"
+    echo "            ssh-keygen -t ed25519 -C \"your@email.com\""
+    echo ""
+    echo -e "  ${BOLD}Step 3${NC}  Copy the PUBLIC key and add it to GitHub:"
+    echo "            cat ~/.ssh/id_ed25519.pub          # copy the whole line"
+    echo "            → https://github.com/settings/keys → 'New SSH key' → paste → save"
+    echo ""
+    echo -e "  ${BOLD}Step 4${NC}  Ask the ePHEM team to add your GitHub username as a collaborator"
+    echo "            on borse/ePHEM (if they haven't already)."
+    echo ""
+    echo -e "  ${BOLD}Step 5${NC}  Verify, then re-run setup:"
+    echo "            ssh -T git@github.com     # expect: Hi <you>! You've successfully authenticated"
+    echo "            bash setup.sh"
+    echo ""
+}
+
 # Poll until the Docker daemon answers, or time out. $1 = number of 3s tries.
 wait_for_docker() {
     local tries="${1:-40}" i
@@ -802,12 +837,11 @@ if [ "$MODE" = "developer" ]; then
         SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
         if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
             GH_USER=$(printf '%s' "$SSH_TEST" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)
-        [ -n "$GH_USER" ] || GH_USER="you"
+            [ -n "$GH_USER" ] || GH_USER="you"
             echo -e "  ${GREEN}✓${NC} Authenticated as: ${BOLD}$GH_USER${NC}"
         else
             echo -e "  ${RED}✗${NC} Could not authenticate with GitHub via SSH."
-            echo "    Add an SSH key to your GitHub account: https://github.com/settings/keys"
-            echo "    Generate one with: ssh-keygen -t ed25519 -C \"your@email.com\""
+            github_ssh_help
             exit 1
         fi
 
@@ -983,18 +1017,19 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo "       Use this SAME script path for every configuration:"
         echo ""
-        echo -e "         ${BOLD}${GREEN}$SCRIPT_DISPLAY${NC}"
+        printf '         %b%s%b\n' "$BOLD$GREEN" "$SCRIPT_DISPLAY" "$NC"
         echo ""
         echo "       Set 'Script options' differently per instance. Each one restarts"
         echo "       the instance, updates a module, then tails its colored logs:"
         echo ""
         for _n in $INSTANCE_NAMES; do
-            printf "         odca%-4s →  Script options:  ${BOLD}%s -u eoc_base${NC}\n" "$_n" "$_n"
+            printf "         odca%-4s →  Script options:  ${BOLD}%s -u eoc_signals${NC}\n" "$_n" "$_n"
         done
         echo ""
-        echo "       Tips for 'Script options':"
-        echo -e "         • Plain restart + logs:    ${BOLD}${INSTANCE_NAMES%% *}${NC}"
-        echo -e "         • Update several modules:   ${BOLD}${INSTANCE_NAMES%% *} -u eoc_base,eoc_signals${NC}"
+        echo "       The first word is the instance name; the rest is forwarded to Odoo:"
+        echo -e "         • Plain restart + logs:     ${BOLD}${INSTANCE_NAMES%% *}${NC}"
+        echo -e "         • Update one module:        ${BOLD}${INSTANCE_NAMES%% *} -u eoc_signals${NC}"
+        echo -e "         • Update several modules:   ${BOLD}${INSTANCE_NAMES%% *} -u eoc_base,eoc_incident_management${NC}"
         echo -e "         • Install a new module:     ${BOLD}${INSTANCE_NAMES%% *} -i my_new_module${NC}"
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1011,14 +1046,7 @@ if [ "$MODE" = "developer" ]; then
         echo -e "${GREEN}✓${NC} Authenticated as: ${BOLD}$GH_USER${NC}"
     else
         echo -e "${RED}✗${NC} Could not authenticate with GitHub via SSH."
-        echo ""
-        echo "  Make sure you have an SSH key added to your GitHub account:"
-        echo "  https://github.com/settings/keys"
-        echo ""
-        echo "  To generate a key if you don't have one:"
-        echo "    ssh-keygen -t ed25519 -C \"your@email.com\""
-        echo "    cat ~/.ssh/id_ed25519.pub   # copy this to GitHub"
-        echo ""
+        github_ssh_help
         exit 1
     fi
 
@@ -1547,36 +1575,52 @@ ENV_EMAIL=$(grep "^SSL_EMAIL=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
 SERVER_IP=$(get_server_ip)
 
 if [ "$MODE" = "developer" ]; then
-    echo "ePHEM is ready for development:"
+    # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches the
+    # script via a \\wsl.localhost path; on macOS/Linux it's the POSIX path.
+    if is_wsl; then
+        SCRIPT_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
+        ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/custom-addons" | tr '/' '\\')"
+        PYCHARM_HOST="Windows"
+    else
+        SCRIPT_DISPLAY="$PWD/scripts/dev-logs.sh"
+        ADDONS_DISPLAY="$PWD/custom-addons"
+        PYCHARM_HOST="this machine"
+    fi
+
+    echo "ePHEM is ready for development:  http://localhost:8069"
     echo ""
-    echo "  http://localhost:8069"
+    echo -e "${CYAN}${BOLD}One-click Odoo restart + logs in PyCharm${NC}"
     echo ""
-    echo -e "${CYAN}${BOLD}Recommended dev workflow — drive Odoo from PyCharm${NC}"
-    echo ""
-    echo "  Instead of typing docker commands, use scripts/dev-logs.sh."
-    echo "  It restarts Odoo and streams colored logs — bind it to PyCharm's"
-    echo "  green ▶ button and the whole dev cycle becomes one click."
+    echo "  scripts/dev-logs.sh restarts Odoo and streams its colored logs. Bind it to a"
+    echo "  green ▶ so your edit → restart → test loop becomes one click."
     echo ""
     echo "  One-time PyCharm setup:"
-    echo "    1. File → Open → select the custom-addons/ folder"
-    echo "    2. Run → Edit Configurations → + → Shell Script"
-    echo "       • Name:               Odoo (restart + logs)"
-    echo "       • Script path:        $PWD/scripts/dev-logs.sh"
-    echo "       • Working directory:  $PWD"
-    echo "    3. Apply → OK"
+    echo "    1. Install PyCharm on ${PYCHARM_HOST} (Community Edition is free)."
+    echo "    2. File → Open → this folder:"
+    printf '         %b%s%b\n' "$BOLD" "$ADDONS_DISPLAY" "$NC"
+    echo "    3. Run → Edit Configurations → + → Shell Script:"
+    echo "         • Name:            Odoo: restart + logs"
+    printf '         • Script path:     %b%s%b\n' "$BOLD$GREEN" "$SCRIPT_DISPLAY" "$NC"
+    echo "         • Script options:  (leave empty = just restart + tail logs)"
+    echo "    4. Apply → OK, then click the green ▶."
     echo ""
-    echo "  Development cycle (after the one-time setup):"
-    echo "    1. Edit any file in custom-addons/ in PyCharm"
-    echo "    2. Click the green ▶ — Odoo restarts, logs stream in the console"
-    echo "    3. Refresh http://localhost:8069"
+    echo "  Put commands in 'Script options' to update/install modules before the restart."
+    echo "  Single-instance needs your database name via -d (the DB you created in the browser):"
+    echo -e "         ${BOLD}(empty)${NC}                                     restart + tail logs"
+    echo -e "         ${BOLD}-u eoc_signals -d yourdb${NC}                    update one module in \"yourdb\""
+    echo -e "         ${BOLD}-u eoc_base,eoc_incident_management -d yourdb${NC}   update several at once"
+    echo -e "         ${BOLD}-i my_new_module -d yourdb${NC}                  install a new module"
+    echo "    Make one run config per scenario so each is its own labelled ▶."
     echo ""
-    echo -e "${CYAN}${BOLD}Need several Odoo servers running at once?${NC}"
+    echo "  Same thing from the terminal:"
+    echo "         bash scripts/dev-logs.sh"
+    echo "         bash scripts/dev-logs.sh -u eoc_signals -d yourdb"
     echo ""
-    echo "  Re-run setup to launch multi-instance dev:"
-    echo "    bash setup.sh   →   3 (Developer)   →   y (already set up)   →   8 (Multi-instance)"
-    echo ""
-    echo "  Then add one PyCharm Shell Script run config per instance, e.g.:"
-    echo "    scripts/dev-logs.sh a     scripts/dev-logs.sh b     scripts/dev-logs.sh c"
+    echo -e "${CYAN}${BOLD}Need several Odoo servers at once?${NC}"
+    echo "  Re-run:  bash setup.sh → 3 (Developer) → y (already set up) → 8 (Multi-instance)"
+    echo "  Each instance then gets its own ▶ — same script path, its name as the first option:"
+    echo -e "         ${BOLD}1${NC}                                      restart + tail instance 1"
+    echo -e "         ${BOLD}1 -u eoc_signals${NC}                       update a module on instance 1"
 
 elif [ "$MODE" = "demo" ]; then
     DEMO_ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
