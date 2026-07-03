@@ -20,6 +20,52 @@ get_server_ip() {
     echo "127.0.0.1"
 }
 
+# ── Architecture guard ────────────────────────
+# A multi-arch image normally resolves to the host's native arch automatically.
+# Two things override that and silently install the wrong arch (then run under
+# emulation, e.g. amd64 on an Apple Silicon Mac): DOCKER_DEFAULT_PLATFORM, or a
+# stale same-tag image already cached. Detect both and offer to fix so the
+# native build is used.
+ensure_native_image_arch() {
+    local image="borrs/ephem:latest" machine host_arch
+    machine=$(uname -m 2>/dev/null || echo unknown)
+    case "$machine" in
+        arm64|aarch64) host_arch="arm64" ;;
+        x86_64|amd64)  host_arch="amd64" ;;
+        *) return 0 ;;   # unknown host arch — don't guess
+    esac
+
+    # (1) Forced platform env var overrides the manifest for every pull.
+    if [ -n "${DOCKER_DEFAULT_PLATFORM:-}" ] \
+       && [ "${DOCKER_DEFAULT_PLATFORM##*/}" != "$host_arch" ]; then
+        echo -e "${YELLOW}!${NC} DOCKER_DEFAULT_PLATFORM=${DOCKER_DEFAULT_PLATFORM} forces non-native images on this $host_arch machine."
+        read -p "  Ignore it for this run so the native $host_arch image is used? [Y/n]: " UNSET_PLAT
+        if [[ ! "${UNSET_PLAT:-Y}" =~ ^[Nn]$ ]]; then
+            unset DOCKER_DEFAULT_PLATFORM
+            echo -e "  ${GREEN}✓${NC} Unset for this run. Make it permanent by removing it from your"
+            echo "     shell profile (e.g. ~/.zshrc) and Docker Desktop → Settings → Docker Engine."
+        else
+            echo "  Keeping it — the app will run under emulation."
+        fi
+    fi
+
+    # (2) A stale cached image of the wrong arch is not re-selected on its own.
+    local img_arch
+    img_arch=$(docker image inspect "$image" --format '{{.Architecture}}' 2>/dev/null || echo "")
+    if [ -n "$img_arch" ] && [ "$img_arch" != "$host_arch" ]; then
+        echo -e "${YELLOW}!${NC} Cached $image is ${BOLD}$img_arch${NC} but this machine is ${BOLD}$host_arch${NC} — Docker won't switch it automatically."
+        read -p "  Remove it and re-pull the native $host_arch build? [Y/n]: " REPULL
+        if [[ ! "${REPULL:-Y}" =~ ^[Nn]$ ]]; then
+            docker rmi "$image" >/dev/null 2>&1 || true
+            echo "  Pulling native $host_arch image…"
+            docker compose pull odoo 2>/dev/null || docker pull "$image" || true
+            echo -e "  ${GREEN}✓${NC} Native image pulled"
+        else
+            echo "  Keeping the $img_arch image — it will run under emulation."
+        fi
+    fi
+}
+
 # ── Developer pre-flight helpers ───────────────
 # Used by the developer-mode menu shown before installation.
 
@@ -196,6 +242,28 @@ dev_reset() {
             ;;
         *) echo "  Cancelled." ;;
     esac
+}
+
+dev_update_image() {
+    echo -e "${CYAN}${BOLD}Update / repair app image${NC}"
+    echo ""
+    echo "  Fixes a wrong-architecture image (e.g. amd64 pulled on an Apple Silicon"
+    echo "  Mac), then pulls the latest borrs/ephem:latest."
+    echo ""
+    # Detect & offer to fix a forced platform / stale wrong-arch cached image.
+    ensure_native_image_arch
+    echo ""
+    read -p "  Pull the latest app image now? [Y/n]: " PULL_NOW
+    if [[ "${PULL_NOW:-Y}" =~ ^[Nn]$ ]]; then
+        echo "  Skipped."
+        return 0
+    fi
+    echo "  Pulling borrs/ephem:latest (this may take a few minutes)…"
+    if docker compose pull odoo; then
+        echo -e "  ${GREEN}✓${NC} Image up to date. Apply it:  docker compose up -d"
+    else
+        echo -e "  ${YELLOW}!${NC} Pull failed — check your network and 'docker login' status."
+    fi
 }
 
 dev_multi_instance() {
@@ -399,12 +467,13 @@ dev_preflight_menu() {
         echo "  7) Reset / clean environment (keeps custom-addons)"
         echo "  8) Multi-instance dev — run several Odoo side by side"
         echo "  9) Fetch & switch to a remote branch (custom-addons or other)"
-        echo " 10) Continue with setup"
-        echo " 11) Exit"
+        echo " 10) Update / repair app image (re-pull latest, fix Mac architecture)"
+        echo " 11) Continue with setup"
+        echo " 12) Exit"
         echo ""
-        read -p "Choose [1-11] (default: 10): " PRE
+        read -p "Choose [1-12] (default: 11): " PRE
         echo ""
-        case "${PRE:-10}" in
+        case "${PRE:-11}" in
             1) dev_cheatsheet || true ;;
             2) dev_suggest || true ;;
             3) dev_readme || true ;;
@@ -414,9 +483,10 @@ dev_preflight_menu() {
             7) dev_reset || true ;;
             8) dev_multi_instance || true ;;
             9) dev_fetch_branch || true ;;
-            10) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
-            11) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
-            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-11." ;;
+            10) dev_update_image || true ;;
+            11) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
+            12) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
+            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-12." ;;
         esac
     done
 }
@@ -570,6 +640,7 @@ if [ "$MODE" = "developer" ]; then
         fi
 
         echo ""
+        ensure_native_image_arch
         read -p "  Pull latest Odoo image first? [y/N]: " PULL_IMG
         if [[ "${PULL_IMG:-N}" =~ ^[Yy]$ ]]; then
             echo "  Pulling borrs/ephem:latest (this may take a few minutes)..."
@@ -1200,6 +1271,9 @@ echo -e "${GREEN}✓ Everything looks good!${NC}"
 echo ""
 echo "Starting ePHEM..."
 echo ""
+
+# ── Ensure the native-architecture image is used ──
+ensure_native_image_arch
 
 # ── Check for Docker image updates ──────────
 echo ""
