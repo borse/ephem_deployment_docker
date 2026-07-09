@@ -42,3 +42,4 @@ odca3/
 odoo-*.conf
 
 
+/nginx.conf

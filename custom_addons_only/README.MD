@@ -123,7 +123,7 @@ The script shows your SSH public key at the end:
 
   Send the following SSH key to the ePHEM team at:
 
-  ephem@who.int
+  abdullah@who.int, alhalakh@who.int
 
   ╔══════════════════════════════════════════════════════════════╗
   ║  COPY EVERYTHING BETWEEN THE LINES AND PASTE IN YOUR EMAIL  ║
@@ -137,7 +137,7 @@ The script shows your SSH public key at the end:
 ```
 
 1. Copy the SSH key line
-2. Email it to **`ephem@who.int`**
+2. Email it to **`abdullah@who.int, alhalakh@who.int`**
 3. Include your **country or server name** in the email subject
 4. Wait for the ePHEM team to confirm
 
@@ -212,7 +212,7 @@ The script asks you to choose when you run it.
 
 Your SSH key hasn't been added to the repository. Make sure you:
 
-1. Sent the key to `ephem@who.int`
+1. Sent the key to `abdullah@who.int, alhalakh@who.int`
 2. Received confirmation from the ePHEM team
 3. Are running the script on the **same server** where the key was generated
 
@@ -291,5 +291,5 @@ bash setup-ephem-repo.sh
 ## Need Help?
 
 1. Check [Troubleshooting](#troubleshooting) above
-2. Email the ePHEM team at `ephem@who.int`
+2. Email the ePHEM team at `abdullah@who.int, alhalakh@who.int`
 3. Open an issue: [github.com/borse/ephem_deployment_docker/issues](https://github.com/borse/ephem_deployment_docker/issues)
