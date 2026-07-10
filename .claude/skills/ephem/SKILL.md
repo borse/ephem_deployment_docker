@@ -30,6 +30,7 @@ been declared yet, **ask before touching anything**; never guess.
 | Odoo version | 18 |
 | DB container | `ephem-db` (host `db`, user `odoo`) |
 | Odoo master pwd | `9090` (from `odoo-N.conf`) |
+| Web login | `admin` / `admin` |
 
 Each `odcaN/` tree is its own git checkout and may sit on a different branch —
 check with `git -C odcaN branch --show-current` when it matters (e.g. odca1/3
