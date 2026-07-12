@@ -43,3 +43,6 @@ odoo-*.conf
 
 
 /nginx.conf
+
+# local documentation artifacts (handbook PDFs, presentation decks)
+docs/
