@@ -23,10 +23,9 @@ Thumbs.db
 *~
 /docker-compose.override.yml
 
-# Claude Code — personal, machine-local settings (shared ones go in settings.json)
-.claude/settings.local.json
-# Local-only per-instance dev skill (contains machine-local ports/creds)
-/.claude/skills/ephem_1/
+# Claude Code — all local Claude data (skills, settings, state) is machine-local
+# and contains local ports/creds/paths; never commit any of it.
+.claude/
 
 # Stray sandbox/agent output — never belongs in the repo
 /mnt/
