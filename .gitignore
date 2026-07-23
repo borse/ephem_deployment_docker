@@ -45,3 +45,5 @@ odoo-*.conf
 
 # local documentation artifacts (handbook PDFs, presentation decks)
 docs/
+/tools/new_18_auto_update.sh
+.gitignore
