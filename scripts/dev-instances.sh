@@ -42,12 +42,17 @@ STEP=10           # port gap between instances
 # Comma-free record of which instances the generated file describes.
 INSTANCES_FILE=".dev-instances"
 
+# Master password used by the local dev instances when .env doesn't set one.
+# These stacks only ever listen on localhost, so a memorable value beats a
+# random one you'd have to look up every time Odoo asks for it.
+DEV_ADMIN_PASSWORD="9090"
+
 read_admin_pass() {
     local p=""
     [ -f .env ] && p=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs || true)
     if [ -z "$p" ] || [ "$p" = "CHANGE_ME" ]; then
-        p=$(openssl rand -base64 16 2>/dev/null || echo "ephem-dev")
-        echo -e "${YELLOW}!${NC} No usable ODOO_ADMIN_PASSWORD in .env — using a generated one: ${BOLD}$p${NC}" >&2
+        p="$DEV_ADMIN_PASSWORD"
+        echo -e "${YELLOW}!${NC} No usable ODOO_ADMIN_PASSWORD in .env — using the dev default: ${BOLD}$p${NC}" >&2
     fi
     printf '%s' "$p"
 }

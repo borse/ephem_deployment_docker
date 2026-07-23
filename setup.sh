@@ -851,25 +851,32 @@ if [ "$MODE" = "developer" ]; then
         # ── Ensure .env exists (self-contained — no single-instance run needed) ──
         # Multi-instance is local dev, so we auto-generate passwords the same way
         # demo/developer single-instance mode does, instead of bailing out.
+        # The Postgres password stays random; the Odoo master password is pinned
+        # to a memorable dev value because you type it every time Odoo asks.
+        DEV_ADMIN_PASSWORD="9090"
         if [ ! -f .env ]; then
             echo "  .env not found — creating it from .env.example (local dev passwords)…"
             cp .env.example .env
             AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+                sed -i "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
             else
                 sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+                sed -i '' "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
             fi
-            echo -e "  ${GREEN}✓${NC} .env created with auto-generated passwords"
+            echo -e "  ${GREEN}✓${NC} .env created (Odoo master password: ${BOLD}$DEV_ADMIN_PASSWORD${NC})"
         elif grep -q "CHANGE_ME" .env; then
             echo "  .env has placeholder passwords — auto-filling them for local dev…"
             AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+                sed -i "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
             else
                 sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
+                sed -i '' "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
             fi
-            echo -e "  ${GREEN}✓${NC} Passwords auto-set (fine for local use)"
+            echo -e "  ${GREEN}✓${NC} Passwords auto-set (Odoo master password: ${BOLD}$DEV_ADMIN_PASSWORD${NC})"
         else
             echo -e "  ${GREEN}✓${NC} .env already present"
         fi
