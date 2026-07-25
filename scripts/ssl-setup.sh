@@ -124,6 +124,10 @@ cat > "$NGINX_ACTIVE" << NGINXEOF
 # ── Rate Limiting ──────────────────────────────
 limit_req_zone \$binary_remote_addr zone=ephem_limit:10m rate=10r/s;
 limit_conn_zone \$binary_remote_addr zone=conn_limit:10m;
+# The database manager is protected only by the Odoo master password — throttle
+# it hard so the password can't be brute-forced. Normal use is a handful of
+# requests; also set ODOO_LIST_DB=False in .env once your databases exist.
+limit_req_zone \$binary_remote_addr zone=ephem_db_mgr:10m rate=10r/m;
 
 # ── Upstreams ─────────────────────────────────
 upstream odoo-backend {
@@ -190,6 +194,12 @@ server {
         proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Real-IP         \$remote_addr;
+    }
+
+    location /web/database/ {
+        proxy_redirect off;
+        proxy_pass http://odoo-backend;
+        limit_req zone=ephem_db_mgr burst=10 nodelay;
     }
 
     location / {

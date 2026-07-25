@@ -21,7 +21,9 @@ services:
 
   # ── Odoo / ePHEM Application ───────────────────
   odoo:
-    image: borrs/ephem:latest
+    # Production servers should pin a release (EPHEM_IMAGE_TAG=1.0.1 in .env)
+    # so a pull never jumps versions silently; unset it for dev/demo = latest.
+    image: borrs/ephem:${EPHEM_IMAGE_TAG:-latest}
     container_name: ephem-app
     restart: unless-stopped
     depends_on:
@@ -58,6 +60,10 @@ services:
       - certbot-www:/var/www/certbot:ro
     networks:
       - ephem-internal
+    # Reload nginx every 6h so certificates renewed by certbot are actually
+    # served — without this, nginx keeps the old cert in memory until it
+    # expires, even though certbot renewed it on disk.
+    command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec nginx -g \"daemon off;\"'"
 
   # ── Certbot (SSL certificates) ─────────────────
   certbot:

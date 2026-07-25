@@ -49,12 +49,29 @@ if [ -n "$NAME" ]; then
     container="ephem-$name"
     db_default="ephem_$name"
 
-    if [ ! -f "$MULTI_FILE" ]; then
-        echo "✗ No multi-instance stack found ($MULTI_FILE missing)."
-        echo "  Start it first:  bash scripts/dev-instances.sh up $name"
-        exit 1
-    fi
     COMPOSE=(docker compose -f docker-compose.yml -f "$MULTI_FILE")
+
+    # Self-heal: if the multi-instance override is missing, or this instance's
+    # service isn't defined in it (manual deletion, or the file was regenerated
+    # without it), rebuild the stack via dev-instances.sh. Existing instances
+    # keep their position in .dev-instances (= their ports); the requested one
+    # is appended if new.
+    if [ ! -f "$MULTI_FILE" ] || \
+       ! "${COMPOSE[@]}" config --services 2>/dev/null | grep -qx "$service"; then
+        echo "! $service is not part of the current multi-instance stack — (re)creating it…"
+        instances=()
+        if [ -f .dev-instances ]; then
+            while IFS= read -r n; do
+                [ -n "$n" ] && instances+=("$n")
+            done < .dev-instances
+        fi
+        present=0
+        for n in "${instances[@]:-}"; do
+            [ "$n" = "$name" ] && present=1
+        done
+        [ "$present" -eq 1 ] || instances+=("$name")
+        bash scripts/dev-instances.sh up "${instances[@]}"
+    fi
 else
     service="odoo"
     container="ephem-app"
