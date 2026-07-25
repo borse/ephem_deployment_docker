@@ -187,8 +187,18 @@ for d in "${ACTUALLY_NEW[@]}"; do
 done
 
 echo ""
-echo "Create the database(s) at:"
-echo "  https://$FIRST_DOMAIN/web/database/manager"
+if grep -q "^list_db = False" "$SCRIPT_DIR/odoo.conf" 2>/dev/null; then
+    echo -e "${YELLOW}!${NC} The database manager is currently DISABLED (list_db = False)."
+    echo "  Either duplicate an existing database (no manager needed):"
+    echo "    bash scripts/duplicate-db.sh SOURCE_DB NEW_DB"
+    echo "  Or re-enable the manager temporarily:"
+    echo "    1. Set ODOO_LIST_DB=True in .env, then: bash setup.sh"
+    echo "    2. Create the database(s) at https://$FIRST_DOMAIN/web/database/manager"
+    echo "    3. Re-run setup and answer Y to disable the manager again"
+else
+    echo "Create the database(s) at:"
+    echo "  https://$FIRST_DOMAIN/web/database/manager"
+fi
 echo ""
 echo "Make sure database names match the subdomain:"
 
