@@ -26,7 +26,7 @@ cd ~/ephem-deploy          # or wherever the repo is cloned
 git pull
 
 # 2. Pin the app version (add the line if it doesn't exist)
-nano .env                  #   EPHEM_IMAGE_TAG=1.0.1
+nano .env                  #   EPHEM_IMAGE_TAG=1.0.2
 
 # 3. Recreate containers (picks up the nginx auto-reload; keeps all data)
 docker compose up -d

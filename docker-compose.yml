@@ -21,7 +21,7 @@ services:
 
   # ── Odoo / ePHEM Application ───────────────────
   odoo:
-    # Production servers should pin a release (EPHEM_IMAGE_TAG=1.0.1 in .env)
+    # Production servers should pin a release (EPHEM_IMAGE_TAG=1.0.2 in .env)
     # so a pull never jumps versions silently; unset it for dev/demo = latest.
     image: borrs/ephem:${EPHEM_IMAGE_TAG:-latest}
     container_name: ephem-app
