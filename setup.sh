@@ -1825,7 +1825,7 @@ if [ "${NEEDS_ADDONS_ACCESS:-false}" = true ] && [ -f "$HOME/.ssh/ephem_addons_d
     echo "  ePHEM is running, but without custom modules."
     echo "  To get the ePHEM modules, send the key below to:"
     echo ""
-    echo -e "  ${BOLD}${CYAN}abdullah@who.int, alhalakh@who.int${NC}"
+    echo -e "  ${BOLD}${CYAN}ephem@pheoc.com${NC}"
     echo ""
     echo -e "  ${BOLD}Include your country/server name in the email subject.${NC}"
     echo ""

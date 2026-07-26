@@ -149,7 +149,7 @@ else
     echo ""
     echo "  Send the following SSH key to the ePHEM team at:"
     echo ""
-    echo -e "  ${BOLD}${CYAN}abdullah@who.int, alhalakh@who.int${NC}"
+    echo -e "  ${BOLD}${CYAN}ephem@pheoc.com${NC}"
     echo ""
     echo -e "  ${BOLD}Include your country/server name in the email subject.${NC}"
     echo ""
