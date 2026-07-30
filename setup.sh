@@ -1624,8 +1624,8 @@ OVERRIDE
     echo -e "${GREEN}✓${NC} docker-compose.override.yml created (nginx disabled, Odoo on :8069)"
 fi
 
-docker compose up -d
-docker compose restart odoo
+echo "Starting database…"
+docker compose up -d db
 echo ""
 
 echo "Waiting for database..."
@@ -1641,23 +1641,42 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
+# ── Sync Postgres 'odoo' password to current .env BEFORE starting odoo ──
+# Why this matters: the Postgres data volume persists the password set when
+# 'odoo' was first created. If .env's POSTGRES_PASSWORD has changed since
+# (regenerated .env, re-cloned repo, switched from/to multi-instance mode),
+# odoo will hit "password authentication failed" even though .env looks
+# correct. Sync unconditionally, before odoo ever attempts to connect,
+# instead of waiting for the failure and grepping logs for it — that races
+# against odoo's own retry/backoff and can miss a fast crash loop.
+# `docker compose exec` uses the unix socket inside the db container, which
+# is `trust` auth — no password needed — so this works even when the
+# currently-set password is wrong.
+ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- | xargs)
+if [ -n "$ENV_PASSWORD" ]; then
+    if docker compose exec -T db psql -U odoo -d postgres \
+           -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" </dev/null >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} Postgres 'odoo' password synced to current .env"
+    else
+        echo -e "${YELLOW}!${NC} Could not sync password automatically."
+    fi
+else
+    echo -e "${YELLOW}!${NC} POSTGRES_PASSWORD is empty in .env — skipping password sync."
+fi
+
+docker compose up -d
+docker compose restart odoo
+
 echo "Checking database connection..."
 sleep 5
 
-ODOO_LOG=$(docker compose logs --tail=5 odoo 2>&1)
+ODOO_LOG=$(docker compose logs --tail=20 odoo 2>&1)
 if echo "$ODOO_LOG" | grep -q "password authentication failed"; then
     echo ""
-    echo -e "${YELLOW}! Database password mismatch. Fixing automatically...${NC}"
-    ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2-)
-    docker compose exec -T db psql -U odoo -d postgres -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" </dev/null 2>/dev/null && {
-        echo -e "${GREEN}✓${NC} Password synced. Restarting Odoo..."
-        docker compose restart odoo
-        sleep 5
-    } || {
-        echo -e "${RED}✗${NC} Could not fix automatically."
-        echo "  To reset: docker compose down -v && docker compose up -d"
-        exit 1
-    }
+    echo -e "${RED}✗${NC} Database password mismatch persists after sync."
+    echo "  Your db volume was likely initialized with a different POSTGRES_USER."
+    echo "  Last-resort reset (DESTROYS dev databases):  docker compose down -v && bash setup.sh"
+    exit 1
 fi
 
 # ── Server mode: lock down the database manager once databases exist ──
