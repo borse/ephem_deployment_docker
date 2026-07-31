@@ -1575,9 +1575,18 @@ echo ""
 ensure_native_image_arch
 
 # ── Check for Docker image updates ──────────
+# Note: on some Docker CLI versions, `docker inspect --format=...` on a
+# missing image writes a blank line to stdout before erroring — so
+# `$(cmd 2>/dev/null || echo none)` can capture "\nnone" instead of a clean
+# "none", failing the equality check below and routing a genuinely fresh
+# install into the interactive "check for updates?" prompt. Use `|| true`
+# (not `|| echo none`) so the substitution still exits 0 under `set -e`
+# without polluting stdout, then fall back with a parameter default — a
+# missing image reliably resolves to a clean "none".
 echo ""
 echo "Checking for Docker image updates..."
-CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' borrs/ephem:latest 2>/dev/null || echo "none")
+CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' borrs/ephem:latest 2>/dev/null || true)
+CURRENT_IMAGE="${CURRENT_IMAGE:-none}"
 
 if [ "$CURRENT_IMAGE" = "none" ]; then
     # Image not present at all — will be pulled automatically by docker compose
