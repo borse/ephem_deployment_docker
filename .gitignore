@@ -47,3 +47,4 @@ odoo-*.conf
 docs/
 /tools/new_18_auto_update.sh
 .gitignore
+/scratch/
