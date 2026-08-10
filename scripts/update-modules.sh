@@ -69,6 +69,7 @@ MODULES=(
   "eoc_ims"
   "eoc_phsm"
   "eoc_ethiopia"
+  "eoc_bangladesh"
   "eoc_cabo_verde"
   "web_replace_url"
   "remove_odoo_enterprise"
