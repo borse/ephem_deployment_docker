@@ -730,13 +730,38 @@ Add (replace `YOUR_USERNAME` and the path to match your setup):
 0 2 * * * /home/YOUR_USERNAME/ephem-deploy/scripts/backup.sh >> /home/YOUR_USERNAME/ephem-deploy/backups/backup.log 2>&1
 ```
 
-Backups older than 14 days are deleted automatically.
+Backups older than 14 days are deleted automatically (`BACKUP_KEEP_DAYS` in `.env` changes this).
 
-> **Important:** Copy backups off the server regularly. Local backups are lost if the server fails.
+**Encrypt your backups (production servers should).** Database dumps contain
+health data; encrypted snapshots can be stored anywhere safely. One-time setup:
+
+```bash
+# On your ADMIN machine (NOT the server):
+age-keygen -o ephem-backup-key.txt        # keep this private key file in a vault
+# On the server: sudo apt install -y age, then put the public "age1..." key
+# in .env:   BACKUP_AGE_RECIPIENT=age1...
+```
+
+From then on each run produces a single encrypted `backups/TIMESTAMP.tar.age`
+instead of plain files, and any failed run cleans up after itself.
+
+**Know when backups stop working.** Create a free check at
+[healthchecks.io](https://healthchecks.io) (or your own Uptime Kuma) and set
+`BACKUP_PING_URL=` in `.env`. The script pings it only after a fully
+successful backup, so you get an alert when backups quietly break — which is
+the most common way backups are lost.
+
+> **Important:** Copy backups off the server regularly (e.g. with rclone —
+> there is a ready-made hook in `scripts/backup.sh`). Local backups are lost
+> if the server fails.
 
 **Restore from backup:**
 
 ```bash
+# Encrypted snapshot? Unpack it first (needs the private key from your vault):
+age -d -i ephem-backup-key.txt backups/TIMESTAMP.tar.age | tar -x
+# ...this yields the DBNAME_TIMESTAMP.sql.gz / filestore_*.tar.gz files below.
+
 docker compose stop odoo
 gunzip < backups/DBNAME_TIMESTAMP.sql.gz | docker compose exec -T db psql -U odoo -d DBNAME
 docker compose start odoo
@@ -804,14 +829,16 @@ Then run `bash setup.sh` again.
 
 ### SSL certificate fails
 
-Make sure ports 80 and 443 are open and your domain's DNS points to the server:
+Make sure ports 80 and 443 are open and your domain's DNS points to the server.
 
-```bash
-sudo ufw allow 80
-sudo ufw allow 443
-```
+> **Note:** ports published by Docker (80/443 here) bypass ufw entirely — ufw
+> rules neither open nor close them, so `sudo ufw allow 80` changes nothing
+> for this stack. If the ports don't answer, the block is almost always your
+> **hosting provider's** firewall (DigitalOcean, AWS, etc. have separate
+> security-group settings). See [HARDENING.md](HARDENING.md) for what the
+> ufw/Docker interaction means for server security.
 
-Also check your hosting provider's firewall (DigitalOcean, AWS, etc. have separate firewall settings). Then retry:
+Then retry:
 
 ```bash
 bash scripts/ssl-setup.sh yourdomain.com your@email.com
@@ -884,6 +911,9 @@ ephem-deploy/
 │   ├── default.conf                ← HTTP-only template (in Git, never modified)
 │   └── active.conf                 ← Active NGINX config (created by scripts)
 │
+├── db-init/
+│   └── 01-app-role.sh              ← Creates the unprivileged DB role on first start
+│
 ├── custom-addons/                  ← ePHEM modules (private repo)
 │                                     read-only in server/demo, read-write in developer mode
 │
@@ -893,7 +923,9 @@ ephem-deploy/
 │   ├── duplicate-db.sh             ← Copy a database (for training environments)
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)
-│   ├── backup.sh                   ← Backup databases and filestore
+│   ├── backup.sh                   ← Backup databases and filestore (age-encrypted)
+│   ├── harden-db-role.sh           ← Check/demote the app DB role (run by setup.sh)
+│   ├── migrate-db-cluster.sh       ← One-time cluster rebuild for pre-Aug-2026 installs
 │   ├── clone-addons.sh             ← Clone addons after deploy key access is granted
 │   └── request-addons-access.sh    ← Generate a deploy key manually
 │
@@ -908,21 +940,22 @@ ephem-deploy/
 **Built-in (server mode):**
 
 - PostgreSQL and Odoo are not exposed to the internet — only NGINX is
-- All traffic encrypted with HTTPS (TLS 1.2+)
-- Security headers protect against common web attacks
-- Rate limiting prevents abuse
-- Containers run on a private Docker network
-- SSL certificates renew automatically
+- The app's database role has no superuser rights — a compromised addon
+  cannot read or drop other databases (automatic on new installs; on
+  servers installed before August 2026, `setup.sh` detects it and points
+  to the one-time `scripts/migrate-db-cluster.sh` migration)
+- `/xmlrpc` and `/jsonrpc` are blocked at NGINX — they are the main
+  credential-stuffing target and the web client doesn't use them
+- Login attempts are throttled (POST-only, so normal page loads are never
+  limited), and the database manager page is rate-limited separately
+- All traffic encrypted with HTTPS (TLS 1.2+), security headers on every
+  response, SSL certificates renew automatically
+- Containers run on a private Docker network with dropped capabilities and
+  `no-new-privileges`
 
-**Note:** Demo and developer modes expose Odoo directly on port 8069 without SSL or a reverse proxy. This is intentional for local/evaluation use — do not use demo or developer mode on a public-facing production server.
+**Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode binds Odoo to `127.0.0.1` only.
 
-**Recommended after production installation:**
-
-- Disable password-based SSH login (use SSH keys only)
-- Install fail2ban: `sudo apt install -y fail2ban`
-- Copy backups off the server regularly
-- Enable two-factor authentication for admin users (**Settings → Permissions**)
-- Disable the database manager after all databases are created (`ODOO_LIST_DB=False` in `.env`, then re-run `bash setup.sh`)
+**Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes.
 
 ---
 

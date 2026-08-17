@@ -1217,9 +1217,13 @@ services:
       - odoo-data:/var/lib/odoo
       - ./custom-addons:/mnt/extra-addons:rw
       - ./odoo.conf:/etc/odoo/odoo.conf
+    # Loopback only: Docker-published ports bypass ufw, so "8069:8069" would
+    # put raw Odoo (dev config, open db manager) on the network even with a
+    # firewall. localhost is all a dev setup needs — WSL2 forwards it to
+    # Windows automatically.
     ports:
-      - "8069:8069"
-      - "8072:8072"
+      - "127.0.0.1:8069:8069"
+      - "127.0.0.1:8072:8072"
 
   # Nginx is not needed for local development — Odoo is exposed directly above.
   # Disabling it avoids conflicts with port 80 already in use on the machine.
@@ -1671,6 +1675,16 @@ if [ -n "$ENV_PASSWORD" ]; then
     fi
 else
     echo -e "${YELLOW}!${NC} POSTGRES_PASSWORD is empty in .env — skipping password sync."
+fi
+
+# ── Least-privilege database role ────────────
+# Installs made before August 2026 bootstrapped Postgres with the app's
+# 'odoo' role as the cluster SUPERUSER, so a compromised addon could read
+# or drop every database. Fresh volumes get an unprivileged role from
+# db-init/; existing volumes are migrated here (idempotent, data untouched).
+if ! bash scripts/harden-db-role.sh; then
+    echo -e "${YELLOW}!${NC} Could not harden the database role automatically."
+    echo "   Run it manually later:  bash scripts/harden-db-role.sh"
 fi
 
 docker compose up -d

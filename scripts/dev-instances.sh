@@ -164,9 +164,11 @@ cmd_up() {
       - ./odoo-$name.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal
+    # Loopback only — Docker-published ports bypass ufw. localhost is all
+    # dev needs; WSL2 forwards it to Windows automatically.
     ports:
-      - \"$web:8069\"
-      - \"$long:8072\"
+      - \"127.0.0.1:$web:8069\"
+      - \"127.0.0.1:$long:8072\"
 "
         volumes+="  odoo-data-$name:
 "

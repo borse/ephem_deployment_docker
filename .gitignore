@@ -4,8 +4,9 @@
 # Data (lives on the server, not in Git)
 postgres-data/
 odoo-data/
-backups/*.gz
-backups/*.log
+# whole directory: dumps, encrypted .age snapshots, migration dirs, logs —
+# all of it is health data or derived from it, none of it belongs in Git
+backups/
 .env
 custom-addons/
 odoo.conf

@@ -128,6 +128,15 @@ limit_conn_zone \$binary_remote_addr zone=conn_limit:10m;
 # it hard so the password can't be brute-forced. Normal use is a handful of
 # requests; also set ODOO_LIST_DB=False in .env once your databases exist.
 limit_req_zone \$binary_remote_addr zone=ephem_db_mgr:10m rate=10r/m;
+# Throttle ONLY credential submissions (POST). Requests with an empty limit
+# key are not counted, so GETs of the login page are never limited — which
+# matters when a whole office shares one public address.
+map \$request_method \$odoo_login_limit_key {
+    default "";
+    POST    \$binary_remote_addr;
+}
+limit_req_zone \$odoo_login_limit_key zone=odoo_login:10m rate=30r/m;
+limit_req_status 429;
 
 # ── Upstreams ─────────────────────────────────
 upstream odoo-backend {
@@ -196,6 +205,23 @@ server {
         proxy_set_header X-Real-IP         \$remote_addr;
     }
 
+    # RPC endpoints: password auth with no login page and no CSRF — the
+    # preferred credential-stuffing target. Odoo's own web client does not
+    # use them, so blocking them does not affect normal browser use. If an
+    # external system must call in, allow-list its address above the deny.
+    location ~ ^/(xmlrpc|jsonrpc) {
+        # allow 203.0.113.55;   # e.g. an integration server
+        deny all;
+        proxy_pass http://odoo-backend;
+    }
+
+    # Slow down repeated login attempts (POST-only zone above)
+    location ~ ^/(web/login|web/session/authenticate) {
+        limit_req zone=odoo_login burst=20 nodelay;
+        proxy_redirect off;
+        proxy_pass http://odoo-backend;
+    }
+
     location /web/database/ {
         proxy_redirect off;
         proxy_pass http://odoo-backend;
@@ -208,8 +234,9 @@ server {
         limit_req zone=ephem_limit burst=20 nodelay;
     }
 
+    # \`expires\` (browser caching) does the work here. Odoo fingerprints its
+    # asset URLs, so a shared proxy cache would add nothing but staleness.
     location ~* /web/static/ {
-        proxy_cache_valid 200 90m;
         proxy_buffering on;
         expires 864000;
         proxy_pass http://odoo-backend;

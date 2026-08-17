@@ -6,13 +6,34 @@ services:
     container_name: ephem-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-odoo}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # Cluster superuser — maintenance only, the app never connects as it.
+      # The app uses the unprivileged role below, created by db-init/ on the
+      # volume's FIRST start. A compromised addon connecting as a superuser
+      # could read/drop every database and run OS commands in this container
+      # (COPY ... FROM PROGRAM); the split removes that.
+      # Servers installed before this change: setup.sh migrates the role.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}}
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # App role (LOGIN CREATEDB, no superuser) — see db-init/01-app-role.sh
+      ODOO_DB_USER: ${POSTGRES_USER:-odoo}
+      ODOO_DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     networks:
       - ephem-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # Minimal set the official postgres image needs to chown its data dir
+    # and step down from root to the postgres user.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odoo}"]
       interval: 10s
@@ -40,6 +61,12 @@ services:
       - ./odoo.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal
+    # Runs as the non-root 'odoo' user baked into the image; needs no
+    # capabilities at all.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    logging: *default-logging
     expose:
       - "8069"
       - "8072"
@@ -60,6 +87,13 @@ services:
       - certbot-www:/var/www/certbot:ro
     networks:
       - ephem-internal
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # nginx master runs as root to bind 80/443 and spawn workers as the
+    # nginx user; this is the standard minimal set for the official image.
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID, NET_BIND_SERVICE]
+    logging: *default-logging
     # Reload nginx every 6h so certificates renewed by certbot are actually
     # served — without this, nginx keeps the old cert in memory until it
     # expires, even though certbot renewed it on disk.
@@ -74,6 +108,9 @@ services:
       - certbot-www:/var/www/certbot
     networks:
       - ephem-internal
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done'"
 
 volumes:
