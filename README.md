@@ -611,6 +611,20 @@ Run multiple databases on the same server — for example production, training, 
 | `training.health.gov.xx` | `training` |
 | `simex.health.gov.xx` | `simex` |
 
+**One-time: turn on domain → database routing.** Odoo only picks the
+database from the domain if the filter is set. In `.env`:
+
+```
+ODOO_DBFILTER=^%d$
+```
+
+then apply it with `bash setup.sh`. `%d` is the first part of the domain
+(`training` for `training.health.gov.xx`), and the `^…$` makes the match
+exact — each domain serves only the database with exactly that name, so a
+database called `train` can never answer for `training`. Two rules follow:
+tenant domains must differ in their **first** label, and each database must
+be named exactly that label (lowercase).
+
 Before adding a domain, create a DNS A record pointing it to this server's IP.
 
 **Add a single domain:**
@@ -632,6 +646,11 @@ https://training.health.gov.xx/web/database/manager
 ```
 
 > The database name must match the subdomain. For `training.health.gov.xx`, name it `training`.
+
+> **Database manager already disabled?** (`ODOO_LIST_DB=False` — the normal
+> state on a production server.) Re-enable it just for this step: set
+> `ODOO_LIST_DB=True` in `.env`, run `bash setup.sh`, create the database,
+> then disable it again below. Leave it enabled only as long as it takes.
 
 **Disable the database manager** once all databases are set up:
 
