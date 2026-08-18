@@ -36,6 +36,7 @@ fi
 
 # ── Module list (in update order) ────────────
 MODULES=(
+  "base"
   "eoc_base"
   "eoc_signals"
   "eoc_actors"
