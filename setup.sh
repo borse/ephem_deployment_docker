@@ -1827,8 +1827,8 @@ else
         echo "  https://$DOMAIN"
         echo ""
         echo "Next steps:"
-        echo "  • Go to https://$DOMAIN/web/database/manager to create your database"
-        echo "  • Set up automatic backups: crontab -e"
+        echo "  • Create your database(s):  bash manage.sh   → 2) Add a new domain + database"
+        echo "  • Set up automatic backups: crontab -e   (README → Backups)"
     elif [ -n "$ENV_DOMAIN" ]; then
         echo "Your site is available at:"
         echo "  http://$ENV_DOMAIN  (HTTP only)"
@@ -1853,6 +1853,12 @@ else
         echo "  3. Then set up SSL:"
         echo "       bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
     fi
+
+    echo ""
+    echo -e "${BOLD}Day-to-day management — the production menu:${NC}"
+    echo "  bash manage.sh"
+    echo "  (status & health, add tenants, SSL, app/addon updates, backups,"
+    echo "   database manager lock, security check)"
 fi
 
 echo ""
