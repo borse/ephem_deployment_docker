@@ -227,9 +227,22 @@ menu_addons() {
     fi
     local cur; cur=$(git -C custom-addons branch --show-current 2>/dev/null || echo "?")
     echo "  Current branch: $cur"
-    git -C custom-addons fetch origin >/dev/null 2>&1 || true
-    local behind; behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo "?")
-    echo "  Behind origin:  ${behind} commit(s)"
+    # Repair: an earlier version widened the fetch refspec, which makes every
+    # fetch download ALL branches — on a slow server link that looks like a
+    # freeze. Keep it narrowed to the branch in use.
+    if [ "$cur" != "?" ] && [ -n "$cur" ] && \
+       [ "$(git -C custom-addons config --get remote.origin.fetch 2>/dev/null)" = "+refs/heads/*:refs/remotes/origin/*" ]; then
+        git -C custom-addons config remote.origin.fetch "+refs/heads/$cur:refs/remotes/origin/$cur"
+        echo -e "  ${GREEN}✓${NC} repaired fetch config (was set to fetch every branch)"
+    fi
+    # Bounded check — never lets a slow network look like a hang.
+    echo -n "  Checking origin... "
+    if timeout 15 git -C custom-addons fetch --quiet origin "$cur" 2>/dev/null; then
+        local behind; behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo "?")
+        echo "behind by ${behind} commit(s)"
+    else
+        echo "unreachable or slow — skipped"
+    fi
     echo ""
     echo -e "  ${YELLOW}!${NC} This changes the live code for EVERY database on this server."
     echo "     Take a backup first for anything beyond a routine pull."
@@ -248,12 +261,27 @@ menu_addons() {
         2)
             read -r -p "  Branch name on origin: " BR
             [ -z "${BR:-}" ] && { echo "  Cancelled."; return 0; }
+            # Validate FIRST — nothing is changed until the branch is known
+            # to exist under exactly this name.
+            if ! git -C custom-addons ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+                echo -e "  ${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
+                git -C custom-addons ls-remote --heads origin 2>/dev/null \
+                    | sed 's|.*refs/heads/|    • |' \
+                    || echo "    (could not list — is the deploy key authorized?)"
+                return 1
+            fi
+            # Re-point the (narrow) refspec at the new branch, then fetch —
+            # only that one branch is ever downloaded, and git can resolve
+            # it for switch/tracking. --depth 1 keeps shallow clones small.
+            local DEPTH=""
+            [ -f custom-addons/.git/shallow ] && DEPTH="--depth 1"
             ( cd custom-addons &&
-              git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" &&
-              git fetch origin "$BR" &&
-              { git switch "$BR" 2>/dev/null || git checkout "$BR"; } &&
-              git pull --ff-only origin "$BR"
-            ) || { echo -e "  ${RED}✗${NC} Could not switch — does '$BR' exist, and is the deploy key authorized?"; return 1; }
+              git config remote.origin.fetch "+refs/heads/$BR:refs/remotes/origin/$BR" &&
+              git fetch $DEPTH origin &&
+              { git switch "$BR" 2>/dev/null || git switch -c "$BR" --track "origin/$BR"; } &&
+              git merge --ff-only "origin/$BR" &&
+              git branch --set-upstream-to="origin/$BR" "$BR"
+            ) || { echo -e "  ${RED}✗${NC} Fetch/switch failed — see the git output above."; return 1; }
             echo -e "  ${GREEN}✓${NC} custom-addons now on '$BR'"
             ;;
         *) return 0 ;;

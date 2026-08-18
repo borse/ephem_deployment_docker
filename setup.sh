@@ -338,7 +338,8 @@ dev_suggest() {
         local cur behind
         cur=$(git -C custom-addons branch --show-current 2>/dev/null || echo "?")
         echo "  • custom-addons branch:           $cur"
-        if git -C custom-addons fetch origin >/dev/null 2>&1; then
+        # timeout: a slow/unreachable origin must not make the menu hang
+        if timeout 10 git -C custom-addons fetch origin >/dev/null 2>&1; then
             behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo 0)
             [ "${behind:-0}" -gt 0 ] 2>/dev/null && \
                 echo "  • $behind commit(s) behind — update:  git -C custom-addons pull"
@@ -627,11 +628,19 @@ dev_fetch_branch() {
     echo ""
     (
         cd "$REPO" || exit 1
+        # Validate BEFORE widening the refspec: a failed fetch after widening
+        # leaves the config fetching every branch, which reads as a freeze on
+        # slow links the next time anything runs a plain `git fetch`.
+        if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            echo ""
+            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Check the exact name:"
+            echo "    git ls-remote --heads origin | grep -i ${BR%%_*}"
+            exit 1
+        fi
         git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
         if ! git fetch origin "$BR"; then
             echo ""
-            echo -e "${RED}✗${NC} Fetch failed — does branch '$BR' exist on origin?"
-            echo "    git ls-remote --heads origin | grep $BR"
+            echo -e "${RED}✗${NC} Fetch failed — network or access problem?"
             exit 1
         fi
         git switch "$BR"
