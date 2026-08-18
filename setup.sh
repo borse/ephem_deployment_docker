@@ -596,6 +596,16 @@ dev_fetch_branch() {
     if [ ! -d "$REPO/.git" ]; then
         echo ""
         echo -e "${YELLOW}!${NC} '$REPO' is not a git repository — cloning fresh from origin."
+        # Validate the branch BEFORE deleting or cloning anything, so a typo
+        # can never cost you an existing folder or a wasted clone.
+        if ! git ls-remote --exit-code --heads git@github.com:borse/ePHEM.git "$BR" >/dev/null 2>&1; then
+            echo ""
+            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
+            git ls-remote --heads git@github.com:borse/ePHEM.git 2>/dev/null \
+                | sed 's|.*refs/heads/|    • |' \
+                || echo "    (could not list — is your SSH key authorized? ssh -T git@github.com)"
+            return 1
+        fi
         if [ -e "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
             read -p "  '$REPO' exists and is not empty. Delete it and clone fresh? [y/N]: " CONF
             if [[ ! "${CONF:-N}" =~ ^[Yy]$ ]]; then
@@ -633,8 +643,10 @@ dev_fetch_branch() {
         # slow links the next time anything runs a plain `git fetch`.
         if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
             echo ""
-            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Check the exact name:"
-            echo "    git ls-remote --heads origin | grep -i ${BR%%_*}"
+            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
+            git ls-remote --heads origin 2>/dev/null \
+                | sed 's|.*refs/heads/|    • |' \
+                || echo "    (could not list — is your SSH key authorized? ssh -T git@github.com)"
             exit 1
         fi
         git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
