@@ -120,6 +120,11 @@ for d in "${DOMAIN_ARRAY[@]}"; do
     SERVER_NAMES="$SERVER_NAMES $d"
 done
 
+# Upload size limit — kept in .env (manage.sh item 12 changes it) so
+# regenerating this config doesn't silently reset it to the default.
+MAX_UPLOAD=$(grep "^NGINX_MAX_UPLOAD=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | xargs || true)
+MAX_UPLOAD="${MAX_UPLOAD:-100M}"
+
 cat > "$NGINX_ACTIVE" << NGINXEOF
 # ── Rate Limiting ──────────────────────────────
 limit_req_zone \$binary_remote_addr zone=ephem_limit:10m rate=10r/s;
@@ -190,7 +195,7 @@ server {
     proxy_set_header X-Forwarded-Proto \$scheme;
     proxy_set_header X-Real-IP         \$remote_addr;
 
-    client_max_body_size 100M;
+    client_max_body_size $MAX_UPLOAD;
     proxy_read_timeout 720s;
     proxy_connect_timeout 720s;
     proxy_send_timeout 720s;

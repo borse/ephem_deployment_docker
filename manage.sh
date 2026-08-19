@@ -352,6 +352,40 @@ menu_security() {
     echo "  Host-level checklist (SSH, firewall, OS updates): see HARDENING.md"
 }
 
+# ── 12) nginx upload size limit ───────────────
+menu_upload_limit() {
+    echo -e "${CYAN}${BOLD}Upload size limit (nginx)${NC}"
+    echo ""
+    echo "  Uploads bigger than this limit get '413 Request Entity Too Large' —"
+    echo "  typically when restoring a large database through the database"
+    echo "  manager. The limit applies to every upload (attachments too)."
+    echo ""
+    if [ ! -f nginx/active.conf ]; then
+        echo -e "  ${RED}✗${NC} nginx/active.conf not found — run setup.sh first."
+        return 1
+    fi
+    local CUR
+    CUR=$(grep -m1 -o 'client_max_body_size[[:space:]]*[0-9]*[MmGg]' nginx/active.conf | awk '{print $NF}')
+    echo "  Current limit: ${CUR:-unknown}"
+    read -r -p "  New limit (e.g. 300M or 2G), empty to cancel: " VAL
+    [ -z "${VAL:-}" ] && { echo "  Cancelled."; return 0; }
+    if ! printf '%s' "$VAL" | grep -Eq '^[0-9]+[MmGg]$'; then
+        echo -e "  ${RED}✗${NC} '$VAL' is not a valid size — use a number plus M or G (e.g. 500M, 1G)."
+        return 1
+    fi
+    # Persist in .env so a future ssl-setup.sh run keeps the value, and
+    # apply to the live config.
+    set_env_key NGINX_MAX_UPLOAD "$VAL"
+    sed -i "s|client_max_body_size[[:space:]]*[0-9]*[MmGg];|client_max_body_size ${VAL};|g" nginx/active.conf
+    if docker compose exec -T nginx nginx -t >/dev/null 2>&1 && \
+       docker compose exec -T nginx nginx -s reload >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Limit is now $VAL (nginx reloaded, no downtime)."
+    else
+        echo -e "  ${YELLOW}!${NC} Config updated but nginx did not reload — apply it with:"
+        echo "     docker compose restart nginx"
+    fi
+}
+
 # ── Menu loop ─────────────────────────────────
 while true; do
     echo ""
@@ -367,9 +401,10 @@ while true; do
     echo "  9) Web database manager — enable/disable"
     echo " 10) Follow Odoo logs (Ctrl-C to stop)"
     echo " 11) Security check"
+    echo " 12) Upload size limit (fix '413 Request Entity Too Large')"
     echo "  0) Exit"
     echo ""
-    read -r -p "Choose [0-11]: " CH
+    read -r -p "Choose [0-12]: " CH
     echo ""
     case "${CH:-}" in
         1)  menu_status ;;
@@ -383,7 +418,8 @@ while true; do
         9)  menu_db_manager ;;
         10) docker compose logs -f --tail=100 odoo || true ;;
         11) menu_security ;;
+        12) menu_upload_limit ;;
         0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
-        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-11." ;;
+        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-12." ;;
     esac
 done
