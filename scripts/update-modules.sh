@@ -78,6 +78,21 @@ MODULES=(
   "web_hierarchy"
 )
 
+# ── Auto-include every eoc_* / ephem_* module in custom-addons ─────────
+# The curated list above fixes the update order for the core chain; any
+# module matching these prefixes that is not already listed is appended.
+# New modules added to the repo are picked up automatically — no need to
+# edit this script. Safe against every database: Odoo's -u simply skips
+# module names that are not installed on that database.
+for _dir in "$SCRIPT_DIR"/custom-addons/eoc_*/ "$SCRIPT_DIR"/custom-addons/ephem_*/; do
+    [ -f "$_dir/__manifest__.py" ] || continue
+    _mod=$(basename "$_dir")
+    _known=false
+    for _m in "${MODULES[@]}"; do [ "$_m" = "$_mod" ] && { _known=true; break; }; done
+    [ "$_known" = false ] && MODULES+=("$_mod")
+done
+unset _dir _mod _known _m
+
 # ── Parse arguments ──────────────────────────
 AUTO_MODE=false
 SPECIFIC_DB=""
