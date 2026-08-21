@@ -444,8 +444,8 @@ age_unpack() {  # age_unpack AGEFILE
 }
 
 # Restore into TARGET_DB. SQL_FILE and TAR_FILE may each be empty. The caller
-# has already confirmed, and taken the operator through the three warnings and
-# the master password if this overwrites anything.
+# has already confirmed, and taken the operator through the three warnings if
+# this overwrites anything.
 snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
     local SQLF="$1" TARF="$2" SRC="$3" TGT="$4" LOG errs mods rc CAT dirs pick
 
@@ -558,41 +558,11 @@ filestore_size() {  # "" when there is no filestore for this database
     odoo_sh "du -sh $FILESTORE/$1 2>/dev/null | cut -f1" 2>/dev/null | tr -d '\r'
 }
 
-# Gate on the Odoo master password — the same secret the web database manager
-# demands before dropping a database, so the person deleting a tenant has to
-# hold the same credential either way.
-check_master_password() {
-    local want want_xargs got i
-    # Read it raw: a generated password can contain characters that env_get's
-    # xargs would eat. The xargs form is accepted too, because every other
-    # tool in this repo reads the key that way — that is the value operators
-    # actually know.
-    want=$(grep -m1 "^ODOO_ADMIN_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2-)
-    want=${want%$'\r'}
-    want_xargs=$(env_get ODOO_ADMIN_PASSWORD)
-    if [ -z "$want" ] && [ -z "$want_xargs" ]; then
-        echo -e "  ${RED}✗${NC} ODOO_ADMIN_PASSWORD is not set in .env — refusing to continue."
-        echo "     Set one first (openssl rand -base64 24) so this gate means something."
-        return 1
-    fi
-    for i in 1 2 3; do
-        # -s: never echo the master password into a terminal that is very
-        # likely being recorded, screen-shared or scrolled back through.
-        read -r -s -p "  Odoo master password (ODOO_ADMIN_PASSWORD in .env): " got
-        echo ""
-        if [ -n "$got" ] && { [ "$got" = "$want" ] || [ "$got" = "$want_xargs" ]; }; then
-            return 0
-        fi
-        [ "$i" -lt 3 ] && echo -e "  ${RED}✗${NC} Wrong password — $((3 - i)) attempt(s) left."
-    done
-    echo -e "  ${RED}✗${NC} Wrong password — nothing was changed."
-    return 1
-}
-
 # Three escalating gates before anything is destroyed: see what goes, prove
-# you mean THIS database (type its name), prove you are allowed to (master
-# password). Each asks a different question on purpose — three identical
-# prompts only train people to hit Enter three times.
+# you mean THIS database by typing its name, then commit. Each asks a
+# different question on purpose — three identical prompts only train people
+# to hit Enter three times, and the middle one is the real check: a name
+# typed from memory is not something you fat-finger.
 confirm_destructive() {  # confirm_destructive DBNAME db|filestore|both [delete|overwrite]
     local DB="$1" MODE="$2" ACT="${3:-delete}" C DBSZ FSSZ LAST VERB
     [ "$MODE" != "filestore" ] && DBSZ=$(db_size "$DB")
@@ -639,9 +609,10 @@ confirm_destructive() {  # confirm_destructive DBNAME db|filestore|both [delete|
         filestore) echo "     $VERB the filestore of '$DB' now. Nothing has been changed yet." ;;
         both)      echo "     $VERB the database AND filestore of '$DB' now. Nothing has been changed yet." ;;
     esac
-    echo "     Press Ctrl-C to walk away; entering the password commits it."
+    echo "     Nothing else is asked after this."
     echo ""
-    check_master_password || return 1
+    read -r -p "  Type y to go ahead, anything else to walk away: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 1; }
 }
 
 drop_database() {  # drop_database DBNAME

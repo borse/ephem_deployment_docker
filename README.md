@@ -870,7 +870,7 @@ runs, each as one row per database. Pick a number, confirm the target name,
 done: it creates the database, loads the dump, unpacks the right database's
 directory out of the filestore archive, and verifies the result before
 reporting success. Restoring over something that already exists demands the
-three warnings and the master password.
+same three warnings a delete does, including typing the database name back.
 
 Encrypted runs prompt for the private key from your vault, decrypt to a
 staging directory, and delete the decrypted files on every exit path —
@@ -913,7 +913,7 @@ database-manager lock.)
 | Start / stop / restart Odoo | `bash manage.sh` → 11 → 1, or `docker compose restart odoo` |
 | Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
 | Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
-| Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (needs `ODOO_ADMIN_PASSWORD`) |
+| Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
