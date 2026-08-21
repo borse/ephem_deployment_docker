@@ -781,10 +781,39 @@ in Odoo's own restore dialog. If the source server still runs that tenant,
 shut it down first, or both will act as the same database.
 
 **Migrating a tenant between servers:** copy the snapshot folder to the new
-server (anywhere — it does not have to be `backups/`), then in the Restore menu
-paste its path instead of picking a number. The same prompt also accepts a
-folder of loose dumps or a single `.sql.gz`, so the flat files from
+server. Land it in `backups/` and it shows up in the Restore list on its own;
+put it anywhere else and paste its path at the same prompt. That prompt also
+accepts a folder of loose dumps or a single `.sql.gz`, so the flat files from
 `scripts/backup.sh` and older hand-made dumps can be restored this way too.
+
+### Migrating off a classic (non-Docker) Odoo server
+
+`scripts/vm-snapshot.sh` produces the same snapshot folder on a VM install, so
+a tenant can move onto this server without any manual `pg_dump`/`psql` work.
+Copy the one file over and run it:
+
+```bash
+scp scripts/vm-snapshot.sh you@vm:~/
+ssh you@vm 'sudo bash vm-snapshot.sh'
+```
+
+It asks for the PostgreSQL host, port, user and password (empty is fine where
+the VM uses peer/trust auth), and the filestore folder — reading `data_dir`
+out of the VM's `odoo.conf` to offer the right default. Then it lists the
+databases, dumps the one you pick, archives its filestore, and writes
+`/home/ephem-snapshots/<database>_<timestamp>/`.
+
+It picks a `pg_dump` matching the server's major version rather than whatever
+is first on `PATH`, because an older `pg_dump` refuses to dump a newer server —
+the usual failure on a VM with several clusters installed. It also refuses to
+write a snapshot of a database with no `ir_module_module` table, which catches
+dumping the wrong database by name.
+
+When it finishes it prints the exact `scp`/`rsync` commands to move the folder
+straight to production, or via your desktop (Windows `cmd`/PowerShell paths
+included), and the menu path to restore it. The snapshot is written mode 700
+and holds patient data in the clear, so copy it as the user that wrote it and
+delete it from both machines once the tenant is up.
 
 ```bash
 bash scripts/backup.sh
@@ -890,6 +919,7 @@ database-manager lock.)
 | Run a backup | `bash scripts/backup.sh` |
 | Add a domain | `bash scripts/add-domain.sh new.domain.com` |
 | Duplicate a database | `bash manage.sh` → 11 → 2 → 4, or `bash scripts/duplicate-db.sh source target1 target2` |
+| Snapshot a tenant on a non-Docker VM | `bash scripts/vm-snapshot.sh` (on the VM) |
 | Update modules | `bash scripts/update-modules.sh` |
 | Re-run setup | `bash setup.sh` |
 
@@ -1030,6 +1060,7 @@ ephem-deploy/
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)
 │   ├── backup.sh                   ← Backup databases and filestore (age-encrypted)
+│   ├── vm-snapshot.sh              ← Snapshot a tenant off a classic (non-Docker) Odoo VM
 │   ├── harden-db-role.sh           ← Check/demote the app DB role (run by setup.sh)
 │   ├── migrate-db-cluster.sh       ← One-time cluster rebuild for pre-Aug-2026 installs
 │   ├── clone-addons.sh             ← Clone addons after deploy key access is granted
