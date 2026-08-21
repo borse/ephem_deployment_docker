@@ -44,6 +44,36 @@ list_dbs() {
         </dev/null 2>/dev/null | tr -d '\r'
 }
 
+# Container state for one compose service, without parsing `docker compose ps`
+# output (its columns move between compose versions).
+svc_state() {  # svc_state SERVICE → running | stopped | absent
+    local cid; cid=$(docker compose ps -aq "$1" 2>/dev/null | head -1)
+    [ -z "$cid" ] && { echo "absent"; return; }
+    case "$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)" in
+        running) echo "running" ;;
+        "")      echo "absent" ;;
+        *)       echo "stopped" ;;
+    esac
+}
+
+# Wait until Odoo actually accepts connections on 8069 inside the container —
+# the container is "running" seconds before the workers are ready.
+wait_for_odoo() {  # wait_for_odoo [SECONDS]
+    local secs="${1:-90}" i=0
+    printf "  Waiting for Odoo to accept requests"
+    while [ "$i" -lt "$secs" ]; do
+        if docker compose exec -T odoo python3 -c \
+             "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(s.connect_ex(('127.0.0.1',8069)))" \
+             </dev/null >/dev/null 2>&1; then
+            echo ""; echo -e "  ${GREEN}✓${NC} Odoo is answering (took ${i}s)"; return 0
+        fi
+        printf "."; sleep 2; i=$((i + 2))
+    done
+    echo ""
+    echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s — check the log (menu item 10)."
+    return 1
+}
+
 # ── 1) Status & health ────────────────────────
 menu_status() {
     echo -e "${CYAN}${BOLD}Status & health${NC}"
@@ -386,10 +416,77 @@ menu_upload_limit() {
     fi
 }
 
+# ── 13) Start / stop / restart services ───────
+menu_service() {
+    echo -e "${CYAN}${BOLD}Odoo service — start / stop / restart${NC}"
+    echo ""
+    printf "  Odoo: %s      Database: %s      nginx: %s\n" \
+        "$(svc_state odoo)" "$(svc_state db)" "$(svc_state nginx)"
+    echo ""
+    echo -e "  ${YELLOW}!${NC} While Odoo is stopped every tenant on this server is offline"
+    echo "     (visitors get '502 Bad Gateway' from nginx). Sessions survive a"
+    echo "     restart; anything a user was typing does not."
+    echo ""
+    echo "  1) Restart Odoo            (docker compose restart odoo)"
+    echo "  2) Stop Odoo               (docker compose stop odoo)"
+    echo "  3) Start Odoo              (docker compose start odoo)"
+    echo "  4) Restart everything      (docker compose restart)"
+    echo "  5) Back"
+    read -r -p "  Choose [1-5]: " A
+    echo ""
+    case "${A:-5}" in
+        1)
+            echo -e "  ${CYAN}→${NC} docker compose restart odoo"
+            docker compose restart odoo || {
+                echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
+            wait_for_odoo
+            ;;
+        2)
+            read -r -p "  Really stop Odoo and take every tenant offline? [y/N]: " C
+            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+            echo -e "  ${CYAN}→${NC} docker compose stop odoo"
+            docker compose stop odoo || {
+                echo -e "  ${RED}✗${NC} Stop failed — see the output above."; return 1; }
+            echo -e "  ${GREEN}✓${NC} Odoo stopped. It stays down across reboots until you start it"
+            echo "     again here (option 3) — the database and nginx keep running."
+            ;;
+        3)
+            if [ "$(svc_state odoo)" = "absent" ]; then
+                # Never started on this host (or removed) — `start` has nothing
+                # to start, so create the container.
+                echo -e "  ${CYAN}→${NC} docker compose up -d odoo"
+                docker compose up -d odoo || {
+                    echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
+            else
+                echo -e "  ${CYAN}→${NC} docker compose start odoo"
+                docker compose start odoo || {
+                    echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
+            fi
+            wait_for_odoo
+            ;;
+        4)
+            read -r -p "  Restart Odoo, the database and nginx together? [y/N]: " C
+            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+            echo -e "  ${CYAN}→${NC} docker compose restart"
+            docker compose restart || {
+                echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
+            wait_for_odoo
+            ;;
+        *) return 0 ;;
+    esac
+    echo ""
+    echo "  Now: Odoo $(svc_state odoo), database $(svc_state db), nginx $(svc_state nginx)"
+}
+
 # ── Menu loop ─────────────────────────────────
 while true; do
     echo ""
-    echo -e "${BOLD}ePHEM production menu${NC}   ($(docker compose ps --status=running 2>/dev/null | grep -q odoo && echo -e "${GREEN}running${NC}" || echo -e "${RED}stopped${NC}"))"
+    case "$(svc_state odoo)" in
+        running) STATE="${GREEN}running${NC}" ;;
+        stopped) STATE="${RED}stopped${NC}" ;;
+        *)       STATE="${YELLOW}not created${NC}" ;;
+    esac
+    echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
     echo "  1) Status & health"
     echo "  2) Add a new domain + database (tenant)"
     echo "  3) Duplicate a database (training copies)"
@@ -402,9 +499,10 @@ while true; do
     echo " 10) Follow Odoo logs (Ctrl-C to stop)"
     echo " 11) Security check"
     echo " 12) Upload size limit (fix '413 Request Entity Too Large')"
+    echo " 13) Odoo service — start / stop / restart"
     echo "  0) Exit"
     echo ""
-    read -r -p "Choose [0-12]: " CH
+    read -r -p "Choose [0-13]: " CH
     echo ""
     case "${CH:-}" in
         1)  menu_status ;;
@@ -419,7 +517,8 @@ while true; do
         10) docker compose logs -f --tail=100 odoo || true ;;
         11) menu_security ;;
         12) menu_upload_limit ;;
+        13) menu_service ;;
         0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
-        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-12." ;;
+        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-13." ;;
     esac
 done
