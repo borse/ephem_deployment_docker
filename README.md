@@ -745,6 +745,47 @@ bash scripts/update-modules.sh --auto --db your-database-name
 
 ## Backups
 
+Two different jobs, both writing into `backups/`:
+
+| | Whole-server backup | Per-database snapshot |
+|---|---|---|
+| Run it | `bash scripts/backup.sh` (menu item 7) | `bash manage.sh` → 11 → 2 → 1 |
+| Covers | every database + the whole filestore | one database + its filestore |
+| Output | flat files, optionally one encrypted `.age` | a folder per snapshot |
+| Retention | by age, `BACKUP_KEEP_DAYS` (default 14 days) | by count, `SNAPSHOT_KEEP` (default newest 10 per database) |
+| Restore | from the menu, 11 → 2 → 2 (or by hand, below) | from the menu, 11 → 2 → 2 |
+
+Use the first for cron and disaster recovery, the second before you touch a
+single tenant. The two retentions never collide: `backup.sh` only sweeps flat
+files at the top level, and snapshot pruning only removes folders whose
+`manifest` names the database just snapshotted — so anything hand-made, or
+copied in from another server, is left alone.
+
+### Snapshot layout
+
+```
+backups/ephem_2_20260822_004512/
+├── database.sql.gz     pg_dump of that one database, gzipped
+├── filestore.tar.gz    filestore/<database>/, gzipped
+└── manifest            database= created= db_dump= filestore= host=
+```
+
+Restore reads the database name from `manifest`, never by splitting the folder
+name — database names contain underscores, so `ephem_2_20260822_004512` cannot
+be cut back into name and timestamp reliably.
+
+**Restores are a move, not a copy.** The database keeps its original
+`database.uuid` and everything inside it — scheduled actions, outgoing mail
+servers, payment credentials — exactly like choosing "this database is a move"
+in Odoo's own restore dialog. If the source server still runs that tenant,
+shut it down first, or both will act as the same database.
+
+**Migrating a tenant between servers:** copy the snapshot folder to the new
+server (anywhere — it does not have to be `backups/`), then in the Restore menu
+paste its path instead of picking a number. The same prompt also accepts a
+folder of loose dumps or a single `.sql.gz`, so the flat files from
+`scripts/backup.sh` and older hand-made dumps can be restored this way too.
+
 ```bash
 bash scripts/backup.sh
 ```
@@ -789,6 +830,24 @@ the most common way backups are lost.
 **Restore from backup:**
 
 ```bash
+bash manage.sh      # → 11) Advanced → 2) Databases → 2) Restore
+```
+
+One list covers everything this server can restore, newest first — snapshot
+folders, the flat dumps from `scripts/backup.sh`, and encrypted `.tar.age`
+runs, each as one row per database. Pick a number, confirm the target name,
+done: it creates the database, loads the dump, unpacks the right database's
+directory out of the filestore archive, and verifies the result before
+reporting success. Restoring over something that already exists demands the
+three warnings and the master password.
+
+Encrypted runs prompt for the private key from your vault, decrypt to a
+staging directory, and delete the decrypted files on every exit path —
+including a cancel part-way through.
+
+To do it by hand instead:
+
+```bash
 # Encrypted snapshot? Unpack it first (needs the private key from your vault):
 age -d -i ephem-backup-key.txt backups/TIMESTAMP.tar.age | tar -x
 # ...this yields the DBNAME_TIMESTAMP.sql.gz / filestore_*.tar.gz files below.
@@ -811,21 +870,26 @@ bash manage.sh
 ```
 
 (Status & health, add tenants/domains, SSL, app and addon updates, backups,
-database-manager lock, security check.)
+security check, and an Advanced submenu holding the sharper tools: start/stop/
+restart, per-database backup / restore / delete / duplicate, and the
+database-manager lock.)
 
 | What you want to do | Command |
 |---------------------|---------|
 | Open the production menu | `bash manage.sh` |
 | Start the system | `docker compose up -d` |
 | Stop the system | `docker compose down` |
-| Restart Odoo | `docker compose restart odoo` |
+| Start / stop / restart Odoo | `bash manage.sh` → 11 → 1, or `docker compose restart odoo` |
+| Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
+| Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
+| Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (needs `ODOO_ADMIN_PASSWORD`) |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
 | Run a backup | `bash scripts/backup.sh` |
 | Add a domain | `bash scripts/add-domain.sh new.domain.com` |
-| Duplicate a database | `bash scripts/duplicate-db.sh source target1 target2` |
+| Duplicate a database | `bash manage.sh` → 11 → 2 → 4, or `bash scripts/duplicate-db.sh source target1 target2` |
 | Update modules | `bash scripts/update-modules.sh` |
 | Re-run setup | `bash setup.sh` |
 

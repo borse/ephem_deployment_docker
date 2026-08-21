@@ -70,7 +70,604 @@ wait_for_odoo() {  # wait_for_odoo [SECONDS]
         printf "."; sleep 2; i=$((i + 2))
     done
     echo ""
-    echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s — check the log (menu item 10)."
+    echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s — check the log (menu item 8)."
+    return 1
+}
+
+BACKUP_DIR="$SCRIPT_DIR/backups"
+FILESTORE="/var/lib/odoo/.local/share/Odoo/filestore"
+FS_PARENT="/var/lib/odoo/.local/share/Odoo"
+
+# Database names typed by the operator end up inside `rm -rf` paths and SQL
+# identifiers. Accept only what Odoo itself accepts, so a name can never
+# escape the filestore directory or close a quoted identifier.
+valid_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; }
+
+db_exists() {  # call valid_db_name first
+    [ "$(docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+        "SELECT 1 FROM pg_database WHERE datname = '$1';" \
+        </dev/null 2>/dev/null | tr -d '\r')" = "1" ]
+}
+
+list_dbs_sized() {
+    docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+        "SELECT datname || '  (' || pg_size_pretty(pg_database_size(datname)) || ')'
+           FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres')
+          ORDER BY datname;" </dev/null 2>/dev/null | tr -d '\r'
+}
+
+# Reach the filestore volume. Prefers the running container; falls back to a
+# throwaway one so the filestore stays reachable while Odoo is stopped.
+# stdin is closed: a stray `docker compose exec` must never swallow the menu's
+# own keyboard input.
+odoo_sh() {  # odoo_sh 'shell command'
+    if [ "$(svc_state odoo)" = "running" ]; then
+        docker compose exec -T odoo sh -c "$1" </dev/null
+    else
+        docker compose run --rm -T --entrypoint sh odoo -c "$1" </dev/null
+    fi
+}
+
+# Same, but stdin IS passed through — restore streams an archive in. Kept as
+# a separate function so no ordinary call can eat menu input by accident.
+odoo_pipe() {  # odoo_pipe 'shell command' < file
+    if [ "$(svc_state odoo)" = "running" ]; then
+        docker compose exec -T odoo sh -c "$1"
+    else
+        docker compose run --rm -T --entrypoint sh odoo -c "$1"
+    fi
+}
+
+# "dbname  (12M)", to read like the PostgreSQL listing above it. du prints
+# the size first, so strip the path prefix only — a greedy .*/ eats the size.
+list_filestores() {
+    odoo_sh "du -sh $FILESTORE/* 2>/dev/null" 2>/dev/null | tr -d '\r' \
+        | sed "s|^\([^[:space:]]*\)[[:space:]]*$FILESTORE/\(.*\)$|\2  (\1)|"
+}
+
+# ── Snapshots ─────────────────────────────────
+# One snapshot = one folder under backups/, named <database>_<timestamp>,
+# holding the database dump, the filestore archive and a manifest:
+#
+#     backups/ephem_2_20260822_004512/
+#       ├── database.sql.gz
+#       ├── filestore.tar.gz
+#       └── manifest          (database=, created=, db_dump=, filestore=)
+#
+# Restore reads the database name from the manifest, never by splitting the
+# folder name — "ephem_2_20260822_004512" cannot be cut back into name and
+# timestamp reliably, because database names contain underscores too.
+#
+# scripts/backup.sh (menu item 7) is untouched and still writes its own
+# whole-server snapshots as flat files here; its retention sweep only
+# deletes files at the top level, so these folders are left alone.
+
+manifest_get() { grep -m1 "^$2=" "$1/manifest" 2>/dev/null | cut -d'=' -f2-; }
+
+# Snapshot one database + its filestore. Sets SNAPSHOT_DIR on success; on any
+# failure the half-written folder is removed, because a partial snapshot in
+# the restore list is worse than no snapshot at all.
+snapshot_create() {  # snapshot_create DBNAME
+    local DB="$1" TS DIR rc HAS_DB=no HAS_FS=no
+    SNAPSHOT_DIR=""
+    TS=$(date +%Y%m%d_%H%M%S)
+    DIR="$BACKUP_DIR/${DB}_${TS}"
+
+    if [ "$(svc_state db)" != "running" ]; then
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        return 1
+    fi
+    if ! mkdir -p "$DIR"; then
+        echo -e "  ${RED}✗${NC} Could not create $DIR"
+        return 1
+    fi
+    echo -e "  ${CYAN}→${NC} Snapshot: backups/${DIR##*/}/"
+
+    if db_exists "$DB"; then
+        if ! docker compose exec -T db pg_dump -U "$DB_USER" "$DB" </dev/null | gzip > "$DIR/database.sql.gz" \
+           || ! gzip -t "$DIR/database.sql.gz" 2>/dev/null; then
+            echo -e "  ${RED}✗${NC} pg_dump failed or produced a corrupt file — snapshot discarded."
+            rm -rf "$DIR"
+            return 1
+        fi
+        HAS_DB=yes
+        echo -e "     ${GREEN}✓${NC} database.sql.gz    ($(du -h "$DIR/database.sql.gz" | cut -f1))"
+    else
+        echo -e "     ${YELLOW}!${NC} no database named '$DB' — filestore only"
+    fi
+
+    if odoo_sh "test -d $FILESTORE/$DB" >/dev/null 2>&1; then
+        rc=0
+        # tar exit 1 = "file changed while reading", routine on a live system.
+        odoo_sh "tar -czf - -C $FILESTORE $DB" > "$DIR/filestore.tar.gz" 2>/dev/null || rc=$?
+        if [ "$rc" -gt 1 ] || ! gzip -t "$DIR/filestore.tar.gz" 2>/dev/null; then
+            echo -e "  ${RED}✗${NC} Filestore archive failed (tar exit $rc) — snapshot discarded."
+            rm -rf "$DIR"
+            return 1
+        fi
+        [ "$rc" -eq 1 ] && echo -e "     ${YELLOW}!${NC} files changed while archiving (normal on a live system)"
+        HAS_FS=yes
+        echo -e "     ${GREEN}✓${NC} filestore.tar.gz   ($(du -h "$DIR/filestore.tar.gz" | cut -f1))"
+    else
+        echo -e "     ${YELLOW}!${NC} no filestore directory for '$DB' — database only"
+    fi
+
+    if [ "$HAS_DB" = no ] && [ "$HAS_FS" = no ]; then
+        echo -e "  ${RED}✗${NC} Nothing to snapshot for '$DB' — no database, no filestore."
+        rm -rf "$DIR"
+        return 1
+    fi
+
+    { echo "database=$DB"
+      echo "created=$(date '+%Y-%m-%d %H:%M:%S')"
+      echo "db_dump=$HAS_DB"
+      echo "filestore=$HAS_FS"
+      echo "host=$(hostname)"
+    } > "$DIR/manifest"
+
+    SNAPSHOT_DIR="$DIR"
+    echo -e "  ${GREEN}✓${NC} Saved: backups/${DIR##*/}  ($(du -sh "$DIR" | cut -f1))"
+    snapshot_prune "$DB"
+}
+
+# Every snapshot folder, newest first. A folder with neither artifact is
+# skipped: it cannot restore anything.
+snapshot_list_all() {
+    ls -1dt "$BACKUP_DIR"/*/ 2>/dev/null | while IFS= read -r d; do
+        d="${d%/}"
+        { [ -f "$d/database.sql.gz" ] || [ -f "$d/filestore.tar.gz" ]; } && printf '%s\n' "$d"
+    done
+}
+
+# Capped at 100 for the menu — a server with a year of snapshots should not
+# scroll a thousand lines past the operator before the prompt appears.
+snapshot_list() { snapshot_list_all | head -100; }
+
+# Keep the newest SNAPSHOT_KEEP snapshots OF ONE DATABASE and remove the rest.
+# Per database, not per server: a global cap would make "back up every
+# database" evict the other tenants' snapshots on every run.
+#
+# Only folders whose manifest names this database are ever removed — anything
+# hand-made, or copied in from another server, has no manifest and is left
+# alone. Deleting backups automatically is worth being fussy about.
+snapshot_prune() {  # snapshot_prune DBNAME
+    local DB="$1" keep i dropped=0
+    local -a MINE=()
+    keep=$(env_get SNAPSHOT_KEEP); keep="${keep:-10}"
+    # Anything non-numeric or 0 turns pruning off.
+    printf '%s' "$keep" | grep -Eq '^[0-9]+$' || return 0
+    [ "$keep" -lt 1 ] && return 0
+
+    local d
+    while IFS= read -r d; do
+        [ "$(manifest_get "$d" database)" = "$DB" ] && MINE+=("$d")
+    done < <(snapshot_list_all)
+
+    [ "${#MINE[@]}" -le "$keep" ] && return 0
+    for ((i = keep; i < ${#MINE[@]}; i++)); do
+        [ -f "${MINE[$i]}/manifest" ] || continue
+        rm -rf "${MINE[$i]}" && dropped=$((dropped + 1))
+    done
+    # Never prune silently: a backup disappearing without a word is how people
+    # discover their retention policy at the worst possible moment.
+    [ "$dropped" -gt 0 ] && \
+        echo -e "     ${CYAN}·${NC} pruned $dropped older snapshot(s) of '$DB' (keeping the newest $keep)"
+    return 0
+}
+
+# Point the restore at something that is not one of our own snapshot folders:
+# a folder copied off another server, or the flat files scripts/backup.sh
+# writes. Sets RS_SQL / RS_TAR (either may be empty) and RS_DB as a suggested
+# target name. Returns 1 when the path yields nothing usable.
+resolve_external_path() {  # resolve_external_path PATH
+    local P="$1" n
+    RS_SQL=""; RS_TAR=""; RS_DB=""
+    P="${P/#\~/$HOME}"
+    P="${P%/}"
+
+    if [ -d "$P" ]; then
+        [ -f "$P/database.sql.gz" ] && RS_SQL="$P/database.sql.gz"
+        [ -f "$P/filestore.tar.gz" ] && RS_TAR="$P/filestore.tar.gz"
+        # Not our layout — take the only dump / only archive in the folder.
+        # More than one and we cannot guess: ask for the file itself.
+        if [ -z "$RS_SQL" ]; then
+            n=$(ls -1 "$P"/*.sql.gz "$P"/*.sql 2>/dev/null | wc -l)
+            if [ "$n" -eq 1 ]; then RS_SQL=$(ls -1 "$P"/*.sql.gz "$P"/*.sql 2>/dev/null)
+            elif [ "$n" -gt 1 ]; then
+                echo -e "  ${YELLOW}!${NC} Several dumps in that folder — point at one file instead:"
+                ls -1 "$P"/*.sql.gz "$P"/*.sql 2>/dev/null | sed 's|^|    • |'
+                return 1
+            fi
+        fi
+        if [ -z "$RS_TAR" ]; then
+            n=$(ls -1 "$P"/*.tar.gz "$P"/*.tgz "$P"/*.tar 2>/dev/null | wc -l)
+            if [ "$n" -eq 1 ]; then RS_TAR=$(ls -1 "$P"/*.tar.gz "$P"/*.tgz "$P"/*.tar 2>/dev/null)
+            elif [ "$n" -gt 1 ]; then
+                echo -e "  ${YELLOW}!${NC} Several archives in that folder — none picked automatically:"
+                ls -1 "$P"/*.tar.gz "$P"/*.tgz "$P"/*.tar 2>/dev/null | sed 's|^|    • |'
+                read -r -p "  Filestore archive to use (empty for none): " RS_TAR
+                RS_TAR="${RS_TAR/#\~/$HOME}"
+                [ -n "$RS_TAR" ] && [ ! -f "$RS_TAR" ] && {
+                    echo -e "  ${RED}✗${NC} No such file: $RS_TAR"; return 1; }
+            fi
+        fi
+        RS_DB=$(manifest_get "$P" database)
+    elif [ -f "$P" ]; then
+        case "$P" in
+            *.sql.gz|*.sql) RS_SQL="$P" ;;
+            *.tar.gz|*.tgz|*.tar) RS_TAR="$P" ;;
+            *) echo -e "  ${RED}✗${NC} Not a dump or archive: $P"; return 1 ;;
+        esac
+        # Offer to pair it with the other half.
+        if [ -n "$RS_SQL" ]; then
+            read -r -p "  Filestore archive to restore with it (empty for none): " RS_TAR
+            RS_TAR="${RS_TAR/#\~/$HOME}"
+            [ -n "$RS_TAR" ] && [ ! -f "$RS_TAR" ] && {
+                echo -e "  ${RED}✗${NC} No such file: $RS_TAR"; return 1; }
+        fi
+    else
+        echo -e "  ${RED}✗${NC} No such file or folder: $P"
+        return 1
+    fi
+
+    if [ -z "$RS_SQL" ] && [ -z "$RS_TAR" ]; then
+        echo -e "  ${RED}✗${NC} Nothing restorable found at: $P"
+        return 1
+    fi
+    # Suggest a name: manifest, else the dump filename with a trailing
+    # _YYYYMMDD_HHMMSS stripped off (that is how backup.sh names them).
+    if [ -z "$RS_DB" ] && [ -n "$RS_SQL" ]; then
+        RS_DB=$(basename "$RS_SQL"); RS_DB="${RS_DB%.gz}"; RS_DB="${RS_DB%.sql}"
+        RS_DB=$(printf '%s' "$RS_DB" | sed -E 's/_[0-9]{8}_[0-9]{6}$//')
+    fi
+    [ "$RS_DB" = "database" ] && RS_DB=""
+    return 0
+}
+
+# Everything this server can restore, one line per restorable database:
+#
+#     epoch|kind|database|created|size|sqlfile|tarfile
+#
+# kind: snap = our own snapshot folder
+#       auto = the flat files scripts/backup.sh writes (menu item 7 / cron)
+#       age  = an encrypted run; its contents stay unknown until decrypted
+#
+# The two kinds are listed together on purpose: "what can I restore" is one
+# question, and an operator should not have to know which tool wrote a backup
+# before they can find it.
+# YYYYMMDD_HHMMSS -> epoch. Sorting on file mtime instead would put a backup
+# COPIED onto this server today above one taken here last week, which is the
+# opposite of what the printed date says.
+ts_epoch() { date -d "${1:0:4}-${1:4:2}-${1:6:2} ${1:9:2}:${1:11:2}:${1:13:2}" +%s 2>/dev/null; }
+
+restore_sources() {
+    local d f base ts db epoch created size tar
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        db=$(manifest_get "$d" database); [ -z "$db" ] && db="${d##*/}"
+        created=$(manifest_get "$d" created)
+        epoch=$(date -d "$created" +%s 2>/dev/null || true)
+        [ -z "$epoch" ] && epoch=$(stat -c %Y "$d" 2>/dev/null || echo 0)
+        [ -z "$created" ] && created=$(date -d "@$epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+        created="${created:0:16}"   # minutes: seconds would break the column
+        size=$(du -sh "$d" 2>/dev/null | cut -f1)
+        printf '%s|snap|%s|%s|%s|%s|%s\n' "$epoch" "$db" "$created" "$size" \
+            "$([ -f "$d/database.sql.gz" ] && echo "$d/database.sql.gz")" \
+            "$([ -f "$d/filestore.tar.gz" ] && echo "$d/filestore.tar.gz")"
+    done < <(snapshot_list_all)
+
+    # backup.sh names its dumps <database>_<YYYYMMDD>_<HHMMSS>.sql.gz and
+    # writes ONE filestore_<same timestamp>.tar.gz for the whole run, holding
+    # every database's attachments. Hand-made dumps without that exact suffix
+    # are skipped here — paste their path instead.
+    for f in "$BACKUP_DIR"/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].sql.gz; do
+        [ -f "$f" ] || continue
+        base="${f##*/}"; base="${base%.sql.gz}"
+        ts="${base: -15}"
+        db="${base%_$ts}"
+        [ -n "$db" ] || continue
+        epoch=$(ts_epoch "$ts"); [ -z "$epoch" ] && epoch=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        created="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}"
+        size=$(du -h "$f" 2>/dev/null | cut -f1)
+        tar="$BACKUP_DIR/filestore_${ts}.tar.gz"; [ -f "$tar" ] || tar=""
+        printf '%s|auto|%s|%s|%s|%s|%s\n' "$epoch" "$db" "$created" "$size" "$f" "$tar"
+    done
+
+    for f in "$BACKUP_DIR"/*.tar.age; do
+        [ -f "$f" ] || continue
+        base="${f##*/}"; ts="${base%.tar.age}"
+        epoch=$(ts_epoch "$ts"); [ -z "$epoch" ] && epoch=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        created="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:9:2}:${ts:11:2}"
+        size=$(du -h "$f" 2>/dev/null | cut -f1)
+        printf '%s|age|(encrypted)|%s|%s|%s|\n' "$epoch" "$created" "$size" "$f"
+    done
+}
+
+# Decrypt one .tar.age run and let the operator pick a database out of it.
+# Sets AGE_STAGE (the caller removes it — the unpacked files are plaintext
+# health data), RS_SQL, RS_TAR, RS_DB.
+age_unpack() {  # age_unpack AGEFILE
+    local F="$1" KEY n i pick
+    local -a DUMPS=()
+    RS_SQL=""; RS_TAR=""; RS_DB=""; AGE_STAGE=""
+
+    if ! command -v age >/dev/null 2>&1; then
+        echo -e "  ${RED}✗${NC} 'age' is not installed on this server — sudo apt install -y age"
+        return 1
+    fi
+    echo "  This run is encrypted. Decrypting needs the PRIVATE key that was"
+    echo "  generated with age-keygen and kept off this server."
+    read -r -p "  Path to the key file (empty to cancel): " KEY
+    [ -z "${KEY:-}" ] && { echo "  Cancelled."; return 1; }
+    KEY="${KEY/#\~/$HOME}"
+    if [ ! -f "$KEY" ]; then
+        echo -e "  ${RED}✗${NC} No such key file: $KEY"
+        return 1
+    fi
+
+    AGE_STAGE="$BACKUP_DIR/.age_unpack_$$"
+    mkdir -p "$AGE_STAGE" || return 1
+    chmod 700 "$AGE_STAGE"
+    echo -e "  ${CYAN}→${NC} Decrypting $(basename "$F")"
+    if ! age -d -i "$KEY" "$F" | tar -x -C "$AGE_STAGE" 2>/dev/null; then
+        echo -e "  ${RED}✗${NC} Decryption failed — wrong key, or the file is damaged."
+        return 1
+    fi
+    chmod -R go-rwx "$AGE_STAGE" 2>/dev/null
+
+    while IFS= read -r n; do [ -n "$n" ] && DUMPS+=("$n"); done \
+        < <(ls -1 "$AGE_STAGE"/*.sql.gz 2>/dev/null)
+    if [ "${#DUMPS[@]}" -eq 0 ]; then
+        echo -e "  ${RED}✗${NC} No database dumps inside that run."
+        return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Decrypted. Databases in this run:"
+    for i in "${!DUMPS[@]}"; do
+        n=$(basename "${DUMPS[$i]}"); n="${n%.sql.gz}"; n="${n%_*_*}"
+        printf "    %2d) %-28s (%s)\n" "$((i + 1))" "$n" "$(du -h "${DUMPS[$i]}" | cut -f1)"
+    done
+    [ -f "$AGE_STAGE"/config_*.tar.gz ] 2>/dev/null && \
+        echo "     (the run also carries config_*.tar.gz — .env, odoo.conf, nginx;"
+    [ -f "$AGE_STAGE"/config_*.tar.gz ] 2>/dev/null && \
+        echo "      not restored here, copy it out by hand if you need it)"
+    echo ""
+    read -r -p "  Which database? [1-${#DUMPS[@]}] (empty to cancel): " pick
+    if ! printf '%s' "${pick:-}" | grep -Eq '^[0-9]+$' \
+       || [ "$pick" -lt 1 ] || [ "$pick" -gt "${#DUMPS[@]}" ]; then
+        echo "  Cancelled."
+        return 1
+    fi
+    RS_SQL="${DUMPS[$((pick - 1))]}"
+    RS_DB=$(basename "$RS_SQL"); RS_DB="${RS_DB%.sql.gz}"; RS_DB="${RS_DB%_*_*}"
+    RS_TAR=$(ls -1 "$AGE_STAGE"/filestore_*.tar.gz 2>/dev/null | head -1)
+    return 0
+}
+
+# Restore into TARGET_DB. SQL_FILE and TAR_FILE may each be empty. The caller
+# has already confirmed, and taken the operator through the three warnings and
+# the master password if this overwrites anything.
+snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
+    local SQLF="$1" TARF="$2" SRC="$3" TGT="$4" LOG errs mods rc CAT dirs pick
+
+    if [ "$(svc_state db)" != "running" ]; then
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        return 1
+    fi
+
+    # ── database ──────────────────────────────────────────────────────
+    if [ -n "$SQLF" ]; then
+        if db_exists "$TGT"; then
+            drop_database "$TGT" || return 1
+        fi
+        echo -e "  ${CYAN}→${NC} Creating database '$TGT'"
+        # template0: the cluster's template1 may carry local additions that
+        # would collide with objects in the dump.
+        if ! docker compose exec -T db psql -U "$DB_USER" -d postgres -c \
+             "CREATE DATABASE \"$TGT\" WITH TEMPLATE template0 ENCODING 'UTF8';" </dev/null; then
+            echo -e "  ${RED}✗${NC} Could not create '$TGT' — nothing was restored."
+            return 1
+        fi
+        echo -e "  ${CYAN}→${NC} Loading $(basename "$SQLF") into '$TGT' (this can take a while)"
+        CAT=cat; [ "${SQLF##*.}" = "gz" ] && CAT="gunzip -c"
+        LOG=$(mktemp)
+        rc=0
+        $CAT "$SQLF" | docker compose exec -T db psql -U "$DB_USER" -q -d "$TGT" >"$LOG" 2>&1 || rc=$?
+        errs=$(grep -c '^ERROR' "$LOG" 2>/dev/null || true)
+        # psql exits 0 on a dump that produced errors, so trust the data, not
+        # the exit code: an Odoo database with no ir_module_module is broken.
+        mods=$(docker compose exec -T db psql -U "$DB_USER" -d "$TGT" -t -A -c \
+               "SELECT count(*) FROM ir_module_module;" </dev/null 2>/dev/null | tr -d '\r')
+        if ! printf '%s' "$mods" | grep -Eq '^[1-9][0-9]*$'; then
+            echo -e "  ${RED}✗${NC} Restore failed — '$TGT' has no ir_module_module rows (psql exit $rc)."
+            echo "     psql output kept at: $LOG"
+            return 1
+        fi
+        if [ "${errs:-0}" -gt 0 ]; then
+            echo -e "  ${YELLOW}!${NC} Loaded, but psql reported $errs error line(s): $LOG"
+        else
+            rm -f "$LOG"
+        fi
+        echo -e "  ${GREEN}✓${NC} Database '$TGT' restored ($mods modules)"
+    else
+        echo -e "  ${YELLOW}!${NC} No database dump in this restore — filestore only."
+    fi
+
+    # ── filestore ─────────────────────────────────────────────────────
+    if [ -n "$TARF" ]; then
+        echo -e "  ${CYAN}→${NC} Unpacking $(basename "$TARF")"
+        # Unpack to a staging dir first. The archive is rooted at the SOURCE
+        # database's name, so extracting straight into filestore/ would
+        # overwrite that database's live attachments when the target name
+        # differs — and backup.sh's archive holds EVERY database.
+        local STAGE="$FS_PARENT/.restore_staging"
+        odoo_sh "rm -rf $STAGE && mkdir -p $STAGE" >/dev/null 2>&1
+        # Decompress on this side: tar cannot auto-detect compression on a
+        # pipe (it has nothing to rewind), and hard-coding -z would reject a
+        # plain .tar. Feeding it an uncompressed stream handles both.
+        local TCAT=cat
+        case "$TARF" in *.gz|*.tgz) TCAT="gunzip -c" ;; esac
+        if ! $TCAT "$TARF" | odoo_pipe "tar -xf - -C $STAGE" >/dev/null 2>&1; then
+            echo -e "  ${RED}✗${NC} Could not unpack the archive."
+            odoo_sh "rm -rf $STAGE" >/dev/null 2>&1
+            return 1
+        fi
+        # Which directory inside the archive is the filestore? Our snapshots
+        # are rooted at the source database's name; scripts/backup.sh archives
+        # the whole filestore, so it holds one directory per database.
+        # Every candidate must be non-empty and a real directory — an empty
+        # name would make "test -d $STAGE/" match the staging dir itself and
+        # move the entire archive into place.
+        dirs=$(odoo_sh "ls -1 $STAGE 2>/dev/null" | tr -d '\r' | grep . || true)
+        pick=""
+        if   [ -n "$SRC" ] && odoo_sh "test -d $STAGE/$SRC" >/dev/null 2>&1; then pick="$SRC"
+        elif [ -n "$TGT" ] && odoo_sh "test -d $STAGE/$TGT" >/dev/null 2>&1; then pick="$TGT"
+        elif [ "$(printf '%s\n' "$dirs" | grep -c .)" = "1" ] && valid_db_name "$dirs" \
+             && odoo_sh "test -d $STAGE/$dirs" >/dev/null 2>&1; then pick="$dirs"
+        fi
+        if [ -z "$pick" ]; then
+            echo "  This archive holds more than one filestore:"
+            printf '%s\n' "$dirs" | sed 's/^/    • /'
+            read -r -p "  Which one belongs to '$TGT'? (empty to skip the filestore): " pick
+            if [ -z "$pick" ] || ! valid_db_name "$pick" \
+               || ! odoo_sh "test -d $STAGE/$pick" >/dev/null 2>&1; then
+                echo -e "  ${YELLOW}!${NC} Filestore skipped — attachments will be missing."
+                odoo_sh "rm -rf $STAGE" >/dev/null 2>&1
+                return 0
+            fi
+        fi
+        odoo_sh "rm -rf $FILESTORE/$TGT && mkdir -p $FILESTORE && mv $STAGE/$pick $FILESTORE/$TGT && rm -rf $STAGE" \
+            >/dev/null 2>&1
+        if odoo_sh "test -d $FILESTORE/$TGT" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Filestore restored  ($(filestore_size "$TGT"))"
+        else
+            echo -e "  ${RED}✗${NC} Filestore move failed — attachments will be missing."
+            odoo_sh "rm -rf $STAGE" >/dev/null 2>&1
+            return 1
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} No filestore in this restore — attachments will be missing."
+    fi
+    return 0
+}
+
+db_size() {  # "" when the database does not exist
+    docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+        "SELECT pg_size_pretty(pg_database_size('$1'));" </dev/null 2>/dev/null | tr -d '\r'
+}
+filestore_size() {  # "" when there is no filestore for this database
+    odoo_sh "du -sh $FILESTORE/$1 2>/dev/null | cut -f1" 2>/dev/null | tr -d '\r'
+}
+
+# Gate on the Odoo master password — the same secret the web database manager
+# demands before dropping a database, so the person deleting a tenant has to
+# hold the same credential either way.
+check_master_password() {
+    local want want_xargs got i
+    # Read it raw: a generated password can contain characters that env_get's
+    # xargs would eat. The xargs form is accepted too, because every other
+    # tool in this repo reads the key that way — that is the value operators
+    # actually know.
+    want=$(grep -m1 "^ODOO_ADMIN_PASSWORD=" .env 2>/dev/null | cut -d'=' -f2-)
+    want=${want%$'\r'}
+    want_xargs=$(env_get ODOO_ADMIN_PASSWORD)
+    if [ -z "$want" ] && [ -z "$want_xargs" ]; then
+        echo -e "  ${RED}✗${NC} ODOO_ADMIN_PASSWORD is not set in .env — refusing to continue."
+        echo "     Set one first (openssl rand -base64 24) so this gate means something."
+        return 1
+    fi
+    for i in 1 2 3; do
+        # -s: never echo the master password into a terminal that is very
+        # likely being recorded, screen-shared or scrolled back through.
+        read -r -s -p "  Odoo master password (ODOO_ADMIN_PASSWORD in .env): " got
+        echo ""
+        if [ -n "$got" ] && { [ "$got" = "$want" ] || [ "$got" = "$want_xargs" ]; }; then
+            return 0
+        fi
+        [ "$i" -lt 3 ] && echo -e "  ${RED}✗${NC} Wrong password — $((3 - i)) attempt(s) left."
+    done
+    echo -e "  ${RED}✗${NC} Wrong password — nothing was changed."
+    return 1
+}
+
+# Three escalating gates before anything is destroyed: see what goes, prove
+# you mean THIS database (type its name), prove you are allowed to (master
+# password). Each asks a different question on purpose — three identical
+# prompts only train people to hit Enter three times.
+confirm_destructive() {  # confirm_destructive DBNAME db|filestore|both [delete|overwrite]
+    local DB="$1" MODE="$2" ACT="${3:-delete}" C DBSZ FSSZ LAST VERB
+    [ "$MODE" != "filestore" ] && DBSZ=$(db_size "$DB")
+    [ "$MODE" != "db" ] && FSSZ=$(filestore_size "$DB")
+
+    if [ -z "${DBSZ:-}" ] && [ -z "${FSSZ:-}" ]; then
+        echo -e "  ${YELLOW}!${NC} Nothing there for '$DB' — no such database, and no filestore."
+        return 1
+    fi
+
+    # ── 1 of 3: exactly what disappears ──────────────────────────────
+    echo ""
+    echo -e "  ${RED}${BOLD}⚠  WARNING 1 of 3 — what will be destroyed${NC}"
+    [ -n "${DBSZ:-}" ] && echo -e "     • PostgreSQL database ${BOLD}$DB${NC}  ($DBSZ) — every record in it"
+    [ -n "${FSSZ:-}" ] && echo -e "     • Filestore ${BOLD}$DB${NC}  ($FSSZ) — every attachment and uploaded document"
+    [ "$MODE" != "db" ] && [ -z "${FSSZ:-}" ] && echo "     • (no filestore directory for '$DB')"
+    echo ""
+    echo "     Anyone using this tenant loses access the moment it goes."
+    [ "$ACT" = overwrite ] && echo "     The snapshot you chose replaces it — the current contents are lost."
+    read -r -p "  Continue? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 1; }
+
+    # ── 2 of 3: it is permanent, and how old the safety net is ───────
+    echo ""
+    echo -e "  ${RED}${BOLD}⚠  WARNING 2 of 3 — this is permanent${NC}"
+    echo "     There is no undo and no recycle bin. The only way back is a"
+    echo "     snapshot or a backup taken BEFORE this point."
+    LAST=$(snapshot_list | head -1)
+    if [ -n "$LAST" ]; then
+        echo "     Newest snapshot on this server: ${LAST##*/} ($(manifest_get "$LAST" created))"
+    else
+        echo -e "     ${YELLOW}!${NC} No snapshot exists in backups/ at all."
+    fi
+    echo ""
+    read -r -p "  Type the database name '$DB' to confirm: " C
+    [ "$C" = "$DB" ] || { echo "  Cancelled."; return 1; }
+
+    # ── 3 of 3: authority ────────────────────────────────────────────
+    echo ""
+    echo -e "  ${RED}${BOLD}⚠  WARNING 3 of 3 — last chance${NC}"
+    VERB="Deleting"; [ "$ACT" = overwrite ] && VERB="Overwriting"
+    case "$MODE" in
+        db)        echo "     $VERB the database '$DB' now. Nothing has been changed yet." ;;
+        filestore) echo "     $VERB the filestore of '$DB' now. Nothing has been changed yet." ;;
+        both)      echo "     $VERB the database AND filestore of '$DB' now. Nothing has been changed yet." ;;
+    esac
+    echo "     Press Ctrl-C to walk away; entering the password commits it."
+    echo ""
+    check_master_password || return 1
+}
+
+drop_database() {  # drop_database DBNAME
+    echo -e "  ${CYAN}→${NC} Disconnecting sessions, then DROP DATABASE \"$1\""
+    docker compose exec -T db psql -U "$DB_USER" -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = '$1' AND pid <> pg_backend_pid();" </dev/null >/dev/null 2>&1
+    if docker compose exec -T db psql -U "$DB_USER" -d postgres -c "DROP DATABASE \"$1\";" </dev/null; then
+        echo -e "  ${GREEN}✓${NC} Database '$1' dropped."
+        return 0
+    fi
+    echo -e "  ${RED}✗${NC} Drop failed — see the output above."
+    return 1
+}
+
+delete_filestore() {  # delete_filestore DBNAME
+    if ! odoo_sh "test -d $FILESTORE/$1" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} No filestore directory for '$1' — nothing to delete."
+        return 0
+    fi
+    echo -e "  ${CYAN}→${NC} rm -rf filestore/$1"
+    if odoo_sh "rm -rf $FILESTORE/$1" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Filestore for '$1' deleted."
+        return 0
+    fi
+    echo -e "  ${RED}✗${NC} Could not delete the filestore."
     return 1
 }
 
@@ -98,7 +695,13 @@ menu_status() {
     echo -e "${BOLD}Last backup:${NC}"
     # shellcheck disable=SC2012
     ls -t backups/*.age backups/*.gz 2>/dev/null | head -1 | xargs -r ls -lh | awk '{print "  " $NF " (" $5 ", " $6 " " $7 " " $8 ")"}'
-    [ -z "$(ls backups/*.age backups/*.gz 2>/dev/null)" ] && echo -e "  ${YELLOW}!${NC} no backups found — use menu item 8, and add the cron job (README → Backups)"
+    [ -z "$(ls backups/*.age backups/*.gz 2>/dev/null)" ] && echo -e "  ${YELLOW}!${NC} no whole-server backup found — use menu item 7, and add the cron job (README → Backups)"
+    local snap; snap=$(snapshot_list | head -1)
+    if [ -n "$snap" ]; then
+        echo "  newest snapshot: ${snap##*/} ($(manifest_get "$snap" created))"
+    else
+        echo "  no per-database snapshots yet (Advanced → Databases → Backup)"
+    fi
 }
 
 # ── 2) New tenant: domain + database ──────────
@@ -139,7 +742,7 @@ menu_new_tenant() {
         }
     else
         echo -e "  ${YELLOW}!${NC} No SSL configured yet — skipping nginx/cert step (HTTP mode serves"
-        echo "     any hostname). Set up SSL later with menu item 4."
+        echo "     any hostname). Set up SSL later with menu item 3."
     fi
 
     # 2. Multi-tenant routing must be on before a second database exists
@@ -242,7 +845,7 @@ menu_update_app() {
     echo -e "  ${CYAN}→${NC} docker compose pull && docker compose up -d"
     docker compose pull && docker compose up -d
     echo ""
-    echo "  If this release includes module changes, run menu item 7 next"
+    echo "  If this release includes module changes, run menu item 6 next"
     echo "  (update modules across databases). To roll back: re-run this item"
     echo "  with the previous version number."
 }
@@ -322,7 +925,7 @@ menu_addons() {
         bash scripts/update-modules.sh --auto
     else
         echo "  Remember: the new code is NOT active until modules are updated"
-        echo "  (menu item 7) and Odoo is restarted (docker compose restart odoo)."
+        echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
     fi
 }
 
@@ -334,8 +937,8 @@ menu_db_manager() {
     echo "  Current state: ODOO_LIST_DB=${CUR:-True}"
     echo ""
     echo "  Keep it DISABLED on production — it can create, drop and download"
-    echo "  databases, protected only by the master password. (Creating a new"
-    echo "  tenant via menu item 2 does not need it.)"
+    echo "  databases, protected only by the master password. Neither creating a"
+    echo "  tenant (menu item 2) nor the Databases menu next door needs it."
     echo ""
     if [ "${CUR:-True}" = "False" ]; then
         read -r -p "  Enable it temporarily? [y/N]: " E
@@ -365,7 +968,7 @@ menu_security() {
     LDB=$(env_get ODOO_LIST_DB); DBF=$(env_get ODOO_DBFILTER); TAG=$(env_get EPHEM_IMAGE_TAG)
     [ "${LDB:-True}" = "False" ] \
         && echo -e "  ${GREEN}✓${NC} database manager disabled (ODOO_LIST_DB=False)" \
-        || echo -e "  ${YELLOW}!${NC} database manager ENABLED — disable it via menu item 9"
+        || echo -e "  ${YELLOW}!${NC} database manager ENABLED — disable it via Advanced → 3"
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
         || echo -e "  ${YELLOW}!${NC} ODOO_DBFILTER not set — required once you have several databases"
@@ -416,7 +1019,7 @@ menu_upload_limit() {
     fi
 }
 
-# ── 13) Start / stop / restart services ───────
+# ── 13.1) Start / stop / restart services ─────
 menu_service() {
     echo -e "${CYAN}${BOLD}Odoo service — start / stop / restart${NC}"
     echo ""
@@ -478,6 +1081,297 @@ menu_service() {
     echo "  Now: Odoo $(svc_state odoo), database $(svc_state db), nginx $(svc_state nginx)"
 }
 
+# ── 13.2) Databases — backup / restore / delete ─
+menu_db_admin() {
+    echo -e "${CYAN}${BOLD}Databases${NC}"
+    echo ""
+    if [ "$(svc_state db)" != "running" ]; then
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        return 1
+    fi
+    echo -e "  ${BOLD}In PostgreSQL:${NC}"
+    list_dbs_sized | sed 's/^/    • /' | grep . || echo "    (none)"
+    echo ""
+    echo -e "  ${BOLD}Filestores on disk:${NC}"
+    list_filestores | sed 's/^/    • /' | grep . || echo "    (none)"
+    echo ""
+    echo "  A tenant is BOTH: the database holds the records, the filestore"
+    echo "  holds the attachments. A snapshot always carries the pair."
+    echo ""
+    echo "  1) Backup     — save a database + filestore into backups/"
+    echo "  2) Restore    — put a snapshot back"
+    echo "  3) Delete     — remove a database and/or its filestore"
+    echo "  4) Duplicate  — copy one database into new ones (training copies)"
+    echo "  5) Back"
+    read -r -p "  Choose [1-5]: " A
+    echo ""
+    case "${A:-5}" in
+        1) menu_db_backup ;;
+        2) menu_db_restore ;;
+        3) menu_db_delete ;;
+        4) menu_duplicate_db ;;
+        *) return 0 ;;
+    esac
+}
+
+# ── 13.2.1) Backup ────────────────────────────
+menu_db_backup() {
+    echo -e "${CYAN}${BOLD}Backup${NC}"
+    echo ""
+    echo "  Each snapshot is its own folder: backups/<database>_<timestamp>/,"
+    echo "  holding database.sql.gz + filestore.tar.gz. The Restore menu reads"
+    echo "  these folders back."
+    echo ""
+    echo "  (Menu item 7 is the different, whole-server job: every database at"
+    echo "   once, encrypted, with retention — that is the one for cron.)"
+    echo ""
+    echo "  Keeping the newest $(env_get SNAPSHOT_KEEP | grep . || echo 10) snapshot(s) per database;"
+    echo "  older ones are pruned automatically (SNAPSHOT_KEEP in .env, 0 = off)."
+    echo ""
+    echo "  1) Back up one database (+ its filestore)"
+    echo "  2) Back up every database"
+    echo "  3) Back"
+    read -r -p "  Choose [1-3]: " A
+    echo ""
+    case "${A:-3}" in
+        1)
+            read -r -p "  Database name (empty to cancel): " DB
+            [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
+            valid_db_name "$DB" || {
+                echo -e "  ${RED}✗${NC} '$DB' is not a valid database name (letters, digits, . _ -)."
+                return 1; }
+            echo ""
+            snapshot_create "$DB"
+            ;;
+        2)
+            local DBS OK=0 BAD=0 d
+            DBS=$(list_dbs)
+            [ -z "$DBS" ] && { echo "  No databases to back up."; return 0; }
+            for d in $DBS; do
+                echo ""
+                if snapshot_create "$d"; then OK=$((OK + 1)); else BAD=$((BAD + 1)); fi
+            done
+            echo ""
+            echo -e "  ${GREEN}✓${NC} $OK snapshot(s) written to backups/"
+            [ "$BAD" -gt 0 ] && echo -e "  ${RED}✗${NC} $BAD failed — see the output above."
+            ;;
+        *) return 0 ;;
+    esac
+}
+
+# ── 13.2.2) Restore ───────────────────────────
+menu_db_restore() {
+    # Wrapper so the decrypted plaintext of an encrypted run is removed on
+    # EVERY exit path, including a cancel half way through.
+    AGE_STAGE=""
+    local rc=0
+    _menu_db_restore_body || rc=$?
+    if [ -n "${AGE_STAGE:-}" ] && [ -d "$AGE_STAGE" ]; then
+        rm -rf "$AGE_STAGE"
+        echo "  (decrypted files removed from backups/)"
+    fi
+    return "$rc"
+}
+
+_menu_db_restore_body() {
+    echo -e "${CYAN}${BOLD}Restore${NC}"
+    echo ""
+    # A run killed with Ctrl-C can strand decrypted dumps. Sweep anything left
+    # over from more than an hour ago before showing the list.
+    find "$BACKUP_DIR" -maxdepth 1 -type d -name '.age_unpack_*' -mmin +60 \
+        -exec rm -rf {} + 2>/dev/null
+
+    local -a ROWS=()
+    local line
+    while IFS= read -r line; do [ -n "$line" ] && ROWS+=("$line"); done \
+        < <(restore_sources | sort -t'|' -k1,1nr | head -100)
+
+    local i n kind db created size sqlf tarf what C
+    if [ "${#ROWS[@]}" -eq 0 ]; then
+        echo "  Nothing restorable in backups/ yet."
+    else
+        printf "  %3s  %-22s %-17s %7s  %s\n" "#" "DATABASE" "CREATED" "SIZE" "SOURCE"
+    fi
+    for i in "${!ROWS[@]}"; do
+        IFS='|' read -r n kind db created size sqlf tarf <<< "${ROWS[$i]}"
+        case "$kind" in
+            snap) what="snapshot"
+                  [ -n "$sqlf" ] && [ -n "$tarf" ] && what="snapshot · database + filestore"
+                  [ -n "$sqlf" ] && [ -z "$tarf" ] && what="snapshot · database only"
+                  [ -z "$sqlf" ] && what="snapshot · filestore only" ;;
+            auto) what="automated backup"
+                  [ -n "$tarf" ] && what="automated backup · + filestore"
+                  [ -z "$tarf" ] && what="automated backup · database only" ;;
+            age)  what="encrypted run · needs your key file" ;;
+        esac
+        printf "  %3d) %-22s %-17s %7s  %s\n" "$((i + 1))" "$db" "$created" "$size" "$what"
+    done
+    echo ""
+    [ "${#ROWS[@]}" -gt 0 ] && echo "  Newest first (100 max)."
+    echo "  Or paste a PATH to restore from somewhere else — a snapshot folder"
+    echo "  copied off another server, a folder of dumps, or a single .sql.gz."
+    echo ""
+    read -r -p "  Number or path (empty to cancel): " N
+    [ -z "${N:-}" ] && { echo "  Cancelled."; return 0; }
+
+    local SQLF TARF SRC TGT FROM
+    if printf '%s' "$N" | grep -Eq '^[0-9]+$'; then
+        if [ "$N" -lt 1 ] || [ "$N" -gt "${#ROWS[@]}" ]; then
+            echo -e "  ${RED}✗${NC} Pick a number between 1 and ${#ROWS[@]}, or paste a path."
+            return 1
+        fi
+        IFS='|' read -r n kind db created size sqlf tarf <<< "${ROWS[$((N - 1))]}"
+        echo ""
+        if [ "$kind" = age ]; then
+            age_unpack "$sqlf" || return 1
+            SQLF="$RS_SQL"; TARF="$RS_TAR"; SRC="$RS_DB"
+            FROM="$(basename "$sqlf") (decrypted)"
+        else
+            SQLF="$sqlf"; TARF="$tarf"; SRC="$db"
+            FROM="backups/$(basename "${sqlf:-$tarf}")"
+            [ "$kind" = snap ] && FROM="backups/$(basename "$(dirname "$sqlf")")"
+        fi
+    else
+        echo ""
+        resolve_external_path "$N" || return 1
+        SQLF="$RS_SQL"; TARF="$RS_TAR"; SRC="$RS_DB"
+        FROM="$N"
+        echo -e "  ${GREEN}✓${NC} Found:"
+        [ -n "$SQLF" ] && echo "     database:  $SQLF" || echo "     database:  (none)"
+        [ -n "$TARF" ] && echo "     filestore: $TARF" || echo "     filestore: (none)"
+    fi
+
+    echo ""
+    echo "  Restoring from: $FROM"
+    if [ -n "$SRC" ]; then
+        read -r -p "  Restore into database name [$SRC]: " TGT
+        TGT="${TGT:-$SRC}"
+    else
+        read -r -p "  Restore into database name (required): " TGT
+        [ -z "${TGT:-}" ] && { echo "  Cancelled."; return 0; }
+    fi
+    if ! valid_db_name "$TGT"; then
+        echo -e "  ${RED}✗${NC} '$TGT' is not a valid database name (letters, digits, . _ -)."
+        return 1
+    fi
+
+    # Is anything already sitting at the target? That turns a restore into an
+    # overwrite, which gets the full destructive gate.
+    local EX_DB=no EX_FS=no MODE=""
+    db_exists "$TGT" && EX_DB=yes
+    odoo_sh "test -d $FILESTORE/$TGT" >/dev/null 2>&1 && EX_FS=yes
+
+    if [ "$EX_DB" = no ] && [ "$EX_FS" = no ]; then
+        echo ""
+        echo "  Nothing exists at '$TGT' yet — this creates it."
+        read -r -p "  Restore now? [y/N]: " C
+        [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    else
+        echo ""
+        echo -e "  ${YELLOW}!${NC} '$TGT' already exists — restoring REPLACES it."
+        if   [ "$EX_DB" = yes ] && [ "$EX_FS" = yes ]; then MODE=both
+        elif [ "$EX_DB" = yes ];                       then MODE=db
+        else                                                MODE=filestore; fi
+        confirm_destructive "$TGT" "$MODE" overwrite || return 0
+    fi
+
+    echo ""
+    snapshot_restore "$SQLF" "$TARF" "$SRC" "$TGT" || return 1
+    echo ""
+    echo -e "  ${GREEN}✓${NC} Restore complete: '$TGT'"
+    echo -e "  ${YELLOW}!${NC} This is a MOVE, not a copy: the database keeps its original"
+    echo "     identity (database.uuid) and everything in it — scheduled actions,"
+    echo "     outgoing mail servers, payment credentials. If the source server"
+    echo "     is still running this tenant, both will now act as the same"
+    echo "     database. Shut the old one down, or expect duplicate emails."
+    offer_odoo_restart
+}
+
+# ── 13.2.3) Delete ────────────────────────────
+menu_db_delete() {
+    echo -e "${CYAN}${BOLD}Delete${NC}"
+    echo ""
+    echo -e "  ${RED}!${NC} Nothing is deleted here without a snapshot being written first."
+    echo "     If the snapshot fails, the delete is refused."
+    echo ""
+    echo "  1) Delete a database AND its filestore"
+    echo "  2) Delete a database only (leaves the filestore)"
+    echo "  3) Delete a filestore only (leaves the database)"
+    echo "  4) Back"
+    read -r -p "  Choose [1-4]: " A
+    echo ""
+    [ "${A:-4}" = "4" ] && return 0
+    case "${A}" in 1|2|3) ;; *) return 0 ;; esac
+
+    read -r -p "  Database name (empty to cancel): " DB
+    [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
+    if ! valid_db_name "$DB"; then
+        echo -e "  ${RED}✗${NC} '$DB' is not a valid database name (letters, digits, . _ -)."
+        return 1
+    fi
+
+    # Snapshot BEFORE the warnings: the operator should be looking at a
+    # written, verified backup while deciding, not at a promise of one.
+    echo -e "  ${CYAN}→${NC} Taking a snapshot first..."
+    if ! snapshot_create "$DB"; then
+        echo ""
+        echo -e "  ${RED}✗${NC} Snapshot failed — refusing to delete. Nothing was changed."
+        return 1
+    fi
+    echo ""
+    echo "  Recoverable from: backups/${SNAPSHOT_DIR##*/}  (Restore menu, option 2)"
+
+    case "$A" in
+        1)
+            confirm_destructive "$DB" both || return 0
+            drop_database "$DB" || return 1
+            delete_filestore "$DB"
+            offer_odoo_restart
+            ;;
+        2)
+            confirm_destructive "$DB" db || return 0
+            drop_database "$DB" || return 1
+            echo -e "  ${YELLOW}!${NC} The filestore for '$DB' is still on disk — option 3 removes it."
+            offer_odoo_restart
+            ;;
+        3)
+            confirm_destructive "$DB" filestore || return 0
+            delete_filestore "$DB" || return 1
+            ;;
+    esac
+}
+
+# Odoo caches a registry per database; after dropping one, a restart clears
+# the stale entry (and any worker still holding it).
+offer_odoo_restart() {
+    [ "$(svc_state odoo)" = "running" ] || return 0
+    echo ""
+    read -r -p "  Restart Odoo to clear its cached registry? [Y/n]: " R
+    [[ "${R:-Y}" =~ ^[Nn]$ ]] && return 0
+    docker compose restart odoo && wait_for_odoo
+}
+
+# ── 13) Advanced ──────────────────────────────
+menu_advanced() {
+    echo -e "${CYAN}${BOLD}Advanced${NC}"
+    echo ""
+    echo -e "  ${YELLOW}!${NC} These act on the whole server, and the database tools delete data"
+    echo "     permanently. Everything routine lives in the main menu."
+    echo ""
+    echo "  1) Odoo service — start / stop / restart"
+    echo "  2) Databases — backup / restore / delete / duplicate"
+    echo "  3) Web database manager — enable/disable"
+    echo "  4) Back"
+    read -r -p "  Choose [1-4]: " A
+    echo ""
+    case "${A:-4}" in
+        1) menu_service ;;
+        2) menu_db_admin ;;
+        3) menu_db_manager ;;
+        *) return 0 ;;
+    esac
+}
+
 # ── Menu loop ─────────────────────────────────
 while true; do
     echo ""
@@ -489,36 +1383,32 @@ while true; do
     echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
     echo "  1) Status & health"
     echo "  2) Add a new domain + database (tenant)"
-    echo "  3) Duplicate a database (training copies)"
-    echo "  4) SSL — set up HTTPS / show status"
-    echo "  5) Update the ePHEM app image"
-    echo "  6) Custom addons — pull / switch branch"
-    echo "  7) Update modules across databases"
-    echo "  8) Back up now"
-    echo "  9) Web database manager — enable/disable"
-    echo " 10) Follow Odoo logs (Ctrl-C to stop)"
-    echo " 11) Security check"
-    echo " 12) Upload size limit (fix '413 Request Entity Too Large')"
-    echo " 13) Odoo service — start / stop / restart"
+    echo "  3) SSL — set up HTTPS / show status"
+    echo "  4) Update the ePHEM app image"
+    echo "  5) Custom addons — pull / switch branch"
+    echo "  6) Update modules across databases"
+    echo "  7) Back up now"
+    echo "  8) Follow Odoo logs (Ctrl-C to stop)"
+    echo "  9) Security check"
+    echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
+    echo " 11) Advanced — service, databases, database manager"
     echo "  0) Exit"
     echo ""
-    read -r -p "Choose [0-13]: " CH
+    read -r -p "Choose [0-11]: " CH
     echo ""
     case "${CH:-}" in
         1)  menu_status ;;
         2)  menu_new_tenant ;;
-        3)  menu_duplicate_db ;;
-        4)  menu_ssl ;;
-        5)  menu_update_app ;;
-        6)  menu_addons ;;
-        7)  bash scripts/update-modules.sh ;;
-        8)  bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
-        9)  menu_db_manager ;;
-        10) docker compose logs -f --tail=100 odoo || true ;;
-        11) menu_security ;;
-        12) menu_upload_limit ;;
-        13) menu_service ;;
+        3)  menu_ssl ;;
+        4)  menu_update_app ;;
+        5)  menu_addons ;;
+        6)  bash scripts/update-modules.sh ;;
+        7)  bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
+        8)  docker compose logs -f --tail=100 odoo || true ;;
+        9)  menu_security ;;
+        10) menu_upload_limit ;;
+        11) menu_advanced ;;
         0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
-        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-13." ;;
+        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-11." ;;
     esac
 done
