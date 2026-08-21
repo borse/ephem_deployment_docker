@@ -1,6 +1,13 @@
 # Passwords
 .env
 
+# age private keys. The README tells you to generate ephem-backup-key.txt;
+# it decrypts every backup this server has ever written, so it belongs in a
+# vault, not in Git and ideally not on the server at all.
+*-key.txt
+*.age.key
+ephem-backup-key.txt
+
 # Data (lives on the server, not in Git)
 postgres-data/
 odoo-data/
