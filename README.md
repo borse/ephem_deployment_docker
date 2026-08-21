@@ -631,6 +631,8 @@ Before adding a domain, create a DNS A record pointing it to this server's IP.
 
 ```bash
 bash manage.sh      # → 2) Add a new domain + database (tenant)
+                    #      choose "domain only" when the data is coming
+                    #      from a restore or a migration
 ```
 
 It adds the domain to nginx and the SSL certificate, offers to set

@@ -710,23 +710,48 @@ menu_new_tenant() {
     echo ""
     echo "  One tenant = one domain + one database named after the domain's"
     echo "  FIRST label: training.health.gov.xx → database 'training'."
-    echo "  The database is created directly with odoo-bin — the web database"
-    echo "  manager stays disabled throughout."
+    echo "  A database is created directly with odoo-bin when you ask for one —"
+    echo "  the web database manager stays disabled throughout."
     echo ""
     read -r -p "  Full domain (e.g. training.health.gov.xx), empty to cancel: " DOMAIN
     [ -z "${DOMAIN:-}" ] && { echo "  Cancelled."; return 0; }
-    local DB="${DOMAIN%%.*}"
+    local DB="${DOMAIN%%.*}" MODE OK
     if ! printf '%s' "$DB" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
         echo -e "  ${RED}✗${NC} '$DB' is not a valid subdomain label (lowercase letters, digits, hyphens)."
         return 1
     fi
-    if list_dbs | grep -qx "$DB"; then
-        echo -e "  ${RED}✗${NC} Database '$DB' already exists."
+
+    echo ""
+    echo "  1) Domain + database  — a fresh, empty tenant"
+    echo "  2) Domain only        — nginx, certificate and dbfilter, no database"
+    echo ""
+    echo "     Pick 2 when the data is coming from somewhere else: a restore, a"
+    echo "     migration off another server, or a duplicate. Everything routes"
+    echo "     to '$DB' the moment a database of that name exists."
+    read -r -p "  Choose [1-2, empty to cancel]: " MODE
+    case "${MODE:-}" in
+        1) MODE=both ;;
+        2) MODE=domain ;;
+        *) echo "  Cancelled."; return 0 ;;
+    esac
+
+    local DB_EXISTS=no
+    list_dbs | grep -qx "$DB" && DB_EXISTS=yes || true
+    if [ "$DB_EXISTS" = yes ] && [ "$MODE" = both ]; then
+        echo -e "  ${RED}✗${NC} Database '$DB' already exists — choose 'domain only', or pick"
+        echo "     another subdomain."
         return 1
     fi
+
     echo ""
     echo "  Domain:   $DOMAIN"
-    echo "  Database: $DB"
+    if [ "$MODE" = both ]; then
+        echo "  Database: $DB  (created empty)"
+    elif [ "$DB_EXISTS" = yes ]; then
+        echo "  Database: $DB  (already exists — left untouched)"
+    else
+        echo "  Database: none yet — restore or migrate one named exactly '$DB'"
+    fi
     read -r -p "  Continue? [Y/n]: " OK
     [[ "${OK:-Y}" =~ ^[Nn]$ ]] && { echo "  Cancelled."; return 0; }
 
@@ -763,7 +788,27 @@ menu_new_tenant() {
         fi
     fi
 
-    # 3. Create the database with odoo-bin (the entrypoint injects the DB
+    # 3. Domain-only stops here: the routing is in place and waiting for a
+    #    database of that name to appear.
+    if [ "$MODE" = domain ]; then
+        echo ""
+        echo -e "  ${GREEN}✓ Domain ready:${NC} https://$DOMAIN"
+        echo ""
+        if [ "$DB_EXISTS" = yes ]; then
+            echo "  Database '$DB' already exists, so the domain serves it now."
+        else
+            echo "  Nothing answers on it yet — Odoo needs a database named exactly"
+            echo -e "  ${BOLD}$DB${NC}. Put one there with any of:"
+            echo "    • Advanced → Databases → Restore     (a snapshot or backup)"
+            echo "    • Advanced → Databases → Duplicate   (a copy of another tenant)"
+            echo "    • scripts/vm-snapshot.sh on a VM, then Restore here"
+            echo ""
+            echo "  Restore asks for the target name — type '$DB' at that prompt."
+        fi
+        return 0
+    fi
+
+    # 4. Create the database with odoo-bin (the entrypoint injects the DB
     #    credentials). Odoo is stopped so a stray web request can't race the
     #    creation and corrupt it.
     echo ""
