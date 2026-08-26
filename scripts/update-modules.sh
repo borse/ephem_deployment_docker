@@ -68,6 +68,7 @@ MODULES=(
   "eoc_onehealth"
   "eoc_ims"
   "eoc_phsm"
+  "eoc_contingency_plan_demo_data"
   "eoc_ethiopia"
   "eoc_bangladesh"
   "eoc_cabo_verde"
