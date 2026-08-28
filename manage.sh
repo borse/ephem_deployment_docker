@@ -27,6 +27,16 @@ if [ ! -f .env ] || [ ! -f docker-compose.yml ]; then
     exit 1
 fi
 
+# nginx + Let's Encrypt helpers, shared with the scripts/ tools:
+# active_domains, ssl_is_configured, cert_* — see scripts/nginx-lib.sh
+if [ ! -f scripts/nginx-lib.sh ]; then
+    echo -e "${RED}✗${NC} scripts/nginx-lib.sh is missing — run 'git pull' here first."
+    exit 1
+fi
+EPHEM_ROOT="$SCRIPT_DIR"
+# shellcheck source=scripts/nginx-lib.sh
+source scripts/nginx-lib.sh
+
 env_get() { grep "^$1=" .env 2>/dev/null | cut -d'=' -f2- | xargs || true; }
 set_env_key() {  # set_env_key KEY VALUE — update or append KEY=VALUE in .env
     if grep -q "^$1=" .env; then
@@ -657,11 +667,18 @@ menu_status() {
     df -h / | tail -1 | awk '{printf "  root: %s used of %s (%s)\n", $3, $2, $5}'
     echo ""
     echo -e "${BOLD}SSL certificate:${NC}"
-    local cert_end
-    cert_end=$(docker compose exec -T nginx sh -c \
-        'for f in /etc/letsencrypt/live/*/fullchain.pem; do [ -f "$f" ] && openssl x509 -enddate -noout -in "$f"; done' \
-        </dev/null 2>/dev/null | head -1)
-    if [ -n "${cert_end:-}" ]; then echo "  ${cert_end/notAfter=/expires: }"; else echo "  none found (HTTP-only server, or nginx not running)"; fi
+    local certs
+    certs=$(docker compose exec -T nginx sh -c \
+        'for f in /etc/letsencrypt/live/*/fullchain.pem; do
+             [ -f "$f" ] || continue
+             d=${f%/fullchain.pem}; printf "%s  " "${d##*/}"
+             openssl x509 -enddate -noout -in "$f"
+         done' </dev/null 2>/dev/null)
+    if [ -n "${certs:-}" ]; then
+        echo "$certs" | sed 's/notAfter=/expires /' | sed 's/^/  /'
+    else
+        echo "  none found (HTTP-only server, or nginx not running)"
+    fi
     echo ""
     echo -e "${BOLD}Last backup:${NC}"
     # shellcheck disable=SC2012
@@ -675,73 +692,77 @@ menu_status() {
     fi
 }
 
-# ── 2) New tenant: domain + database ──────────
-menu_new_tenant() {
-    echo -e "${CYAN}${BOLD}Add a new domain + database (tenant)${NC}"
+# ── 2) Manage domains ─────────────────────────
+# Domains are routing only: nginx server block + certificate. Databases live
+# in the Databases menu — adding a domain never creates or touches one.
+menu_domains() {
+    while true; do
+        echo -e "${CYAN}${BOLD}Manage domains${NC}"
+        echo ""
+        if ssl_is_configured; then
+            echo -e "  ${BOLD}Served over HTTPS:${NC}"
+            active_domains | sed 's/^/    • /' | grep . || echo "    (none)"
+        else
+            echo -e "  ${YELLOW}!${NC} HTTP only — this server answers on any hostname. Set up HTTPS"
+            echo "     first (main menu → 3), then come back."
+        fi
+        echo ""
+        echo "  A domain here is just the way in: nginx + its own certificate."
+        echo "  The data behind it is a database of the same first label"
+        echo "  (training.pheoc.com → 'training'), managed under Advanced."
+        echo ""
+        echo "  1) Add domain(s)       — one certificate each, no database created"
+        echo "  2) Remove domain(s)    — drops nginx block + certificate, keeps the data"
+        echo "  3) Split the shared certificate into one per domain"
+        echo "  4) Back"
+        read -r -p "  Choose [1-4]: " A
+        echo ""
+        case "${A:-4}" in
+            1) menu_domain_add ;;
+            2) menu_domain_remove ;;
+            3) bash scripts/split-certs.sh ;;
+            *) return 0 ;;
+        esac
+        echo ""
+    done
+}
+
+menu_domain_add() {
+    echo -e "${CYAN}${BOLD}Add domain(s)${NC}"
     echo ""
-    echo "  One tenant = one domain + one database named after the domain's"
-    echo "  FIRST label: training.health.gov.xx → database 'training'."
-    echo "  A database is created directly with odoo-bin when you ask for one —"
-    echo "  the web database manager stays disabled throughout."
+    echo "  Space-separated for several at once:"
+    echo "    training.pheoc.com simex.pheoc.com staging.pheoc.com"
     echo ""
-    read -r -p "  Full domain (e.g. training.health.gov.xx), empty to cancel: " DOMAIN
-    [ -z "${DOMAIN:-}" ] && { echo "  Cancelled."; return 0; }
-    local DB="${DOMAIN%%.*}" MODE OK
-    if ! printf '%s' "$DB" | grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
-        echo -e "  ${RED}✗${NC} '$DB' is not a valid subdomain label (lowercase letters, digits, hyphens)."
-        return 1
-    fi
+    echo "  Each gets its OWN Let's Encrypt certificate, so removing one later"
+    echo "  never disturbs the others. DNS for every domain must already point"
+    echo "  at this server."
+    echo ""
+    read -r -a DOMAINS -p "  Domain(s), empty to cancel: "
+    [ "${#DOMAINS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
 
     echo ""
-    echo "  1) Domain + database  — a fresh, empty tenant"
-    echo "  2) Domain only        — nginx, certificate and dbfilter, no database"
+    echo "  Each domain will serve the database named after its first label:"
+    local d
+    for d in "${DOMAINS[@]}"; do
+        printf '    %-40s → database: %s\n' "$d" "${d%%.*}"
+    done
     echo ""
-    echo "     Pick 2 when the data is coming from somewhere else: a restore, a"
-    echo "     migration off another server, or a duplicate. Everything routes"
-    echo "     to '$DB' the moment a database of that name exists."
-    read -r -p "  Choose [1-2, empty to cancel]: " MODE
-    case "${MODE:-}" in
-        1) MODE=both ;;
-        2) MODE=domain ;;
-        *) echo "  Cancelled."; return 0 ;;
-    esac
-
-    local DB_EXISTS=no
-    list_dbs | grep -qx "$DB" && DB_EXISTS=yes || true
-    if [ "$DB_EXISTS" = yes ] && [ "$MODE" = both ]; then
-        echo -e "  ${RED}✗${NC} Database '$DB' already exists — choose 'domain only', or pick"
-        echo "     another subdomain."
-        return 1
-    fi
-
+    echo -e "  ${BOLD}No database is created${NC} — restore, duplicate or create one from"
+    echo "  Advanced → Databases when you are ready."
     echo ""
-    echo "  Domain:   $DOMAIN"
-    if [ "$MODE" = both ]; then
-        echo "  Database: $DB  (created empty)"
-    elif [ "$DB_EXISTS" = yes ]; then
-        echo "  Database: $DB  (already exists — left untouched)"
-    else
-        echo "  Database: none yet — restore or migrate one named exactly '$DB'"
-    fi
     read -r -p "  Continue? [Y/n]: " OK
     [[ "${OK:-Y}" =~ ^[Nn]$ ]] && { echo "  Cancelled."; return 0; }
 
-    # 1. nginx + certificate (only applies once SSL is set up; an HTTP-only
-    #    server answers for every hostname already)
-    if [ -f nginx/active.conf ] && grep -q "ssl_certificate" nginx/active.conf; then
-        echo ""
-        echo -e "  ${CYAN}→${NC} Adding $DOMAIN to nginx + the SSL certificate..."
-        echo "     (DNS for $DOMAIN must already point at this server)"
-        bash scripts/add-domain.sh "$DOMAIN" || {
-            echo -e "  ${RED}✗${NC} add-domain failed — fix that first (DNS? port 80?); no database was created."
-            return 1
-        }
+    if ssl_is_configured; then
+        bash scripts/add-domain.sh "${DOMAINS[@]}" || return 1
     else
-        echo -e "  ${YELLOW}!${NC} No SSL configured yet — skipping nginx/cert step (HTTP mode serves"
-        echo "     any hostname). Set up SSL later with menu item 3."
+        echo ""
+        echo -e "  ${YELLOW}!${NC} No HTTPS yet, so there is no nginx or certificate work to do —"
+        echo "     an HTTP-only server already answers for every hostname. Set up"
+        echo "     SSL with main menu → 3 and these domains will be included."
     fi
 
-    # 2. Multi-tenant routing must be on before a second database exists
+    # Multi-tenant routing must be on before a second database exists
     local NDBS; NDBS=$(list_dbs | grep -c . || true)
     if [ "$(env_get ODOO_DBFILTER)" = "" ] && [ "${NDBS:-0}" -ge 1 ]; then
         echo ""
@@ -756,51 +777,28 @@ menu_new_tenant() {
                 echo 'dbfilter = ^%d$' >> odoo.conf
             fi
             echo -e "  ${GREEN}✓${NC} dbfilter set (subdomain = database name, exact match)"
+            offer_odoo_restart
         fi
     fi
+}
 
-    # 3. Domain-only stops here: the routing is in place and waiting for a
-    #    database of that name to appear.
-    if [ "$MODE" = domain ]; then
-        echo ""
-        echo -e "  ${GREEN}✓ Domain ready:${NC} https://$DOMAIN"
-        echo ""
-        if [ "$DB_EXISTS" = yes ]; then
-            echo "  Database '$DB' already exists, so the domain serves it now."
-        else
-            echo "  Nothing answers on it yet — Odoo needs a database named exactly"
-            echo -e "  ${BOLD}$DB${NC}. Put one there with any of:"
-            echo "    • Advanced → Databases → Restore     (a snapshot or backup)"
-            echo "    • Advanced → Databases → Duplicate   (a copy of another tenant)"
-            echo "    • scripts/vm-snapshot.sh on a VM, then Restore here"
-            echo ""
-            echo "  Restore asks for the target name — type '$DB' at that prompt."
-        fi
-        return 0
-    fi
-
-    # 4. Create the database with odoo-bin (the entrypoint injects the DB
-    #    credentials). Odoo is stopped so a stray web request can't race the
-    #    creation and corrupt it.
+menu_domain_remove() {
+    echo -e "${CYAN}${BOLD}Remove domain(s)${NC}"
     echo ""
-    echo -e "  ${CYAN}→${NC} Creating database '$DB' (Odoo is stopped briefly)..."
-    docker compose stop odoo >/dev/null
-    if docker compose run --rm odoo odoo -d "$DB" -i base --without-demo=all --stop-after-init; then
-        echo -e "  ${GREEN}✓${NC} Database '$DB' created"
-    else
-        echo -e "  ${RED}✗${NC} Database creation failed — check the output above."
-        docker compose up -d odoo >/dev/null
+    if ! ssl_is_configured; then
+        echo -e "  ${RED}✗${NC} No HTTPS configuration — there is no per-domain routing to remove."
         return 1
     fi
-    docker compose up -d >/dev/null
-
+    echo "  Served now:"
+    active_domains | sed 's/^/    • /' | grep . || { echo "    (none)"; return 1; }
     echo ""
-    echo -e "  ${GREEN}✓ Tenant ready:${NC} https://$DOMAIN"
+    echo "  Removing a domain drops its nginx block and deletes its certificate."
+    echo -e "  Its database and filestore are ${BOLD}kept${NC} — delete those separately"
+    echo "  from Advanced → Databases if you really want the data gone."
     echo ""
-    echo "  Secure it now (first login):"
-    echo "    • log in (admin/admin), change the admin password immediately"
-    echo "    • enable two-factor authentication for admin"
-    echo "    • Settings → General Settings → Customer Account: 'On invitation'"
+    read -r -a DOMAINS -p "  Domain(s) to remove, space-separated (empty to cancel): "
+    [ "${#DOMAINS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+    bash scripts/remove-domain.sh "${DOMAINS[@]}"
 }
 
 # ── 3) Duplicate a database ───────────────────
@@ -821,13 +819,27 @@ menu_duplicate_db() {
 menu_ssl() {
     echo -e "${CYAN}${BOLD}SSL (Let's Encrypt)${NC}"
     echo ""
-    if [ -f nginx/active.conf ] && grep -q ssl_certificate nginx/active.conf; then
-        echo "  SSL is configured. Current domains:"
-        grep -m1 "server_name" nginx/active.conf | sed 's/.*server_name/   /;s/;//'
+    if ssl_is_configured; then
+        echo "  SSL is configured. Certificates on this server:"
+        echo ""
+        certs_refresh
+        local lin doms
+        for lin in $(cert_lineages); do
+            doms="$(cert_domains_of "$lin")"
+            if [ "$(printf '%s' "$doms" | wc -w)" -gt 1 ]; then
+                printf "    %b%-34s%b %s\n" "$YELLOW" "$lin" "$NC" "shared by: $doms"
+            else
+                printf "    %-34s %s\n" "$lin" "$(cert_expiry_of "$lin")"
+            fi
+        done
         echo ""
         echo "  Certificates renew automatically (certbot container, checked every 12h)."
-        echo "  • Add a domain to the certificate:  menu item 2, or scripts/add-domain.sh"
-        echo "  • Re-run from scratch:              bash scripts/ssl-setup.sh DOMAIN EMAIL"
+        echo "  • Add or remove a domain:  menu item 2 (Manage domains)"
+        echo "  • Re-run from scratch:     bash scripts/ssl-setup.sh DOMAIN EMAIL"
+        echo ""
+        echo "  A certificate marked in yellow is shared by several domains: one dead"
+        echo "  DNS record then blocks renewal for all of them. Menu item 2 → 3 splits"
+        echo "  it into one certificate per domain."
         return 0
     fi
     echo "  SSL is NOT set up yet (HTTP only)."
@@ -953,8 +965,8 @@ menu_db_manager() {
     echo "  Current state: ODOO_LIST_DB=${CUR:-True}"
     echo ""
     echo "  Keep it DISABLED on production — it can create, drop and download"
-    echo "  databases, protected only by the master password. Neither creating a"
-    echo "  tenant (menu item 2) nor the Databases menu next door needs it."
+    echo "  databases, protected only by the master password. Neither adding a"
+    echo "  domain (menu item 2) nor the Databases menu next door needs it."
     echo ""
     if [ "${CUR:-True}" = "False" ]; then
         read -r -p "  Enable it temporarily? [y/N]: " E
@@ -1118,16 +1130,82 @@ menu_db_admin() {
     echo "  2) Restore    — put a snapshot back"
     echo "  3) Delete     — remove a database and/or its filestore"
     echo "  4) Duplicate  — copy one database into new ones (training copies)"
-    echo "  5) Back"
-    read -r -p "  Choose [1-5]: " A
+    echo "  5) Create     — fresh empty database(s) for a domain"
+    echo "  6) Back"
+    read -r -p "  Choose [1-6]: " A
     echo ""
-    case "${A:-5}" in
+    case "${A:-6}" in
         1) menu_db_backup ;;
         2) menu_db_restore ;;
         3) menu_db_delete ;;
         4) menu_duplicate_db ;;
+        5) menu_db_create ;;
         *) return 0 ;;
     esac
+}
+
+# ── 13.2.5) Create empty database(s) ──────────
+# Adding a domain deliberately creates nothing; this is where an empty tenant
+# comes from when it is not being restored or duplicated.
+menu_db_create() {
+    echo -e "${CYAN}${BOLD}Create empty database(s)${NC}"
+    echo ""
+    echo "  A fresh Odoo database, no demo data, first login admin/admin."
+    echo "  Name it after the domain's first label so dbfilter routes to it:"
+    echo "  training.pheoc.com → 'training'."
+    echo ""
+    echo "  Existing:"
+    list_dbs | sed 's/^/    • /' | grep . || echo "    (none)"
+    echo ""
+    read -r -a NAMES -p "  New database name(s), space-separated (empty to cancel): "
+    [ "${#NAMES[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+
+    local n GOOD=()
+    for n in "${NAMES[@]}"; do
+        if ! valid_db_name "$n"; then
+            echo -e "  ${RED}✗${NC} '$n' is not a valid database name — skipping"; continue
+        fi
+        if db_exists "$n"; then
+            echo -e "  ${RED}✗${NC} '$n' already exists — skipping"; continue
+        fi
+        printf '%s\n' "${GOOD[@]:-}" | grep -qx "$n" && continue   # typed twice
+        GOOD+=("$n")
+    done
+    [ "${#GOOD[@]}" -eq 0 ] && { echo "  Nothing to create."; return 1; }
+
+    echo ""
+    echo "  Will create: ${GOOD[*]}"
+    echo -e "  ${YELLOW}!${NC} Odoo is stopped while they are created (a minute or two each),"
+    echo "     so no web request can race the creation. Every tenant is offline"
+    echo "     for that time."
+    read -r -p "  Continue? [y/N]: " OK
+    [[ "${OK:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+
+    docker compose stop odoo >/dev/null
+    local FAILED=() MADE=()
+    for n in "${GOOD[@]}"; do
+        echo ""
+        echo -e "  ${CYAN}→${NC} docker compose run --rm odoo odoo -d $n -i base --without-demo=all"
+        if docker compose run --rm odoo odoo -d "$n" -i base --without-demo=all --stop-after-init; then
+            echo -e "  ${GREEN}✓${NC} '$n' created"
+            MADE+=("$n")
+        else
+            echo -e "  ${RED}✗${NC} '$n' failed — see the output above."
+            FAILED+=("$n")
+        fi
+    done
+    docker compose up -d >/dev/null
+    wait_for_odoo
+
+    echo ""
+    [ "${#MADE[@]}" -gt 0 ] && echo -e "  ${GREEN}✓ Created:${NC} ${MADE[*]}"
+    [ "${#FAILED[@]}" -gt 0 ] && echo -e "  ${RED}✗ Failed:${NC} ${FAILED[*]}"
+    [ "${#MADE[@]}" -eq 0 ] && return 1
+    echo ""
+    echo "  Secure each one at first login:"
+    echo "    • log in (admin/admin), change the admin password immediately"
+    echo "    • enable two-factor authentication for admin"
+    echo "    • Settings → General Settings → Customer Account: 'On invitation'"
 }
 
 # ── 13.2.1) Backup ────────────────────────────
@@ -1398,7 +1476,7 @@ while true; do
     esac
     echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
     echo "  1) Status & health"
-    echo "  2) Add a new domain + database (tenant)"
+    echo "  2) Manage domains — add / remove / certificates"
     echo "  3) SSL — set up HTTPS / show status"
     echo "  4) Update the ePHEM app image"
     echo "  5) Custom addons — pull / switch branch"
@@ -1414,7 +1492,7 @@ while true; do
     echo ""
     case "${CH:-}" in
         1)  menu_status ;;
-        2)  menu_new_tenant ;;
+        2)  menu_domains ;;
         3)  menu_ssl ;;
         4)  menu_update_app ;;
         5)  menu_addons ;;

@@ -1478,6 +1478,7 @@ fi
 
 # ── Scripts ───────────────────────────────────
 for script in scripts/backup.sh scripts/ssl-setup.sh scripts/add-domain.sh \
+              scripts/remove-domain.sh scripts/split-certs.sh scripts/nginx-lib.sh \
               scripts/duplicate-db.sh scripts/update-modules.sh \
               scripts/request-addons-access.sh scripts/clone-addons.sh \
               scripts/dev-instances.sh scripts/dev-logs.sh; do
@@ -1843,12 +1844,15 @@ elif [ "$MODE" = "demo" ]; then
 
 else
     if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then
-        DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" | head -1 | sed 's/.*server_name//;s/;//' | xargs | awk '{print $1}')
+        DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" \
+                 | sed 's/.*server_name//;s/;//' | tr ' ' '\n' \
+                 | grep -Ev '^(_)?$' | head -1)
         echo "Your site is available at:"
         echo "  https://$DOMAIN"
         echo ""
         echo "Next steps:"
-        echo "  • Create your database(s):  bash manage.sh   → 2) Add a new domain + database"
+        echo "  • Add your domains:         bash manage.sh   → 2) Manage domains"
+        echo "  • Create/restore databases: bash manage.sh   → 11) Advanced → 2) Databases"
         echo "  • Set up automatic backups: crontab -e   (README → Backups)"
     elif [ -n "$ENV_DOMAIN" ]; then
         echo "Your site is available at:"
@@ -1878,7 +1882,7 @@ else
     echo ""
     echo -e "${BOLD}Day-to-day management — the production menu:${NC}"
     echo "  bash manage.sh"
-    echo "  (status & health, add tenants, SSL, app/addon updates, backups,"
+    echo "  (status & health, domains, SSL, app/addon updates, backups,"
     echo "   database manager lock, security check)"
 fi
 

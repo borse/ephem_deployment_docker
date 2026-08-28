@@ -627,51 +627,66 @@ be named exactly that label (lowercase).
 
 Before adding a domain, create a DNS A record pointing it to this server's IP.
 
-**The easy way — the production menu does the whole thing:**
+**One certificate per domain.** Each domain gets its own Let's Encrypt
+certificate and its own nginx server block, so adding or removing one never
+touches the others — and a domain whose DNS record disappears cannot block
+everybody else's renewal.
+
+**A domain is routing only.** Adding one creates no database: it points at a
+database named after its first label, which you restore, duplicate or create
+when you are ready.
+
+**The easy way — the production menu:**
 
 ```bash
-bash manage.sh      # → 2) Add a new domain + database (tenant)
-                    #      choose "domain only" when the data is coming
-                    #      from a restore or a migration
+bash manage.sh      # → 2) Manage domains
+                    #      1) Add domain(s)     — space-separated for several
+                    #      2) Remove domain(s)  — space-separated for several
+                    #      3) Split the shared certificate into one per domain
 ```
-
-It adds the domain to nginx and the SSL certificate, offers to set
-`ODOO_DBFILTER` if it's missing, and creates the database directly with
-`odoo-bin` — so the web database manager can stay disabled throughout.
 
 **Manual steps** (what the menu runs for you):
 
-**Add a single domain:**
+**Add domains** (one or many, space-separated):
 
 ```bash
 bash scripts/add-domain.sh training.health.gov.xx
-```
-
-**Add multiple domains at once:**
-
-```bash
 bash scripts/add-domain.sh training.health.gov.xx simex.health.gov.xx
 ```
 
-**Create a database for the new domain** at:
-
-```
-https://training.health.gov.xx/web/database/manager
-```
-
-> The database name must match the subdomain. For `training.health.gov.xx`, name it `training`.
-
-> **Database manager already disabled?** (`ODOO_LIST_DB=False` — the normal
-> state on a production server.) Re-enable it just for this step: set
-> `ODOO_LIST_DB=True` in `.env`, run `bash setup.sh`, create the database,
-> then disable it again below. Leave it enabled only as long as it takes.
-
-**Disable the database manager** once all databases are set up:
+**Remove domains** (one or many) — deletes the nginx block and the
+certificate, keeps the database and filestore:
 
 ```bash
-nano .env   # set ODOO_LIST_DB=False
-bash setup.sh
+bash scripts/remove-domain.sh training.health.gov.xx simex.health.gov.xx
 ```
+
+**Put a database behind the domain** — `bash manage.sh` → `11) Advanced` →
+`2) Databases`:
+
+* `2) Restore` — a snapshot, or a tenant migrated off a VM
+* `4) Duplicate` — a copy of an existing tenant
+* `5) Create` — a fresh empty database (admin/admin, no demo data)
+
+All three work with the web database manager disabled, which is where it
+should stay on production. The database name must match the subdomain: for
+`training.health.gov.xx`, name it `training`.
+
+### Servers installed before per-domain certificates
+
+Older installs have ONE certificate listing every domain (`certbot --expand`).
+Removing a domain then means re-issuing for everyone, and one dead DNS record
+breaks renewal for all of them on the same day. Migrate once:
+
+```bash
+bash manage.sh      # → 2) Manage domains → 3) Split the shared certificate
+# or: bash scripts/split-certs.sh
+```
+
+It issues the new certificates first, switches nginx over, and only then
+retires the old shared certificate — nothing goes offline. `bash manage.sh` →
+`3) SSL` marks a shared certificate in yellow, so you can see whether you
+still have one.
 
 ---
 
@@ -685,7 +700,8 @@ Create identical copies of a configured database — useful for training rooms w
 # 1. Add all domains
 bash scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
 
-# 2. Set up and configure training-01 at https://training-01.pheoc.com
+# 2. Create the first database, then set it up at https://training-01.pheoc.com
+#    bash manage.sh → 11) Advanced → 2) Databases → 5) Create   (name it training-01)
 
 # 3. Duplicate to all others
 bash scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
@@ -919,7 +935,10 @@ database-manager lock.)
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
 | Run a backup | `bash scripts/backup.sh` |
-| Add a domain | `bash scripts/add-domain.sh new.domain.com` |
+| Add domain(s) | `bash manage.sh` → 2 → 1, or `bash scripts/add-domain.sh new.domain.com other.domain.com` |
+| Remove domain(s) | `bash manage.sh` → 2 → 2, or `bash scripts/remove-domain.sh old.domain.com` |
+| One certificate per domain (migrate) | `bash manage.sh` → 2 → 3, or `bash scripts/split-certs.sh` |
+| Create an empty database | `bash manage.sh` → 11 → 2 → 5 |
 | Duplicate a database | `bash manage.sh` → 11 → 2 → 4, or `bash scripts/duplicate-db.sh source target1 target2` |
 | Snapshot a tenant on a non-Docker VM | `bash scripts/vm-snapshot.sh` (on the VM) |
 | Update modules | `bash scripts/update-modules.sh` |
@@ -1057,7 +1076,10 @@ ephem-deploy/
 │
 ├── scripts/
 │   ├── ssl-setup.sh                ← Set up HTTPS with Let's Encrypt
-│   ├── add-domain.sh               ← Add new domains to an existing installation
+│   ├── add-domain.sh               ← Add domains (one certificate each)
+│   ├── remove-domain.sh            ← Stop serving domains, delete their certificates
+│   ├── split-certs.sh              ← Split one shared certificate into one per domain
+│   ├── nginx-lib.sh                ← Shared nginx/certificate helpers used by the above
 │   ├── duplicate-db.sh             ← Copy a database (for training environments)
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)

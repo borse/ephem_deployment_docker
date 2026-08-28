@@ -20,6 +20,7 @@ odoo.conf
 
 # NGINX HTTP-only backup (created by ssl-setup.sh)
 nginx/active.conf
+nginx/active.conf.bak
 nginx/default.http-only.conf
 
 # OS / IDE
