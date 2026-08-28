@@ -43,7 +43,7 @@ if [ ! -f "$NGINX_ACTIVE" ] || ! ssl_is_configured; then
 fi
 
 certs_refresh
-if [ -z "$EPHEM_CERTS_RAW" ]; then
+if [ -z "$EPHEM_CERTS_TABLE" ]; then
     echo -e "${RED}✗${NC} Could not read the certificate list (is Docker running?)."
     exit 1
 fi
@@ -161,6 +161,12 @@ for lin in "${SHARED[@]}"; do
         UNIQ=(); for n in "${KEEPNAMES[@]}"; do
             [ -n "$n" ] && ! printf '%s\n' "${UNIQ[@]:-}" | grep -qx "$n" && UNIQ+=("$n")
         done
+        if [ "$(printf '%s\n' "${UNIQ[@]}" | sort | tr '\n' ' ')" = \
+             "$(printf '%s\n' $(cert_domains_of "$lin") | sort | tr '\n' ' ')" ]; then
+            echo -e "  ${YELLOW}!${NC} '$lin' would keep the same names — leaving it alone"
+            echo "     (re-issuing it now would spend a certificate for nothing)"
+            continue
+        fi
         echo -e "  ${CYAN}→${NC} re-issuing '$lin' for: ${UNIQ[*]}"
         if reissue_cert "$lin" "$EMAIL" "${UNIQ[@]}" 2>&1 | sed 's/^/     /'; then
             echo -e "  ${GREEN}✓${NC} '$lin' now covers only ${UNIQ[*]}"

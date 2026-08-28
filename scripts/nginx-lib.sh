@@ -35,37 +35,55 @@ NC="${NC:-\033[0m}"
 dc() { docker compose -f "$EPHEM_ROOT/docker-compose.yml" "$@"; }
 
 # ── Certificates ──────────────────────────────
+#
+# Read what is on disk instead of parsing `certbot certificates`. That
+# listing is written for humans and its field names move between versions
+# (it said "Domains:" for years, current certbot says "Identifiers:"), and
+# docker adds CR line endings whenever it allocates a TTY. A parser that
+# quietly returns nothing here would make every domain look uncertified, so
+# this reads live/*/fullchain.pem with openssl, which does not move.
 
+# -T and </dev/null on every container call: without them `docker compose run`
+# allocates a TTY, which eats the keystrokes meant for the next prompt in this
+# script and puts CR line endings on everything it prints.
+#
 # The certbot image's entrypoint is the renew loop — clear it to run the CLI.
-certbot_cli() { dc run --rm --entrypoint "" certbot certbot "$@"; }
+certbot_cli() { dc run --rm -T --entrypoint "" certbot certbot "$@" </dev/null; }
+# ...and it carries an openssl binary, which nginx:alpine does not.
+certbot_sh()  { dc run --rm -T --entrypoint sh certbot -c "$1" </dev/null; }
 
-EPHEM_CERTS_RAW=""
-certs_refresh() {  # read `certbot certificates` once per script run
-    EPHEM_CERTS_RAW="$(certbot_cli certificates 2>/dev/null || true)"
+# name <TAB> domain domain ... <TAB> expiry, one line per certificate
+_CERT_SCAN_SH='
+for d in /etc/letsencrypt/live/*/; do
+  [ -f "$d/fullchain.pem" ] || continue
+  n=${d%/}; n=${n##*/}
+  s=$(openssl x509 -noout -text -in "$d/fullchain.pem" 2>/dev/null \
+      | grep -A1 "Subject Alternative Name" | tail -1 \
+      | tr -d " " | tr "," "\n" | sed -n "s/^DNS://p" | tr "\n" " ")
+  e=$(openssl x509 -noout -enddate -in "$d/fullchain.pem" 2>/dev/null | sed "s/notAfter=//")
+  [ -n "$s" ] && printf "%s\t%s\t%s\n" "$n" "$s" "$e"
+done
+'
+
+EPHEM_CERTS_TABLE=""
+certs_refresh() {
+    EPHEM_CERTS_TABLE="$(certbot_sh "$_CERT_SCAN_SH" 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*$')"
 }
-certs_ready() { [ -n "$EPHEM_CERTS_RAW" ] || certs_refresh; }
+certs_ready() { [ -n "$EPHEM_CERTS_TABLE" ] || certs_refresh; }
 
 cert_lineages() {  # every certificate name on this server
     certs_ready
-    printf '%s\n' "$EPHEM_CERTS_RAW" | awk '/Certificate Name:/ {print $3}'
+    printf '%s\n' "$EPHEM_CERTS_TABLE" | cut -f1 | grep .
 }
 
 cert_domains_of() {  # cert_domains_of LINEAGE → the names that certificate covers
     certs_ready
-    printf '%s\n' "$EPHEM_CERTS_RAW" | awk -v want="$1" '
-        /Certificate Name:/ { cur = $3 }
-        /Domains:/ && cur == want {
-            sub(/^[[:space:]]*Domains:[[:space:]]*/, ""); print; exit
-        }'
+    printf '%s\n' "$EPHEM_CERTS_TABLE" | awk -F'\t' -v want="$1" '$1 == want { print $2; exit }' | xargs
 }
 
-cert_expiry_of() {  # cert_expiry_of LINEAGE → "2026-11-04 ... (VALID: 61 days)"
+cert_expiry_of() {  # cert_expiry_of LINEAGE → "Oct 27 20:08:45 2026 GMT"
     certs_ready
-    printf '%s\n' "$EPHEM_CERTS_RAW" | awk -v want="$1" '
-        /Certificate Name:/ { cur = $3 }
-        /Expiry Date:/ && cur == want {
-            sub(/^[[:space:]]*Expiry Date:[[:space:]]*/, ""); print; exit
-        }'
+    printf '%s\n' "$EPHEM_CERTS_TABLE" | awk -F'\t' -v want="$1" '$1 == want { print $3; exit }'
 }
 
 lineage_exists() { cert_lineages | grep -qx "$1"; }
@@ -315,9 +333,28 @@ server {
 }
 NGINXEOF
 
+    # Refuse to write a config that serves fewer domains than asked for. A
+    # certificate this code cannot see (an unreadable volume, a certbot
+    # output format it does not understand) would otherwise silently take
+    # tenants offline — the failure that must never happen here.
+    local missing=()
+    for d in "${domains[@]}"; do
+        lineage_for_domain "$d" >/dev/null || missing+=("$d")
+    done
+    if [ ${#missing[@]} -gt 0 ] && [ "${EPHEM_ALLOW_DROP:-0}" != "1" ]; then
+        rm -f "$tmp"
+        echo -e "  ${RED}✗${NC} No certificate found for: ${missing[*]}"
+        echo -e "  ${RED}✗${NC} Nothing was changed — nginx keeps serving every domain it serves now."
+        echo "     Certificates this server can see:"
+        cert_lineages | sed 's/^/       • /' | grep . || echo "       (none — could the certbot container not start?)"
+        echo "     Fix the certificate, or drop those domains deliberately with:"
+        echo "       EPHEM_ALLOW_DROP=1 <the same command>"
+        return 1
+    fi
+
     for d in "${domains[@]}"; do
         if ! lin="$(lineage_for_domain "$d")"; then
-            echo -e "  ${RED}✗${NC} $d has no certificate — leaving it out of the config"
+            echo -e "  ${YELLOW}!${NC} $d has no certificate — dropped (EPHEM_ALLOW_DROP=1)"
             continue
         fi
         _render_https_block "$d" "$lin" "$max" >> "$tmp"
@@ -361,17 +398,17 @@ nginx_apply() {
         return 1
     fi
 
-    if dc exec -T nginx nginx -t >/dev/null 2>&1 && \
-       dc exec -T nginx nginx -s reload >/dev/null 2>&1; then
+    if dc exec -T nginx nginx -t </dev/null >/dev/null 2>&1 && \
+       dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1; then
         echo -e "  ${GREEN}✓${NC} nginx reloaded (no downtime)"
         return 0
     fi
 
     echo -e "  ${RED}✗${NC} nginx rejected the new config:"
-    dc exec -T nginx nginx -t 2>&1 | sed 's/^/     /'
+    dc exec -T nginx nginx -t </dev/null 2>&1 | sed 's/^/     /'
     if [ -f "$NGINX_ACTIVE.bak" ]; then
         cp "$NGINX_ACTIVE.bak" "$NGINX_ACTIVE"
-        dc exec -T nginx nginx -s reload >/dev/null 2>&1 || dc restart nginx >/dev/null 2>&1
+        dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1 || dc restart nginx >/dev/null 2>&1
         echo -e "  ${YELLOW}!${NC} Rolled back to the previous config — the site is still up."
     fi
     return 1

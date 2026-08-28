@@ -667,17 +667,16 @@ menu_status() {
     df -h / | tail -1 | awk '{printf "  root: %s used of %s (%s)\n", $3, $2, $5}'
     echo ""
     echo -e "${BOLD}SSL certificate:${NC}"
-    local certs
-    certs=$(docker compose exec -T nginx sh -c \
-        'for f in /etc/letsencrypt/live/*/fullchain.pem; do
-             [ -f "$f" ] || continue
-             d=${f%/fullchain.pem}; printf "%s  " "${d##*/}"
-             openssl x509 -enddate -noout -in "$f"
-         done' </dev/null 2>/dev/null)
-    if [ -n "${certs:-}" ]; then
-        echo "$certs" | sed 's/notAfter=/expires /' | sed 's/^/  /'
+    if ssl_is_configured; then
+        certs_refresh
+        local lin
+        for lin in $(cert_lineages); do
+            printf '  %-34s expires %s\n' "$lin" "$(cert_expiry_of "$lin")"
+        done
+        [ -z "$(cert_lineages)" ] && \
+            echo -e "  ${YELLOW}!${NC} nginx serves HTTPS but no certificate could be read"
     else
-        echo "  none found (HTTP-only server, or nginx not running)"
+        echo "  none (HTTP-only server)"
     fi
     echo ""
     echo -e "${BOLD}Last backup:${NC}"
@@ -829,7 +828,7 @@ menu_ssl() {
             if [ "$(printf '%s' "$doms" | wc -w)" -gt 1 ]; then
                 printf "    %b%-34s%b %s\n" "$YELLOW" "$lin" "$NC" "shared by: $doms"
             else
-                printf "    %-34s %s\n" "$lin" "$(cert_expiry_of "$lin")"
+                printf "    %-34s expires %s\n" "$lin" "$(cert_expiry_of "$lin")"
             fi
         done
         echo ""
