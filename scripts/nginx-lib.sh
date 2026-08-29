@@ -167,7 +167,15 @@ ssl_is_configured() {
 
 max_upload() {
     local v; v=$(grep "^NGINX_MAX_UPLOAD=" "$EPHEM_ROOT/.env" 2>/dev/null | cut -d'=' -f2- | xargs || true)
-    printf '%s' "${v:-100M}"
+    # A unitless value is BYTES to nginx: NGINX_MAX_UPLOAD=300 would render
+    # client_max_body_size 300; and every login RPC answers 413 "request too
+    # large". Only a number plus M or G is accepted; anything else falls back.
+    if ! printf '%s' "${v:-}" | grep -Eq '^[0-9]+[MmGg]$'; then
+        [ -n "${v:-}" ] && printf 'nginx-lib: ignoring invalid NGINX_MAX_UPLOAD=%s (use e.g. 300M); using 100M
+' "$v" >&2
+        v=100M
+    fi
+    printf '%s' "$v"
 }
 
 ssl_email() {
@@ -246,7 +254,7 @@ server {
     location / {
         proxy_redirect off;
         proxy_pass http://odoo-backend;
-        limit_req zone=ephem_limit burst=20 nodelay;
+        limit_req zone=ephem_limit burst=60 nodelay;
     }
 
     # \`expires\` (browser caching) does the work here. Odoo fingerprints its
@@ -286,7 +294,10 @@ render_active_conf() {  # render_active_conf DOMAIN...
 # ──────────────────────────────────────────────
 
 # ── Rate Limiting ──────────────────────────────
-limit_req_zone \$binary_remote_addr zone=ephem_limit:10m rate=10r/s;
+# General zone: DoS mitigation only, sized for a real Odoo login (dozens of
+# parallel images/RPCs; 10r/s burst 20 measurably 429'd half of them). The
+# credential zones below stay strict, they are the actual protection.
+limit_req_zone \$binary_remote_addr zone=ephem_limit:10m rate=30r/s;
 limit_conn_zone \$binary_remote_addr zone=conn_limit:10m;
 # The database manager is protected only by the Odoo master password — throttle
 # it hard so the password can't be brute-forced. Normal use is a handful of
