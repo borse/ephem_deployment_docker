@@ -1071,7 +1071,7 @@ nginx_setting_apply() {  # nginx_setting_apply KEY VALUE
 
 # ── 13.1) Start / stop / restart services ─────
 menu_service() {
-    echo -e "${CYAN}${BOLD}Odoo service — start / stop / restart${NC}"
+    echo -e "${CYAN}${BOLD}Services — start / stop / restart${NC}"
     echo ""
     printf "  Odoo: %s      Database: %s      nginx: %s\n" \
         "$(svc_state odoo)" "$(svc_state db)" "$(svc_state nginx)"
@@ -1083,11 +1083,12 @@ menu_service() {
     echo "  1) Restart Odoo            (docker compose restart odoo)"
     echo "  2) Stop Odoo               (docker compose stop odoo)"
     echo "  3) Start Odoo              (docker compose start odoo)"
-    echo "  4) Restart everything      (docker compose restart)"
-    echo "  5) Back"
-    read -r -p "  Choose [1-5]: " A
+    echo "  4) Restart nginx           (docker compose restart nginx, about a second offline)"
+    echo "  5) Restart everything      (docker compose restart)"
+    echo "  6) Back"
+    read -r -p "  Choose [1-6]: " A
     echo ""
-    case "${A:-5}" in
+    case "${A:-6}" in
         1)
             echo -e "  ${CYAN}→${NC} docker compose restart odoo"
             docker compose restart odoo || {
@@ -1118,6 +1119,28 @@ menu_service() {
             wait_for_odoo
             ;;
         4)
+            # Picks up a renewed certificate or a config edit at once, and
+            # re-attaches the active.conf mount (see nginx_apply). Odoo is
+            # not touched; visitors see a blip of about a second.
+            if [ "$(svc_state nginx)" = "absent" ]; then
+                echo -e "  ${CYAN}→${NC} docker compose up -d nginx"
+                docker compose up -d nginx || {
+                    echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
+            else
+                echo -e "  ${CYAN}→${NC} docker compose restart nginx"
+                docker compose restart nginx || {
+                    echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
+            fi
+            sleep 2
+            if [ "$(svc_state nginx)" = "running" ]; then
+                echo -e "  ${GREEN}✓${NC} nginx is running"
+            else
+                echo -e "  ${RED}✗${NC} nginx is not running, check: docker compose logs nginx"
+                echo "     (a broken nginx/active.conf is the usual cause)"
+                return 1
+            fi
+            ;;
+        5)
             read -r -p "  Restart Odoo, the database and nginx together? [y/N]: " C
             [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
             echo -e "  ${CYAN}→${NC} docker compose restart"
@@ -1645,7 +1668,7 @@ menu_advanced() {
     echo -e "  ${YELLOW}!${NC} These act on the whole server, and the database tools delete data"
     echo "     permanently. Everything routine lives in the main menu."
     echo ""
-    echo "  1) Odoo service — start / stop / restart"
+    echo "  1) Services — Odoo start / stop / restart, nginx restart"
     echo "  2) Databases — backup / restore / delete / duplicate"
     echo "  3) Web database manager — enable/disable"
     echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"

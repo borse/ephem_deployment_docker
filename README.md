@@ -927,6 +927,7 @@ database-manager lock, and the RPC endpoint switch.)
 | Start the system | `docker compose up -d` |
 | Stop the system | `docker compose down` |
 | Start / stop / restart Odoo | `bash manage.sh` → 11 → 1, or `docker compose restart odoo` |
+| Restart nginx (renewed certificate, config edit) | `bash manage.sh` → 11 → 1 → 4, or `docker compose restart nginx` |
 | Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
 | Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
 | Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
