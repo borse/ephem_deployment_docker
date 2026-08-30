@@ -58,8 +58,10 @@ bash scripts/backup.sh && ls -lh backups/ | tail
 
 > **If anything using XML-RPC integrations calls INTO this server** (rare —
 > outbound integrations from Odoo are unaffected), allow-list the caller's
-> IP in the `location ~ ^/(xmlrpc|jsonrpc)` block of `nginx/active.conf`
-> instead of removing the block.
+> address with `bash manage.sh` → 11) Advanced → 4) RPC endpoints. That
+> writes `NGINX_RPC_ALLOW` to `.env` and re-renders nginx; an edit made by
+> hand to `nginx/active.conf` is lost the next time a domain is added or
+> removed.
 
 Also work through **[HARDENING.md](HARDENING.md)** once per server — host
 settings (SSH, ufw/Docker, automatic OS updates) that containers cannot

@@ -996,6 +996,16 @@ menu_security() {
     [ "${LDB:-True}" = "False" ] \
         && echo -e "  ${GREEN}✓${NC} database manager disabled (ODOO_LIST_DB=False)" \
         || echo -e "  ${YELLOW}!${NC} database manager ENABLED — disable it via Advanced → 3"
+    local RPC; RPC=$(rpc_allow 2>/dev/null)
+    if ! rpc_block_present; then
+        echo -e "  ${YELLOW}!${NC} nginx config has no RPC block (predates the hardening): apply one via Advanced → 4"
+    elif [ -z "$RPC" ]; then
+        echo -e "  ${GREEN}✓${NC} RPC endpoints blocked (/xmlrpc, /jsonrpc)"
+    elif [ "$RPC" = all ]; then
+        echo -e "  ${YELLOW}!${NC} RPC endpoints OPEN to everyone: restrict them via Advanced → 4"
+    else
+        echo -e "  ${GREEN}✓${NC} RPC endpoints open to $RPC only"
+    fi
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
         || echo -e "  ${YELLOW}!${NC} ODOO_DBFILTER not set — required once you have several databases"
@@ -1444,6 +1454,88 @@ offer_odoo_restart() {
     docker compose restart odoo && wait_for_odoo
 }
 
+# ── 13.4) RPC endpoints ───────────────────────
+# /xmlrpc and /jsonrpc take a password straight from the request: no login
+# page, no CSRF, no second factor, and the web client never uses them. They
+# stay blocked at nginx unless a system has to call in. The setting is
+# NGINX_RPC_ALLOW in .env and is rendered into every server block, so it
+# survives adding or removing domains (a hand edit to active.conf does not).
+menu_rpc() {
+    echo -e "${CYAN}${BOLD}RPC endpoints${NC} (/xmlrpc, /jsonrpc)"
+    echo ""
+    if [ ! -f nginx/active.conf ]; then
+        echo -e "  ${RED}✗${NC} nginx/active.conf not found, run setup.sh first."
+        return 1
+    fi
+    echo "  Current setting: $(rpc_state_text)"
+    if ! rpc_block_present; then
+        echo -e "  ${YELLOW}!${NC} The live nginx config has no RPC block yet (it predates the"
+        echo "     hardening), so nothing is blocked right now. Any choice below"
+        echo "     re-renders it."
+    fi
+    echo ""
+    echo "  Odoo's own web client never calls these, so blocking them costs"
+    echo "  browser users nothing. They accept a password straight from the"
+    echo "  request (no login page, no CSRF, no second factor), which makes"
+    echo "  them the first target for password guessing. Open them only for a"
+    echo "  system that has to call in (an integration server, a data"
+    echo "  pipeline), and only to its address."
+    echo ""
+    echo "  1) Block for everyone (recommended)"
+    echo "  2) Allow specific addresses only"
+    echo "  3) Allow everyone"
+    echo "  4) Back"
+    read -r -p "  Choose [1-4]: " A
+    echo ""
+    local NEW a ADDRS=() GOOD=()
+    case "${A:-4}" in
+        1) NEW="" ;;
+        2)
+            echo "  IPv4 or IPv6 addresses, or CIDR ranges, space separated:"
+            echo "    203.0.113.55 10.20.0.0/16"
+            read -r -a ADDRS -p "  Addresses (empty to cancel): "
+            [ "${#ADDRS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+            for a in "${ADDRS[@]}"; do
+                a="${a%,}"
+                [ -z "$a" ] && continue
+                if valid_rpc_addr "$a"; then
+                    printf '%s\n' "${GOOD[@]:-}" | grep -qx "$a" || GOOD+=("$a")
+                else
+                    echo -e "  ${RED}✗${NC} '$a' is not an IP address or CIDR range, skipping"
+                fi
+            done
+            [ "${#GOOD[@]}" -eq 0 ] && { echo "  No valid address given, nothing changed."; return 1; }
+            NEW="${GOOD[*]}"
+            ;;
+        3)
+            echo -e "  ${YELLOW}!${NC} Every address on the internet can then try passwords against"
+            echo "     /xmlrpc/2/common, throttled only by the general rate limit."
+            read -r -p "  Open the RPC endpoints to everyone? [y/N]: " C
+            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+            NEW="all"
+            ;;
+        *) return 0 ;;
+    esac
+    rpc_apply "$NEW"
+}
+
+# Persist the setting, re-render nginx from it and reload. nginx_apply rolls
+# the config back if nginx rejects it; .env is rolled back with it, so the
+# two never disagree about what is in force.
+rpc_apply() {  # rpc_apply VALUE
+    local PREV; PREV=$(env_get NGINX_RPC_ALLOW)
+    set_env_key NGINX_RPC_ALLOW "$1"
+    echo -e "  ${CYAN}→${NC} NGINX_RPC_ALLOW=$1  (.env), re-rendering nginx/active.conf"
+    if rerender_active_conf; then
+        echo -e "  ${GREEN}✓${NC} RPC endpoints: $(rpc_state_text)"
+        return 0
+    fi
+    set_env_key NGINX_RPC_ALLOW "$PREV"
+    echo -e "  ${RED}✗${NC} Not applied. .env is back to NGINX_RPC_ALLOW=$PREV and nginx"
+    echo "     keeps serving what it served before."
+    return 1
+}
+
 # ── 13) Advanced ──────────────────────────────
 menu_advanced() {
     echo -e "${CYAN}${BOLD}Advanced${NC}"
@@ -1454,13 +1546,15 @@ menu_advanced() {
     echo "  1) Odoo service — start / stop / restart"
     echo "  2) Databases — backup / restore / delete / duplicate"
     echo "  3) Web database manager — enable/disable"
-    echo "  4) Back"
-    read -r -p "  Choose [1-4]: " A
+    echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"
+    echo "  5) Back"
+    read -r -p "  Choose [1-5]: " A
     echo ""
-    case "${A:-4}" in
+    case "${A:-5}" in
         1) menu_service ;;
         2) menu_db_admin ;;
         3) menu_db_manager ;;
+        4) menu_rpc ;;
         *) return 0 ;;
     esac
 }
@@ -1484,7 +1578,7 @@ while true; do
     echo "  8) Follow Odoo logs (Ctrl-C to stop)"
     echo "  9) Security check"
     echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
-    echo " 11) Advanced — service, databases, database manager"
+    echo " 11) Advanced — service, databases, database manager, RPC endpoints"
     echo "  0) Exit"
     echo ""
     read -r -p "Choose [0-11]: " CH

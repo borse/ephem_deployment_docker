@@ -121,10 +121,7 @@ fi
 echo ""
 echo "Updating nginx..."
 if [ ${#KEEP[@]} -eq 0 ]; then
-    cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"
-    cp "$NGINX_TEMPLATE" "$NGINX_ACTIVE"
-    MAXUP="$(max_upload)"
-    sed -i "s|client_max_body_size[[:space:]]*[0-9]*[MmGg];|client_max_body_size ${MAXUP};|g" "$NGINX_ACTIVE"
+    render_http_only_conf || exit 1
 else
     render_active_conf "${KEEP[@]}" || exit 1
 fi

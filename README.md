@@ -918,8 +918,8 @@ bash manage.sh
 
 (Status & health, add tenants/domains, SSL, app and addon updates, backups,
 security check, and an Advanced submenu holding the sharper tools: start/stop/
-restart, per-database backup / restore / delete / duplicate, and the
-database-manager lock.)
+restart, per-database backup / restore / delete / duplicate, the
+database-manager lock, and the RPC endpoint switch.)
 
 | What you want to do | Command |
 |---------------------|---------|
@@ -930,6 +930,7 @@ database-manager lock.)
 | Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
 | Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
 | Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
+| Block / open the RPC endpoints (`/xmlrpc`, `/jsonrpc`) | `bash manage.sh` → 11 → 4 (sets `NGINX_RPC_ALLOW` in `.env`) |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
@@ -1106,7 +1107,10 @@ ephem-deploy/
   servers installed before August 2026, `setup.sh` detects it and points
   to the one-time `scripts/migrate-db-cluster.sh` migration)
 - `/xmlrpc` and `/jsonrpc` are blocked at NGINX — they are the main
-  credential-stuffing target and the web client doesn't use them
+  credential-stuffing target and the web client doesn't use them. An
+  integration server that must call in is allow-listed by address with
+  `bash manage.sh` → 11 → 4 (`NGINX_RPC_ALLOW` in `.env`); never by editing
+  `nginx/active.conf`, which is regenerated
 - Login attempts are throttled (POST-only, so normal page loads are never
   limited), and the database manager page is rate-limited separately
 - All traffic encrypted with HTTPS (TLS 1.2+), security headers on every

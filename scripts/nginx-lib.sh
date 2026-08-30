@@ -17,6 +17,12 @@
 # when it has one, and at the shared certificate that covers it otherwise.
 # scripts/split-certs.sh migrates such a server to one certificate each.
 #
+# Server-wide nginx settings live in .env and are rendered into every server
+# block, so they survive adding or removing a domain:
+#
+#   NGINX_MAX_UPLOAD   client_max_body_size            (max_upload)
+#   NGINX_RPC_ALLOW    who may call /xmlrpc, /jsonrpc  (rpc_allow)
+#
 # Usage:  source "$(dirname "$0")/nginx-lib.sh"
 # ──────────────────────────────────────────────
 
@@ -183,6 +189,97 @@ ssl_email() {
     printf '%s' "$v"
 }
 
+# ── RPC endpoints (/xmlrpc, /jsonrpc) ─────────
+#
+# They take a password straight from the request: no login page, no CSRF, no
+# second factor, and the web client never uses them. So they are blocked at
+# nginx unless NGINX_RPC_ALLOW in .env says otherwise:
+#
+#   (empty)                       deny all                    ← default
+#   203.0.113.55 10.20.0.0/16     allow those, deny the rest  (space or comma separated)
+#   all                           open to everyone
+#
+# Changed from: bash manage.sh → 11) Advanced → 4) RPC endpoints. Every
+# entry ends up inside the nginx config, so only an address or a CIDR range
+# gets through; anything else is refused loudly and left out.
+
+valid_rpc_addr() {  # IPv4 (octets 0-255, /0-32) or IPv6 (/0-128), prefix optional
+    local o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    printf '%s' "$1" | grep -Eq "^($o\.){3}$o(/([0-9]|[12][0-9]|3[0-2]))?\$" \
+    || printf '%s' "$1" | grep -Eq '^([0-9A-Fa-f]{0,4}:){1,7}[0-9A-Fa-f]{0,4}(/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$'
+}
+
+rpc_allow() {  # → "" (blocked), "all", or the validated address list
+    local raw a good=() bad=()
+    raw=$(grep "^NGINX_RPC_ALLOW=" "$EPHEM_ROOT/.env" 2>/dev/null | cut -d'=' -f2- | tr ',' ' ' | xargs || true)
+    [ -z "$raw" ] && return 0
+    for a in $raw; do
+        case "$a" in
+            all|ALL) printf 'all'; return 0 ;;
+        esac
+        if valid_rpc_addr "$a"; then good+=("$a"); else bad+=("$a"); fi
+    done
+    [ ${#bad[@]} -gt 0 ] && printf 'nginx-lib: ignoring invalid NGINX_RPC_ALLOW entries: %s (not an IP address or CIDR range)\n' "${bad[*]}" >&2
+    printf '%s' "${good[*]:-}"
+}
+
+rpc_state_text() {  # one line for menus and the security check
+    local v; v="$(rpc_allow 2>/dev/null)"
+    case "$v" in
+        "")  printf 'blocked for everyone (default)' ;;
+        all) printf 'OPEN to everyone' ;;
+        *)   printf 'open to %s only' "$v" ;;
+    esac
+}
+
+# Does the live config carry an RPC block at all? Configs rendered before the
+# August 2026 hardening have none, and then nothing is blocked whatever .env
+# says. Any re-render adds it.
+rpc_block_present() {
+    [ -f "$NGINX_ACTIVE" ] && grep -q '^[[:space:]]*location[[:space:]]*~[[:space:]]*\^/(xmlrpc|jsonrpc)' "$NGINX_ACTIVE"
+}
+
+# The location block itself, indented for a server { } body. The single
+# source for the HTTPS renderer and the HTTP-only template alike.
+_render_rpc_block() {
+    local allow a
+    allow="$(rpc_allow)"
+    echo '    location ~ ^/(xmlrpc|jsonrpc) {'
+    case "$allow" in
+        "")
+            echo '        # Blocked (NGINX_RPC_ALLOW is empty in .env)'
+            echo '        deny all;'
+            ;;
+        all)
+            echo '        # NGINX_RPC_ALLOW=all in .env: every address may call in'
+            echo '        limit_req zone=ephem_limit burst=60 nodelay;'
+            ;;
+        *)
+            echo '        # NGINX_RPC_ALLOW in .env: only these addresses may call in'
+            for a in $allow; do echo "        allow $a;"; done
+            echo '        deny all;'
+            echo '        limit_req zone=ephem_limit burst=60 nodelay;'
+            ;;
+    esac
+    echo '        proxy_pass http://odoo-backend;'
+    echo '    }'
+}
+
+# Swap every RPC location block in FILE for the current one. Fails (1) when
+# the file has none, so a caller never believes a setting was applied to a
+# config that predates the block.
+_apply_rpc_block() {  # _apply_rpc_block FILE
+    local f="$1" block tmp
+    grep -q '^[[:space:]]*location[[:space:]]*~[[:space:]]*\^/(xmlrpc|jsonrpc)' "$f" || return 1
+    block="$(_render_rpc_block)"
+    tmp="$(mktemp)"
+    awk -v block="$block" '
+        /^[[:space:]]*location[[:space:]]*~[[:space:]]*\^\/\(xmlrpc\|jsonrpc\)/ { print block; skip = 1; next }
+        skip && /^[[:space:]]*}[[:space:]]*$/ { skip = 0; next }
+        skip { next }
+        { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
 # One HTTPS server block. Everything domain-specific is the server_name and
 # the two certificate paths; the rest is identical for every tenant.
 _render_https_block() {  # _render_https_block DOMAIN LINEAGE MAX_UPLOAD
@@ -230,13 +327,10 @@ server {
 
     # RPC endpoints: password auth with no login page and no CSRF — the
     # preferred credential-stuffing target. Odoo's own web client does not
-    # use them, so blocking them does not affect normal browser use. If an
-    # external system must call in, allow-list its address above the deny.
-    location ~ ^/(xmlrpc|jsonrpc) {
-        # allow 203.0.113.55;   # e.g. an integration server
-        deny all;
-        proxy_pass http://odoo-backend;
-    }
+    # use them, so blocking them does not affect normal browser use. Who may
+    # call in is NGINX_RPC_ALLOW in .env (bash manage.sh → Advanced → RPC);
+    # a hand edit here is lost on the next re-render.
+$(_render_rpc_block)
 
     # Slow down repeated login attempts (POST-only zone above)
     location ~ ^/(web/login|web/session/authenticate) {
@@ -285,9 +379,10 @@ render_active_conf() {  # render_active_conf DOMAIN...
     cat > "$tmp" <<NGINXEOF
 # ──────────────────────────────────────────────
 # GENERATED FILE — do not edit by hand.
-# Written by scripts/ssl-setup.sh, add-domain.sh, remove-domain.sh and
-# split-certs.sh (via scripts/nginx-lib.sh). Any manual change is lost the
-# next time a domain is added or removed.
+# Written by scripts/ssl-setup.sh, add-domain.sh, remove-domain.sh,
+# split-certs.sh and manage.sh (via scripts/nginx-lib.sh). Any manual change
+# is lost the next time a domain is added or removed or a setting changes;
+# the settings themselves live in .env (NGINX_MAX_UPLOAD, NGINX_RPC_ALLOW).
 #
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
 # Domains:   ${domains[*]}
@@ -382,6 +477,46 @@ NGINXEOF
     mv "$tmp" "$NGINX_ACTIVE"
     chmod 644 "$NGINX_ACTIVE"
     return 0
+}
+
+# Write nginx/active.conf for a server WITHOUT HTTPS: the template with the
+# .env settings applied (upload limit, RPC access). A bare copy of the
+# template would silently reset both. Used when the last domain is removed,
+# when ssl-setup.sh has to fall back, and when a setting changes on an
+# HTTP-only server.
+render_http_only_conf() {
+    local tmp max
+    max="$(max_upload)"
+    tmp="$(mktemp)"
+    if ! sed "s|client_max_body_size[[:space:]]*[0-9]*[MmGg];|client_max_body_size ${max};|g" \
+            "$NGINX_TEMPLATE" > "$tmp"; then
+        rm -f "$tmp"
+        echo -e "  ${RED}✗${NC} Could not read $NGINX_TEMPLATE"
+        return 1
+    fi
+    if ! _apply_rpc_block "$tmp"; then
+        rm -f "$tmp"
+        echo -e "  ${RED}✗${NC} nginx/default.conf has no RPC block. Is the repo up to date? (git pull)"
+        return 1
+    fi
+    [ -f "$NGINX_ACTIVE" ] && cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"
+    mv "$tmp" "$NGINX_ACTIVE"
+    chmod 644 "$NGINX_ACTIVE"
+    return 0
+}
+
+# Re-render the live config as it is (same domains, or HTTP-only), picking
+# up the current .env settings, then reload. What a settings change needs.
+rerender_active_conf() {
+    local domains=()
+    if ssl_is_configured; then
+        mapfile -t domains < <(active_domains)
+        certs_refresh
+        render_active_conf "${domains[@]}" || return 1
+    else
+        render_http_only_conf || return 1
+    fi
+    nginx_apply
 }
 
 nginx_state() {

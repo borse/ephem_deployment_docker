@@ -119,7 +119,8 @@ sudo ss -tlnp
 docker compose exec db psql -U odoo -d postgres -c \
   "SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'odoo';"
 
-# RPC endpoints blocked (expect 403), database manager throttled/disabled
+# RPC endpoints blocked (expect 403, unless you allow-listed an address via
+# manage.sh → 11 → 4), database manager throttled/disabled
 curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/xmlrpc/2/common
 curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/web/database/manager
 

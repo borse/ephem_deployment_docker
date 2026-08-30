@@ -67,7 +67,9 @@ done
 # If NGINX is broken, restore HTTP-only config so certbot can work
 if [ "$(nginx_state)" != running ]; then
     echo -e "${YELLOW}!${NC} NGINX is not running. Restoring HTTP-only config..."
-    cp "$NGINX_TEMPLATE" "$NGINX_ACTIVE"
+    # The template with the .env settings applied; the bare template if even
+    # that fails, since it is a valid config on its own.
+    render_http_only_conf || cp "$NGINX_TEMPLATE" "$NGINX_ACTIVE"
     dc up -d nginx >/dev/null 2>&1
     sleep 3
 fi
@@ -144,7 +146,7 @@ echo ""
 if ! nginx_apply; then
     echo ""
     echo -e "${RED}✗ NGINX failed with the SSL config. Rolling back to HTTP...${NC}"
-    cp "$NGINX_TEMPLATE" "$NGINX_ACTIVE"
+    render_http_only_conf || cp "$NGINX_TEMPLATE" "$NGINX_ACTIVE"
     dc restart nginx >/dev/null 2>&1
     echo "NGINX is back on HTTP. Check: docker compose logs nginx"
     exit 1

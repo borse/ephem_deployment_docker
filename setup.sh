@@ -1883,7 +1883,7 @@ else
     echo -e "${BOLD}Day-to-day management — the production menu:${NC}"
     echo "  bash manage.sh"
     echo "  (status & health, domains, SSL, app/addon updates, backups,"
-    echo "   database manager lock, security check)"
+    echo "   database manager lock, RPC endpoint switch, security check)"
 fi
 
 echo ""
