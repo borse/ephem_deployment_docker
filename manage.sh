@@ -877,6 +877,23 @@ menu_update_app() {
     echo ""
     read -r -p "  New version to pin (e.g. 1.0.3), empty to keep '$TAG': " NEWTAG
     if [ -n "${NEWTAG:-}" ]; then
+        # A tag that does not exist would be written to .env and break the
+        # next `docker compose up`. Check the registry first (a typo, or a
+        # menu key such as x typed here by habit, is refused).
+        if ! printf '%s' "$NEWTAG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+            echo -e "  ${RED}✗${NC} '$NEWTAG' is not a valid image tag. Nothing changed."
+            return 1
+        fi
+        echo -n "  Checking that borrs/ephem:$NEWTAG exists on Docker Hub... "
+        if docker manifest inspect "borrs/ephem:$NEWTAG" >/dev/null 2>&1; then
+            echo "yes"
+        else
+            echo "no"
+            echo -e "  ${RED}✗${NC} No release 'borrs/ephem:$NEWTAG' (or Docker Hub is unreachable)."
+            echo "     Released versions: https://hub.docker.com/r/borrs/ephem/tags"
+            echo "     Nothing changed."
+            return 1
+        fi
         set_env_key EPHEM_IMAGE_TAG "$NEWTAG"
         echo -e "  ${GREEN}✓${NC} EPHEM_IMAGE_TAG=$NEWTAG"
     fi
