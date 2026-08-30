@@ -1046,17 +1046,27 @@ menu_upload_limit() {
         echo -e "  ${RED}✗${NC} '$VAL' is not a valid size — use a number plus M or G (e.g. 500M, 1G)."
         return 1
     fi
-    # Persist in .env so a future ssl-setup.sh run keeps the value, and
-    # apply to the live config.
-    set_env_key NGINX_MAX_UPLOAD "$VAL"
-    sed -i "s|client_max_body_size[[:space:]]*[0-9]*[MmGg];|client_max_body_size ${VAL};|g" nginx/active.conf
-    if docker compose exec -T nginx nginx -t >/dev/null 2>&1 && \
-       docker compose exec -T nginx nginx -s reload >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} Limit is now $VAL (nginx reloaded, no downtime)."
-    else
-        echo -e "  ${YELLOW}!${NC} Config updated but nginx did not reload — apply it with:"
-        echo "     docker compose restart nginx"
-    fi
+    # .env is the source of truth; the renderer writes it into every server
+    # block. (An earlier version ran sed -i on active.conf: that renames the
+    # file, the container keeps the old inode, and the reload changed nothing
+    # until the next restart.)
+    nginx_setting_apply NGINX_MAX_UPLOAD "$VAL" && \
+        echo -e "  ${GREEN}✓${NC} Upload limit is now $VAL."
+}
+
+# Persist one nginx setting in .env, re-render active.conf from .env and
+# apply. nginx_apply rolls the config back if nginx rejects it; .env is
+# rolled back with it, so the two never disagree about what is in force.
+nginx_setting_apply() {  # nginx_setting_apply KEY VALUE
+    local KEY="$1" VAL="$2" PREV
+    PREV=$(env_get "$KEY")
+    set_env_key "$KEY" "$VAL"
+    echo -e "  ${CYAN}→${NC} $KEY=$VAL  (.env), re-rendering nginx/active.conf"
+    rerender_active_conf && return 0
+    set_env_key "$KEY" "$PREV"
+    echo -e "  ${RED}✗${NC} Not applied. .env is back to $KEY=$PREV and nginx"
+    echo "     keeps serving what it served before."
+    return 1
 }
 
 # ── 13.1) Start / stop / restart services ─────
@@ -1619,24 +1629,13 @@ menu_rpc_default() {
     rpc_apply NGINX_RPC_ALLOW "$NEW"
 }
 
-# Persist one setting, re-render nginx from .env and reload. nginx_apply
-# rolls the config back if nginx rejects it; .env is rolled back with it, so
-# the two never disagree about what is in force.
-rpc_apply() {  # rpc_apply KEY VALUE
-    local KEY="$1" VAL="$2" PREV OPEN
-    PREV=$(env_get "$KEY")
-    set_env_key "$KEY" "$VAL"
-    echo -e "  ${CYAN}→${NC} $KEY=$VAL  (.env), re-rendering nginx/active.conf"
-    if rerender_active_conf; then
-        echo -e "  ${GREEN}✓${NC} Server-wide default: $(rpc_state_text)"
-        OPEN=$(rpc_open_domains 2>/dev/null)
-        [ -n "$OPEN" ] && echo -e "  ${GREEN}✓${NC} Open per domain: $OPEN"
-        return 0
-    fi
-    set_env_key "$KEY" "$PREV"
-    echo -e "  ${RED}✗${NC} Not applied. .env is back to $KEY=$PREV and nginx"
-    echo "     keeps serving what it served before."
-    return 1
+rpc_apply() {  # rpc_apply KEY VALUE — nginx_setting_apply, then the RPC state
+    local OPEN
+    nginx_setting_apply "$1" "$2" || return 1
+    echo -e "  ${GREEN}✓${NC} Server-wide default: $(rpc_state_text)"
+    OPEN=$(rpc_open_domains 2>/dev/null)
+    [ -n "$OPEN" ] && echo -e "  ${GREEN}✓${NC} Open per domain: $OPEN"
+    return 0
 }
 
 # ── 13) Advanced ──────────────────────────────

@@ -552,10 +552,19 @@ NGINXEOF
         return 1
     fi
 
+    _install_active_conf "$tmp"
+}
+
+# Put a rendered file in place of nginx/active.conf, keeping the .bak that
+# nginx_apply rolls back to. Written INTO the existing file (cp), never
+# renamed over it (mv): docker mounts a single file by inode, so a container
+# started on the old inode keeps reading it after a rename, and `nginx -s
+# reload` would then test and load the previous config. That is why an
+# earlier version needed a container restart before a change showed.
+_install_active_conf() {  # _install_active_conf TMPFILE
     [ -f "$NGINX_ACTIVE" ] && cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"
-    mv "$tmp" "$NGINX_ACTIVE"
+    cp "$1" "$NGINX_ACTIVE" && rm -f "$1"
     chmod 644 "$NGINX_ACTIVE"
-    return 0
 }
 
 # Write nginx/active.conf for a server WITHOUT HTTPS: the template with the
@@ -578,10 +587,7 @@ render_http_only_conf() {
         echo -e "  ${RED}✗${NC} nginx/default.conf has no RPC block. Is the repo up to date? (git pull)"
         return 1
     fi
-    [ -f "$NGINX_ACTIVE" ] && cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"
-    mv "$tmp" "$NGINX_ACTIVE"
-    chmod 644 "$NGINX_ACTIVE"
-    return 0
+    _install_active_conf "$tmp"
 }
 
 # Re-render the live config as it is (same domains, or HTTP-only), picking
@@ -617,10 +623,30 @@ nginx_state() {
     esac
 }
 
+# Does the running container read the same bytes that are on the host? See
+# _install_active_conf: after a rename (mv, sed -i, most editors) it does
+# not, and a reload would silently apply the previous file.
+nginx_sees_host_conf() {
+    local inside host
+    inside=$(dc exec -T nginx md5sum /etc/nginx/conf.d/default.conf </dev/null 2>/dev/null | tr -d '\r' | cut -d' ' -f1)
+    host=$(md5sum "$NGINX_ACTIVE" 2>/dev/null | cut -d' ' -f1)
+    [ -n "$inside" ] && [ "$inside" = "$host" ]
+}
+
+# Test the new config in a throwaway container that mounts the host file
+# fresh, for the case where the running one cannot see it.
+nginx_test_fresh() {
+    dc run --rm --no-deps -T --entrypoint nginx nginx -t </dev/null 2>&1
+}
+
 # Test the new config and reload without dropping connections. On failure the
 # previous config (.bak) goes back and nginx is reloaded again, so a bad
-# render never takes the server down.
+# render never takes the server down. When the running container still reads
+# an older inode of the file, a reload cannot pick the change up: the config
+# is tested in a fresh container and nginx is restarted instead (about a
+# second of downtime, said so on screen).
 nginx_apply() {
+    local out
     if [ "$(nginx_state)" != running ]; then
         dc up -d nginx >/dev/null 2>&1 || true
         sleep 3
@@ -632,18 +658,40 @@ nginx_apply() {
         return 1
     fi
 
-    if dc exec -T nginx nginx -t </dev/null >/dev/null 2>&1 && \
-       dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} nginx reloaded (no downtime)"
-        return 0
+    if nginx_sees_host_conf; then
+        if dc exec -T nginx nginx -t </dev/null >/dev/null 2>&1 && \
+           dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} nginx reloaded (no downtime)"
+            return 0
+        fi
+        echo -e "  ${RED}✗${NC} nginx rejected the new config:"
+        dc exec -T nginx nginx -t </dev/null 2>&1 | sed 's/^/     /'
+        if [ -f "$NGINX_ACTIVE.bak" ]; then
+            cp "$NGINX_ACTIVE.bak" "$NGINX_ACTIVE"
+            dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1 || dc restart nginx >/dev/null 2>&1
+            echo -e "  ${YELLOW}!${NC} Rolled back to the previous config — the site is still up."
+        fi
+        return 1
     fi
 
+    echo -e "  ${YELLOW}!${NC} The running nginx still reads an older copy of active.conf (the file"
+    echo "     was replaced rather than rewritten), so a reload would not see the change."
+    if out="$(nginx_test_fresh)"; then
+        echo -e "  ${CYAN}→${NC} docker compose restart nginx"
+        dc restart nginx >/dev/null 2>&1
+        sleep 2
+        if [ "$(nginx_state)" = running ] && nginx_sees_host_conf; then
+            echo -e "  ${GREEN}✓${NC} nginx restarted with the new config (about a second of downtime)"
+            return 0
+        fi
+        echo -e "  ${RED}✗${NC} nginx did not come back with the new config, check: docker compose logs nginx"
+        return 1
+    fi
     echo -e "  ${RED}✗${NC} nginx rejected the new config:"
-    dc exec -T nginx nginx -t </dev/null 2>&1 | sed 's/^/     /'
+    printf '%s\n' "$out" | sed 's/^/     /'
     if [ -f "$NGINX_ACTIVE.bak" ]; then
         cp "$NGINX_ACTIVE.bak" "$NGINX_ACTIVE"
-        dc exec -T nginx nginx -s reload </dev/null >/dev/null 2>&1 || dc restart nginx >/dev/null 2>&1
-        echo -e "  ${YELLOW}!${NC} Rolled back to the previous config — the site is still up."
+        echo -e "  ${YELLOW}!${NC} Rolled back to the previous config; nginx never loaded the bad one."
     fi
     return 1
 }

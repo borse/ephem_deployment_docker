@@ -103,6 +103,57 @@ printf 'FOO=1\n' > "$T/.env"
 env_write_key NGINX_RPC_OPEN "x.example.org" && [ "$(grep -c . "$T/.env")" -eq 2 ] && [ "$(rpc_open_domains)" = "x.example.org" ] \
     && ok "env_write_key appends a missing key" || bad "env_write_key append: $(cat "$T/.env" | xargs)"
 
+echo; echo "Inode kept across renders (a docker single-file bind mount follows the inode)"
+printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' > "$T/.env"
+render_http_only_conf >/dev/null; ino=$(stat -c %i "$NGINX_ACTIVE")
+render_http_only_conf >/dev/null; [ "$(stat -c %i "$NGINX_ACTIVE")" = "$ino" ] && ok "render_http_only_conf writes in place" || bad "render_http_only_conf replaced the inode"
+render_active_conf a.example.org b.example.org >/dev/null; [ "$(stat -c %i "$NGINX_ACTIVE")" = "$ino" ] && ok "render_active_conf writes in place" || bad "render_active_conf replaced the inode"
+
+echo; echo "nginx_apply against a real container"
+# dc() stands in for docker compose: one throwaway nginx container mounting
+# the rendered file exactly the way docker-compose.yml does.
+CT="ephem-apply-test-$$"
+render_http_only_conf >/dev/null
+docker run -d --name "$CT" --add-host odoo:127.0.0.1 -v "$NGINX_ACTIVE:/etc/nginx/conf.d/default.conf:ro" nginx:alpine >/dev/null
+trap 'docker rm -f "$CT" >/dev/null 2>&1; rm -rf "$T"' EXIT
+sleep 1
+dc() {
+    case "$*" in
+        "ps -aq nginx")   docker ps -aq -f "name=^${CT}\$" ;;
+        "exec -T nginx "*) shift 3; docker exec -i "$CT" "$@" ;;
+        "run --rm --no-deps -T --entrypoint nginx nginx -t")
+            docker run --rm --add-host odoo:127.0.0.1 -v "$NGINX_ACTIVE:/etc/nginx/conf.d/default.conf:ro" nginx:alpine nginx -t ;;
+        "restart nginx")  docker restart "$CT" >/dev/null ;;
+        "up -d nginx")    docker start "$CT" >/dev/null ;;
+        *) echo "unexpected: dc $*" >&2; return 1 ;;
+    esac
+}
+in_sync() { nginx_sees_host_conf; }
+inside_has() { docker exec -i "$CT" grep -c "$1" /etc/nginx/conf.d/default.conf 2>/dev/null; }
+
+# a) written in place: reload is enough
+printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=all\n' > "$T/.env"; render_http_only_conf >/dev/null
+out=$(nginx_apply); printf '%s\n' "$out" | grep -q 'reloaded' && in_sync && [ "$(inside_has 'deny all')" = 0 ] \
+    && ok "in-place write: reloaded, container serves the new config" || { bad "in-place write"; printf '%s\n' "$out"; }
+# b) replaced file (mv): the container is stale, nginx_apply must restart
+printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\n' > "$T/.env"
+NGINX_ACTIVE="$T/out/staged.conf" render_http_only_conf >/dev/null; mv "$T/out/staged.conf" "$NGINX_ACTIVE"
+in_sync && bad "stale detection: container should NOT see a renamed file" || ok "stale detection: renamed file not visible in the container"
+out=$(nginx_apply); printf '%s\n' "$out" | grep -q 'restarted' && in_sync && [ "$(inside_has 'deny all')" = 1 ] \
+    && ok "renamed file: restarted, container serves the new config" || { bad "renamed file"; printf '%s\n' "$out"; }
+# c) broken config written in place: rejected, rolled back, still running
+cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"; echo "this is not nginx;" >> "$NGINX_ACTIVE"
+out=$(nginx_apply) && bad "broken in-place config was accepted" \
+    || { printf '%s\n' "$out" | grep -q 'Rolled back' && in_sync && ! grep -q 'this is not nginx' "$NGINX_ACTIVE" && [ "$(docker inspect -f '{{.State.Status}}' "$CT")" = running ] \
+         && ok "broken in-place config: rejected, rolled back, nginx still up" || { bad "broken in-place config"; printf '%s\n' "$out"; }; }
+# d) broken config via rename: tested in a fresh container, rolled back, never loaded
+cp "$NGINX_ACTIVE" "$NGINX_ACTIVE.bak"; { cat "$NGINX_ACTIVE"; echo "nor is this;"; } > "$T/out/broken.conf"; mv "$T/out/broken.conf" "$NGINX_ACTIVE"
+out=$(nginx_apply) && bad "broken renamed config was accepted" \
+    || { printf '%s\n' "$out" | grep -q 'never loaded' && ! grep -q 'nor is this' "$NGINX_ACTIVE" && [ "$(docker inspect -f '{{.State.Status}}' "$CT")" = running ] \
+         && ok "broken renamed config: rejected in a fresh container, rolled back, nginx still up" || { bad "broken renamed config"; printf '%s\n' "$out"; }; }
+docker rm -f "$CT" >/dev/null 2>&1
+unset -f dc
+
 echo; echo "Template itself"
 out="$(nginx_t "$REPO/nginx/default.conf")" && ok "nginx/default.conf: nginx -t" || { bad "nginx/default.conf: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
 
