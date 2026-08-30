@@ -168,8 +168,20 @@ active_domains() {
         }' "$NGINX_ACTIVE" | awk '!seen[$0]++'
 }
 
+# One grep, no pipeline. The old `grep -v | grep -q` raced under pipefail: on
+# a config with a dozen domains the second grep quits at the first match, the
+# first gets SIGPIPE writing the rest, and the pipeline reports "no HTTPS"
+# a few percent of the time.
 ssl_is_configured() {
-    [ -f "$NGINX_ACTIVE" ] && grep -v '^[[:space:]]*#' "$NGINX_ACTIVE" | grep -q ssl_certificate
+    [ -f "$NGINX_ACTIVE" ] && grep -Eq '^[^#]*ssl_certificate' "$NGINX_ACTIVE"
+}
+
+# Membership test in plain bash. Not `printf | grep -q`: under pipefail a
+# reader that quits early can fail the whole pipeline.
+in_list() {  # in_list NEEDLE ITEM...
+    local n="$1" x; shift
+    for x in "$@"; do [ "$x" = "$n" ] && return 0; done
+    return 1
 }
 
 max_upload() {
@@ -246,7 +258,7 @@ rpc_open_domains() {  # → the validated domain list from NGINX_RPC_OPEN
     [ -z "$raw" ] && return 0
     for d in $raw; do
         if valid_domain "$d"; then
-            printf '%s\n' "${good[@]:-}" | grep -qx "$d" || good+=("$d")
+            in_list "$d" "${good[@]:-}" || good+=("$d")
         else
             bad+=("$d")
         fi
@@ -283,7 +295,7 @@ env_write_key() {  # env_write_key KEY VALUE
 rpc_forget_domains() {  # rpc_forget_domains DOMAIN...
     local d keep=() dropped=0
     for d in $(rpc_open_domains 2>/dev/null); do
-        if printf '%s\n' "$@" | grep -qx "$d"; then dropped=1; else keep+=("$d"); fi
+        if in_list "$d" "$@"; then dropped=1; else keep+=("$d"); fi
     done
     [ "$dropped" -eq 1 ] || return 1
     env_write_key NGINX_RPC_OPEN "${keep[*]:-}"
@@ -574,10 +586,19 @@ render_http_only_conf() {
 
 # Re-render the live config as it is (same domains, or HTTP-only), picking
 # up the current .env settings, then reload. What a settings change needs.
+#
+# Two independent signs of HTTPS are checked: an ssl_certificate line, and
+# any 443 server block with names. Either one selects the HTTPS renderer.
+# The HTTP-only template is written only over a config that shows neither,
+# because writing it over an HTTPS config would take every tenant off HTTPS.
 rerender_active_conf() {
     local domains=()
-    if ssl_is_configured; then
-        mapfile -t domains < <(active_domains)
+    mapfile -t domains < <(active_domains)
+    if ssl_is_configured || [ ${#domains[@]} -gt 0 ]; then
+        if [ ${#domains[@]} -eq 0 ]; then
+            echo -e "  ${RED}✗${NC} The HTTPS config lists no domains; nothing was re-rendered."
+            return 1
+        fi
         certs_refresh
         render_active_conf "${domains[@]}" || return 1
     else

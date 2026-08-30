@@ -1478,8 +1478,9 @@ menu_rpc() {
         while IFS= read -r d; do
             [ -n "$d" ] && printf '    %-40s %s\n' "$d" "$(rpc_domain_state "$d")"
         done < <(active_domains)
+        local SERVED=(); mapfile -t SERVED < <(active_domains)
         for d in $OPEN; do
-            active_domains | grep -qx "$d" || printf '    %-40s %s\n' "$d" "in NGINX_RPC_OPEN but not served here"
+            in_list "$d" "${SERVED[@]:-}" || printf '    %-40s %s\n' "$d" "in NGINX_RPC_OPEN but not served here"
         done
     else
         echo "  HTTP-only server: one server block answers for every hostname, so"
@@ -1533,10 +1534,10 @@ menu_rpc_open() {
     [ "${#DOMS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
     for d in "${DOMS[@]}"; do
         d="${d%,}"; [ -z "$d" ] && continue
-        if ! printf '%s\n' "${SERVED[@]}" | grep -qx "$d"; then
+        if ! in_list "$d" "${SERVED[@]}"; then
             echo -e "  ${RED}✗${NC} $d is not served here, skipping"; continue
         fi
-        if printf '%s\n' "${NEW[@]:-}" | grep -qx "$d"; then
+        if in_list "$d" "${NEW[@]:-}"; then
             echo -e "  ${YELLOW}!${NC} $d is already open"; continue
         fi
         NEW+=("$d"); ADDED+=("$d")
@@ -1557,14 +1558,16 @@ menu_rpc_close() {
     echo ""
     read -r -a DOMS -p "  Domain(s) to block again, or 'all' (empty to cancel): "
     [ "${#DOMS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
-    if [ "${DOMS[0]}" = all ]; then
+    local WANT=()
+    for d in "${DOMS[@]}"; do d="${d%,}"; [ -n "$d" ] && WANT+=("$d"); done
+    if [ "${WANT[0]:-}" = all ]; then
         DROPPED=("${OPEN[@]}")
     else
         for d in "${OPEN[@]}"; do
-            if printf '%s\n' "${DOMS[@]}" | sed 's/,$//' | grep -qx "$d"; then DROPPED+=("$d"); else KEEP+=("$d"); fi
+            if in_list "$d" "${WANT[@]:-}"; then DROPPED+=("$d"); else KEEP+=("$d"); fi
         done
-        for d in "${DOMS[@]}"; do
-            d="${d%,}"; [ -n "$d" ] && ! printf '%s\n' "${OPEN[@]}" | grep -qx "$d" \
+        for d in "${WANT[@]:-}"; do
+            [ -n "$d" ] && ! in_list "$d" "${OPEN[@]}" \
                 && echo -e "  ${YELLOW}!${NC} $d is not open per domain, skipping"
         done
     fi
@@ -1595,7 +1598,7 @@ menu_rpc_default() {
                 a="${a%,}"
                 [ -z "$a" ] && continue
                 if valid_rpc_addr "$a"; then
-                    printf '%s\n' "${GOOD[@]:-}" | grep -qx "$a" || GOOD+=("$a")
+                    in_list "$a" "${GOOD[@]:-}" || GOOD+=("$a")
                 else
                     echo -e "  ${RED}✗${NC} '$a' is not an IP address or CIDR range, skipping"
                 fi

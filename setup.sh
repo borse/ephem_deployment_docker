@@ -1843,7 +1843,7 @@ elif [ "$MODE" = "demo" ]; then
     echo "  docker compose down -v   — stop and wipe all data"
 
 else
-    if grep -v "^#" nginx/active.conf 2>/dev/null | grep -q "ssl_certificate"; then
+    if grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
         DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" \
                  | sed 's/.*server_name//;s/;//' | tr ' ' '\n' \
                  | grep -Ev '^(_)?$' | head -1)
