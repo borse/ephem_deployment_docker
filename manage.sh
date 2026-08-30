@@ -48,6 +48,20 @@ set_env_key() {  # set_env_key KEY VALUE — update or append KEY=VALUE in .env
 
 DB_USER="$(env_get POSTGRES_USER)"; DB_USER="${DB_USER:-odoo}"
 
+# Every menu takes b (back) and x (exit) besides its numbers; Enter alone is
+# back as well. Sets CHOICE. x leaves the program from any depth.
+ask_choice() {  # ask_choice "1-4" ["b, x"]
+    local keys="${2:-b, x}"
+    # EOF (stdin closed, a piped run) would otherwise spin the menu forever.
+    read -r -p "  Choose [$1, $keys]: " CHOICE || { echo ""; echo "Bye. Re-open anytime:  bash manage.sh"; exit 0; }
+    echo ""
+    case "${CHOICE:-}" in
+        x|X)    echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
+        b|B|"") CHOICE=b ;;
+    esac
+}
+invalid_choice() { echo -e "  ${YELLOW}!${NC} Invalid choice."; }
+
 list_dbs() {
     docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
         "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres') ORDER BY datname;" \
@@ -713,14 +727,15 @@ menu_domains() {
         echo "  1) Add domain(s)       — one certificate each, no database created"
         echo "  2) Remove domain(s)    — drops nginx block + certificate, keeps the data"
         echo "  3) Split the shared certificate into one per domain"
-        echo "  4) Back"
-        read -r -p "  Choose [1-4]: " A
-        echo ""
-        case "${A:-4}" in
+        echo "  b) Back"
+        echo "  x) Exit"
+        ask_choice "1-3"
+        case "$CHOICE" in
             1) menu_domain_add ;;
             2) menu_domain_remove ;;
             3) bash scripts/split-certs.sh ;;
-            *) return 0 ;;
+            b) return 0 ;;
+            *) invalid_choice ;;
         esac
         echo ""
     done
@@ -909,9 +924,10 @@ menu_addons() {
     echo ""
     echo "  1) Pull latest on '$cur'"
     echo "  2) Fetch & switch to a different branch"
-    echo "  3) Back"
-    read -r -p "  Choose [1-3]: " A
-    case "${A:-3}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-2"
+    case "$CHOICE" in
         1)
             git -C custom-addons pull --ff-only || {
                 echo -e "  ${RED}✗${NC} Pull failed (diverged or no access) — resolve manually."
@@ -944,7 +960,8 @@ menu_addons() {
             ) || { echo -e "  ${RED}✗${NC} Fetch/switch failed — see the git output above."; return 1; }
             echo -e "  ${GREEN}✓${NC} custom-addons now on '$BR'"
             ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
     esac
     echo ""
     read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
@@ -1085,10 +1102,10 @@ menu_service() {
     echo "  3) Start Odoo              (docker compose start odoo)"
     echo "  4) Restart nginx           (docker compose restart nginx, about a second offline)"
     echo "  5) Restart everything      (docker compose restart)"
-    echo "  6) Back"
-    read -r -p "  Choose [1-6]: " A
-    echo ""
-    case "${A:-6}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-5"
+    case "$CHOICE" in
         1)
             echo -e "  ${CYAN}→${NC} docker compose restart odoo"
             docker compose restart odoo || {
@@ -1148,7 +1165,8 @@ menu_service() {
                 echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
             wait_for_odoo
             ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
     esac
     echo ""
     echo "  Now: Odoo $(svc_state odoo), database $(svc_state db), nginx $(svc_state nginx)"
@@ -1176,16 +1194,17 @@ menu_db_admin() {
     echo "  3) Delete     — remove a database and/or its filestore"
     echo "  4) Duplicate  — copy one database into new ones (training copies)"
     echo "  5) Create     — fresh empty database(s) for a domain"
-    echo "  6) Back"
-    read -r -p "  Choose [1-6]: " A
-    echo ""
-    case "${A:-6}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-5"
+    case "$CHOICE" in
         1) menu_db_backup ;;
         2) menu_db_restore ;;
         3) menu_db_delete ;;
         4) menu_duplicate_db ;;
         5) menu_db_create ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
     esac
 }
 
@@ -1269,10 +1288,10 @@ menu_db_backup() {
     echo ""
     echo "  1) Back up one database (+ its filestore)"
     echo "  2) Back up every database"
-    echo "  3) Back"
-    read -r -p "  Choose [1-3]: " A
-    echo ""
-    case "${A:-3}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-2"
+    case "$CHOICE" in
         1)
             read -r -p "  Database name (empty to cancel): " DB
             [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
@@ -1294,7 +1313,8 @@ menu_db_backup() {
             echo -e "  ${GREEN}✓${NC} $OK snapshot(s) written to backups/"
             [ "$BAD" -gt 0 ] && echo -e "  ${RED}✗${NC} $BAD failed — see the output above."
             ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
     esac
 }
 
@@ -1436,11 +1456,11 @@ menu_db_delete() {
     echo "  1) Delete a database AND its filestore"
     echo "  2) Delete a database only (leaves the filestore)"
     echo "  3) Delete a filestore only (leaves the database)"
-    echo "  4) Back"
-    read -r -p "  Choose [1-4]: " A
-    echo ""
-    [ "${A:-4}" = "4" ] && return 0
-    case "${A}" in 1|2|3) ;; *) return 0 ;; esac
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-3"
+    local A="$CHOICE"
+    case "$A" in 1|2|3) ;; b) return 0 ;; *) invalid_choice; return 0 ;; esac
 
     read -r -p "  Database name (empty to cancel): " DB
     [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
@@ -1536,14 +1556,15 @@ menu_rpc() {
     echo "  1) Open RPC for domain(s)        everyone may call that tenant's RPC"
     echo "  2) Block RPC for domain(s)       back to the server-wide default"
     echo "  3) Server-wide default           block / allow addresses / allow everyone"
-    echo "  4) Back"
-    read -r -p "  Choose [1-4]: " A
-    echo ""
-    case "${A:-4}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-3"
+    case "$CHOICE" in
         1) menu_rpc_open ;;
         2) menu_rpc_close ;;
         3) menu_rpc_default ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
     esac
 }
 
@@ -1616,11 +1637,11 @@ menu_rpc_default() {
     echo "  1) Block for everyone (recommended)"
     echo "  2) Allow specific addresses only"
     echo "  3) Allow everyone"
-    echo "  4) Back"
-    read -r -p "  Choose [1-4]: " A
-    echo ""
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-3"
     local NEW a ADDRS=() GOOD=()
-    case "${A:-4}" in
+    case "$CHOICE" in
         1) NEW="" ;;
         2)
             echo "  IPv4 or IPv6 addresses, or CIDR ranges, space separated:"
@@ -1647,7 +1668,8 @@ menu_rpc_default() {
             [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
             NEW="all"
             ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
     esac
     rpc_apply NGINX_RPC_ALLOW "$NEW"
 }
@@ -1672,15 +1694,16 @@ menu_advanced() {
     echo "  2) Databases — backup / restore / delete / duplicate"
     echo "  3) Web database manager — enable/disable"
     echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"
-    echo "  5) Back"
-    read -r -p "  Choose [1-5]: " A
-    echo ""
-    case "${A:-5}" in
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-4"
+    case "$CHOICE" in
         1) menu_service ;;
         2) menu_db_admin ;;
         3) menu_db_manager ;;
         4) menu_rpc ;;
-        *) return 0 ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
     esac
 }
 
@@ -1704,11 +1727,10 @@ while true; do
     echo "  9) Security check"
     echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
     echo " 11) Advanced — service, databases, database manager, RPC endpoints"
-    echo "  0) Exit"
+    echo "  x) Exit"
     echo ""
-    read -r -p "Choose [0-11]: " CH
-    echo ""
-    case "${CH:-}" in
+    ask_choice "1-11" "x"
+    case "$CHOICE" in
         1)  menu_status ;;
         2)  menu_domains ;;
         3)  menu_ssl ;;
@@ -1720,7 +1742,8 @@ while true; do
         9)  menu_security ;;
         10) menu_upload_limit ;;
         11) menu_advanced ;;
-        0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
-        *)  echo -e "${YELLOW}!${NC} Invalid choice — pick 0-11." ;;
+        0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;   # old habit, still works
+        b)  ;;
+        *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
     esac
 done
