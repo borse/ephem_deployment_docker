@@ -930,7 +930,7 @@ database-manager lock, and the RPC endpoint switch.)
 | Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
 | Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
 | Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
-| Block / open the RPC endpoints (`/xmlrpc`, `/jsonrpc`) | `bash manage.sh` → 11 → 4 (sets `NGINX_RPC_ALLOW` in `.env`) |
+| Open / block the RPC endpoints (`/xmlrpc`, `/jsonrpc`), per domain or server-wide | `bash manage.sh` → 11 → 4 (sets `NGINX_RPC_OPEN` / `NGINX_RPC_ALLOW` in `.env`) |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
@@ -1107,10 +1107,11 @@ ephem-deploy/
   servers installed before August 2026, `setup.sh` detects it and points
   to the one-time `scripts/migrate-db-cluster.sh` migration)
 - `/xmlrpc` and `/jsonrpc` are blocked at NGINX — they are the main
-  credential-stuffing target and the web client doesn't use them. An
-  integration server that must call in is allow-listed by address with
-  `bash manage.sh` → 11 → 4 (`NGINX_RPC_ALLOW` in `.env`); never by editing
-  `nginx/active.conf`, which is regenerated
+  credential-stuffing target and the web client doesn't use them. When an
+  integration or import has to call in, open them for that tenant only
+  (`bash manage.sh` → 11 → 4, per domain) or allow-list the caller's
+  address server-wide; both live in `.env` (`NGINX_RPC_OPEN`,
+  `NGINX_RPC_ALLOW`), never in `nginx/active.conf`, which is regenerated
 - Login attempts are throttled (POST-only, so normal page loads are never
   limited), and the database manager page is rate-limited separately
 - All traffic encrypted with HTTPS (TLS 1.2+), security headers on every

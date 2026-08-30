@@ -20,8 +20,9 @@
 # Server-wide nginx settings live in .env and are rendered into every server
 # block, so they survive adding or removing a domain:
 #
-#   NGINX_MAX_UPLOAD   client_max_body_size            (max_upload)
-#   NGINX_RPC_ALLOW    who may call /xmlrpc, /jsonrpc  (rpc_allow)
+#   NGINX_MAX_UPLOAD   client_max_body_size                        (max_upload)
+#   NGINX_RPC_ALLOW    who may call /xmlrpc, /jsonrpc, server-wide  (rpc_allow)
+#   NGINX_RPC_OPEN     domains whose RPC is open to everyone        (rpc_open_domains)
 #
 # Usage:  source "$(dirname "$0")/nginx-lib.sh"
 # ──────────────────────────────────────────────
@@ -193,15 +194,22 @@ ssl_email() {
 #
 # They take a password straight from the request: no login page, no CSRF, no
 # second factor, and the web client never uses them. So they are blocked at
-# nginx unless NGINX_RPC_ALLOW in .env says otherwise:
+# nginx unless .env says otherwise, at two levels:
 #
-#   (empty)                       deny all                    ← default
-#   203.0.113.55 10.20.0.0/16     allow those, deny the rest  (space or comma separated)
-#   all                           open to everyone
+#   NGINX_RPC_ALLOW   server-wide default, every domain
+#     (empty)                       deny all                    ← default
+#     203.0.113.55 10.20.0.0/16     allow those, deny the rest  (space or comma separated)
+#     all                           open to everyone
+#
+#   NGINX_RPC_OPEN    domains whose RPC is open to everyone, whatever the
+#                     default says (one server block per domain, so it can
+#                     be decided per tenant; HTTP-only servers have one block
+#                     for every hostname and only the default applies)
+#     training.pheoc.com simex.pheoc.com
 #
 # Changed from: bash manage.sh → 11) Advanced → 4) RPC endpoints. Every
-# entry ends up inside the nginx config, so only an address or a CIDR range
-# gets through; anything else is refused loudly and left out.
+# entry ends up inside the nginx config, so only an address, a CIDR range or
+# a domain name gets through; anything else is refused loudly and left out.
 
 valid_rpc_addr() {  # IPv4 (octets 0-255, /0-32) or IPv6 (/0-128), prefix optional
     local o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -223,13 +231,62 @@ rpc_allow() {  # → "" (blocked), "all", or the validated address list
     printf '%s' "${good[*]:-}"
 }
 
-rpc_state_text() {  # one line for menus and the security check
+rpc_state_text() {  # the server-wide default, one line for menus and the security check
     local v; v="$(rpc_allow 2>/dev/null)"
     case "$v" in
         "")  printf 'blocked for everyone (default)' ;;
         all) printf 'OPEN to everyone' ;;
         *)   printf 'open to %s only' "$v" ;;
     esac
+}
+
+rpc_open_domains() {  # → the validated domain list from NGINX_RPC_OPEN
+    local raw d good=() bad=()
+    raw=$(grep "^NGINX_RPC_OPEN=" "$EPHEM_ROOT/.env" 2>/dev/null | cut -d'=' -f2- | tr ',' ' ' | xargs || true)
+    [ -z "$raw" ] && return 0
+    for d in $raw; do
+        if valid_domain "$d"; then
+            printf '%s\n' "${good[@]:-}" | grep -qx "$d" || good+=("$d")
+        else
+            bad+=("$d")
+        fi
+    done
+    [ ${#bad[@]} -gt 0 ] && printf 'nginx-lib: ignoring invalid NGINX_RPC_OPEN entries: %s (not a domain name)\n' "${bad[*]}" >&2
+    printf '%s' "${good[*]:-}"
+}
+
+rpc_domain_open() {  # rpc_domain_open DOMAIN → 0 when its RPC is open per domain
+    local d; for d in $(rpc_open_domains 2>/dev/null); do [ "$d" = "$1" ] && return 0; done
+    return 1
+}
+
+rpc_domain_state() {  # rpc_domain_state DOMAIN → one line
+    if rpc_domain_open "$1"; then printf 'OPEN to everyone (NGINX_RPC_OPEN)'; else rpc_state_text; fi
+}
+
+# Update or append KEY=VALUE in .env without sed -i, so it also works where
+# sed wants -i ''. The file is rewritten in place to keep its permissions.
+env_write_key() {  # env_write_key KEY VALUE
+    local f="$EPHEM_ROOT/.env" tmp
+    [ -f "$f" ] || return 1
+    tmp="$(mktemp)"
+    awk -v k="$1" -v v="$2" '
+        index($0, k "=") == 1 { print k "=" v; done = 1; next }
+        { print }
+        END { if (!done) print k "=" v }' "$f" > "$tmp" && cat "$tmp" > "$f"
+    rm -f "$tmp"
+}
+
+# Take domains out of NGINX_RPC_OPEN (remove-domain.sh calls this): a domain
+# that is added back later must not return with its RPC silently open.
+# Returns 0 when the list changed, 1 when there was nothing to drop.
+rpc_forget_domains() {  # rpc_forget_domains DOMAIN...
+    local d keep=() dropped=0
+    for d in $(rpc_open_domains 2>/dev/null); do
+        if printf '%s\n' "$@" | grep -qx "$d"; then dropped=1; else keep+=("$d"); fi
+    done
+    [ "$dropped" -eq 1 ] || return 1
+    env_write_key NGINX_RPC_OPEN "${keep[*]:-}"
 }
 
 # Does the live config carry an RPC block at all? Configs rendered before the
@@ -240,11 +297,19 @@ rpc_block_present() {
 }
 
 # The location block itself, indented for a server { } body. The single
-# source for the HTTPS renderer and the HTTP-only template alike.
-_render_rpc_block() {
-    local allow a
-    allow="$(rpc_allow)"
+# source for the HTTPS renderer (one call per domain) and the HTTP-only
+# template (no domain: the server-wide default alone).
+_render_rpc_block() {  # _render_rpc_block [DOMAIN]
+    local d="${1:-}" allow a
     echo '    location ~ ^/(xmlrpc|jsonrpc) {'
+    if [ -n "$d" ] && rpc_domain_open "$d"; then
+        echo "        # $d is listed in NGINX_RPC_OPEN (.env): every address may call in"
+        echo '        limit_req zone=ephem_limit burst=60 nodelay;'
+        echo '        proxy_pass http://odoo-backend;'
+        echo '    }'
+        return 0
+    fi
+    allow="$(rpc_allow)"
     case "$allow" in
         "")
             echo '        # Blocked (NGINX_RPC_ALLOW is empty in .env)'
@@ -328,9 +393,10 @@ server {
     # RPC endpoints: password auth with no login page and no CSRF — the
     # preferred credential-stuffing target. Odoo's own web client does not
     # use them, so blocking them does not affect normal browser use. Who may
-    # call in is NGINX_RPC_ALLOW in .env (bash manage.sh → Advanced → RPC);
+    # call in is decided in .env, per domain (NGINX_RPC_OPEN) or server-wide
+    # (NGINX_RPC_ALLOW), from bash manage.sh → Advanced → RPC endpoints;
     # a hand edit here is lost on the next re-render.
-$(_render_rpc_block)
+$(_render_rpc_block "$d")
 
     # Slow down repeated login attempts (POST-only zone above)
     location ~ ^/(web/login|web/session/authenticate) {
@@ -382,7 +448,8 @@ render_active_conf() {  # render_active_conf DOMAIN...
 # Written by scripts/ssl-setup.sh, add-domain.sh, remove-domain.sh,
 # split-certs.sh and manage.sh (via scripts/nginx-lib.sh). Any manual change
 # is lost the next time a domain is added or removed or a setting changes;
-# the settings themselves live in .env (NGINX_MAX_UPLOAD, NGINX_RPC_ALLOW).
+# the settings themselves live in .env (NGINX_MAX_UPLOAD, NGINX_RPC_ALLOW,
+# NGINX_RPC_OPEN).
 #
 # Generated: $(date '+%Y-%m-%d %H:%M:%S')
 # Domains:   ${domains[*]}

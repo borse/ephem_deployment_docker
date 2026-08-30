@@ -1006,6 +1006,9 @@ menu_security() {
     else
         echo -e "  ${GREEN}✓${NC} RPC endpoints open to $RPC only"
     fi
+    local RPC_OPEN; RPC_OPEN=$(rpc_open_domains 2>/dev/null)
+    [ -n "$RPC_OPEN" ] && \
+        echo -e "  ${YELLOW}!${NC} RPC OPEN to everyone on: $RPC_OPEN (per domain, block again via Advanced → 4)"
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
         || echo -e "  ${YELLOW}!${NC} ODOO_DBFILTER not set — required once you have several databases"
@@ -1457,9 +1460,11 @@ offer_odoo_restart() {
 # ── 13.4) RPC endpoints ───────────────────────
 # /xmlrpc and /jsonrpc take a password straight from the request: no login
 # page, no CSRF, no second factor, and the web client never uses them. They
-# stay blocked at nginx unless a system has to call in. The setting is
-# NGINX_RPC_ALLOW in .env and is rendered into every server block, so it
-# survives adding or removing domains (a hand edit to active.conf does not).
+# stay blocked at nginx unless a system has to call in. Two settings in
+# .env, both rendered into the server blocks so they survive adding or
+# removing domains (a hand edit to active.conf does not):
+#   NGINX_RPC_OPEN    domains whose RPC is open to everyone (per tenant)
+#   NGINX_RPC_ALLOW   the server-wide default for every other domain
 menu_rpc() {
     echo -e "${CYAN}${BOLD}RPC endpoints${NC} (/xmlrpc, /jsonrpc)"
     echo ""
@@ -1467,7 +1472,21 @@ menu_rpc() {
         echo -e "  ${RED}✗${NC} nginx/active.conf not found, run setup.sh first."
         return 1
     fi
-    echo "  Current setting: $(rpc_state_text)"
+    local d OPEN; OPEN=$(rpc_open_domains 2>/dev/null)
+    if ssl_is_configured; then
+        echo -e "  ${BOLD}Per domain:${NC}"
+        while IFS= read -r d; do
+            [ -n "$d" ] && printf '    %-40s %s\n' "$d" "$(rpc_domain_state "$d")"
+        done < <(active_domains)
+        for d in $OPEN; do
+            active_domains | grep -qx "$d" || printf '    %-40s %s\n' "$d" "in NGINX_RPC_OPEN but not served here"
+        done
+    else
+        echo "  HTTP-only server: one server block answers for every hostname, so"
+        echo "  only the server-wide setting applies."
+    fi
+    echo ""
+    echo "  Server-wide default: $(rpc_state_text)"
     if ! rpc_block_present; then
         echo -e "  ${YELLOW}!${NC} The live nginx config has no RPC block yet (it predates the"
         echo "     hardening), so nothing is blocked right now. Any choice below"
@@ -1477,9 +1496,86 @@ menu_rpc() {
     echo "  Odoo's own web client never calls these, so blocking them costs"
     echo "  browser users nothing. They accept a password straight from the"
     echo "  request (no login page, no CSRF, no second factor), which makes"
-    echo "  them the first target for password guessing. Open them only for a"
-    echo "  system that has to call in (an integration server, a data"
-    echo "  pipeline), and only to its address."
+    echo "  them the first target for password guessing. Open a domain only"
+    echo "  while something has to call in, and block it again afterwards."
+    echo ""
+    echo "  1) Open RPC for domain(s)        everyone may call that tenant's RPC"
+    echo "  2) Block RPC for domain(s)       back to the server-wide default"
+    echo "  3) Server-wide default           block / allow addresses / allow everyone"
+    echo "  4) Back"
+    read -r -p "  Choose [1-4]: " A
+    echo ""
+    case "${A:-4}" in
+        1) menu_rpc_open ;;
+        2) menu_rpc_close ;;
+        3) menu_rpc_default ;;
+        *) return 0 ;;
+    esac
+}
+
+menu_rpc_open() {
+    if ! ssl_is_configured; then
+        echo -e "  ${RED}✗${NC} Per-domain RPC needs HTTPS (one server block per domain)."
+        echo "     On this HTTP-only server use 3) Server-wide default."
+        return 1
+    fi
+    local d SERVED=() NEW=() ADDED=()
+    mapfile -t SERVED < <(active_domains)
+    for d in $(rpc_open_domains 2>/dev/null); do NEW+=("$d"); done
+    echo "  Served now:"
+    printf '    • %s\n' "${SERVED[@]}"
+    echo ""
+    echo -e "  ${YELLOW}!${NC} On an open domain every address on the internet can try passwords"
+    echo "     against that tenant's /xmlrpc/2/common, throttled only by the"
+    echo "     general rate limit. Block it again when the job is done."
+    echo ""
+    read -r -a DOMS -p "  Domain(s) to open, space separated (empty to cancel): "
+    [ "${#DOMS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+    for d in "${DOMS[@]}"; do
+        d="${d%,}"; [ -z "$d" ] && continue
+        if ! printf '%s\n' "${SERVED[@]}" | grep -qx "$d"; then
+            echo -e "  ${RED}✗${NC} $d is not served here, skipping"; continue
+        fi
+        if printf '%s\n' "${NEW[@]:-}" | grep -qx "$d"; then
+            echo -e "  ${YELLOW}!${NC} $d is already open"; continue
+        fi
+        NEW+=("$d"); ADDED+=("$d")
+    done
+    [ "${#ADDED[@]}" -eq 0 ] && { echo "  Nothing to open."; return 0; }
+    rpc_apply NGINX_RPC_OPEN "${NEW[*]}"
+}
+
+menu_rpc_close() {
+    local d OPEN=() KEEP=() DROPPED=()
+    for d in $(rpc_open_domains 2>/dev/null); do OPEN+=("$d"); done
+    if [ "${#OPEN[@]}" -eq 0 ]; then
+        echo "  No domain is open per domain; the server-wide default applies everywhere."
+        return 0
+    fi
+    echo "  Open per domain now:"
+    printf '    • %s\n' "${OPEN[@]}"
+    echo ""
+    read -r -a DOMS -p "  Domain(s) to block again, or 'all' (empty to cancel): "
+    [ "${#DOMS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+    if [ "${DOMS[0]}" = all ]; then
+        DROPPED=("${OPEN[@]}")
+    else
+        for d in "${OPEN[@]}"; do
+            if printf '%s\n' "${DOMS[@]}" | sed 's/,$//' | grep -qx "$d"; then DROPPED+=("$d"); else KEEP+=("$d"); fi
+        done
+        for d in "${DOMS[@]}"; do
+            d="${d%,}"; [ -n "$d" ] && ! printf '%s\n' "${OPEN[@]}" | grep -qx "$d" \
+                && echo -e "  ${YELLOW}!${NC} $d is not open per domain, skipping"
+        done
+    fi
+    [ "${#DROPPED[@]}" -eq 0 ] && { echo "  Nothing to change."; return 0; }
+    rpc_apply NGINX_RPC_OPEN "${KEEP[*]:-}"
+}
+
+menu_rpc_default() {
+    echo -e "${BOLD}Server-wide default${NC} (every domain not listed as open)"
+    echo ""
+    echo "  Current: $(rpc_state_text)"
     echo ""
     echo "  1) Block for everyone (recommended)"
     echo "  2) Allow specific addresses only"
@@ -1509,29 +1605,33 @@ menu_rpc() {
             ;;
         3)
             echo -e "  ${YELLOW}!${NC} Every address on the internet can then try passwords against"
-            echo "     /xmlrpc/2/common, throttled only by the general rate limit."
-            read -r -p "  Open the RPC endpoints to everyone? [y/N]: " C
+            echo "     /xmlrpc/2/common on every domain, throttled only by the general"
+            echo "     rate limit. To open one tenant, use 1) Open RPC for domain(s)."
+            read -r -p "  Open the RPC endpoints to everyone, on every domain? [y/N]: " C
             [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
             NEW="all"
             ;;
         *) return 0 ;;
     esac
-    rpc_apply "$NEW"
+    rpc_apply NGINX_RPC_ALLOW "$NEW"
 }
 
-# Persist the setting, re-render nginx from it and reload. nginx_apply rolls
-# the config back if nginx rejects it; .env is rolled back with it, so the
-# two never disagree about what is in force.
-rpc_apply() {  # rpc_apply VALUE
-    local PREV; PREV=$(env_get NGINX_RPC_ALLOW)
-    set_env_key NGINX_RPC_ALLOW "$1"
-    echo -e "  ${CYAN}→${NC} NGINX_RPC_ALLOW=$1  (.env), re-rendering nginx/active.conf"
+# Persist one setting, re-render nginx from .env and reload. nginx_apply
+# rolls the config back if nginx rejects it; .env is rolled back with it, so
+# the two never disagree about what is in force.
+rpc_apply() {  # rpc_apply KEY VALUE
+    local KEY="$1" VAL="$2" PREV OPEN
+    PREV=$(env_get "$KEY")
+    set_env_key "$KEY" "$VAL"
+    echo -e "  ${CYAN}→${NC} $KEY=$VAL  (.env), re-rendering nginx/active.conf"
     if rerender_active_conf; then
-        echo -e "  ${GREEN}✓${NC} RPC endpoints: $(rpc_state_text)"
+        echo -e "  ${GREEN}✓${NC} Server-wide default: $(rpc_state_text)"
+        OPEN=$(rpc_open_domains 2>/dev/null)
+        [ -n "$OPEN" ] && echo -e "  ${GREEN}✓${NC} Open per domain: $OPEN"
         return 0
     fi
-    set_env_key NGINX_RPC_ALLOW "$PREV"
-    echo -e "  ${RED}✗${NC} Not applied. .env is back to NGINX_RPC_ALLOW=$PREV and nginx"
+    set_env_key "$KEY" "$PREV"
+    echo -e "  ${RED}✗${NC} Not applied. .env is back to $KEY=$PREV and nginx"
     echo "     keeps serving what it served before."
     return 1
 }

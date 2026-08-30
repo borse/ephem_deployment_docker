@@ -49,33 +49,59 @@ nginx_t() {  # nginx_t FILE
 }
 
 echo; echo "Rendered configs"
-run_state() {  # run_state LABEL ENVVALUE EXPECTED_DIRECTIVES...
-    local label="$1" state="$2"; shift 2
-    local want="$*" got f out n nwant
-    printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=%s\n' "$state" > "$T/.env"
-    for kind in http https; do
-        if [ "$kind" = http ]; then render_http_only_conf >/dev/null
-        else render_active_conf a.example.org b.example.org >/dev/null; fi \
-            || { bad "$label / $kind: render failed"; continue; }
-        f="$T/out/${kind}_${label}.conf"; cp "$NGINX_ACTIVE" "$f"
-        # One RPC block per server block: 1 on the HTTP-only config, one per
-        # domain on HTTPS. Compare the first one; they are all rendered alike.
-        n="$(grep -c 'location ~ ^/(xmlrpc|jsonrpc)' "$f")"; nwant=1; [ "$kind" = https ] && nwant=2
-        [ "$n" -eq "$nwant" ] && ok "$label / $kind: $n RPC block(s)" || bad "$label / $kind: $n RPC block(s), wanted $nwant"
-        got="$(awk '/location ~ \^\/\(xmlrpc\|jsonrpc\)/ { inb = 1 } inb { print } inb && /^    }/ { exit }' "$f" \
-               | grep -E '^\s*(allow|deny)' | xargs)"
-        [ "$got" = "$want" ] && ok "$label / $kind: block renders '$want'" \
-                             || bad "$label / $kind: block renders '$got', wanted '$want'"
-        grep -q 'client_max_body_size 250M;' "$f" && ok "$label / $kind: NGINX_MAX_UPLOAD applied" \
-                                                  || bad "$label / $kind: NGINX_MAX_UPLOAD lost"
-        if out="$(nginx_t "$f")"; then ok "$label / $kind: nginx -t"
-        else bad "$label / $kind: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; fi
-    done
+block_of() {  # block_of FILE DOMAIN|"" → allow/deny lines of that server block's RPC location
+    awk -v d="$2" '
+        /^server[[:space:]]*\{/ { hit = (d == "") }
+        d != "" && $0 ~ ("server_name[[:space:]]+" d ";") { hit = 1 }
+        hit && /location ~ \^\/\(xmlrpc\|jsonrpc\)/ { inb = 1 }
+        inb { print }
+        inb && /^    }/ { exit }' "$1" | grep -E '^\s*(allow|deny)' | xargs
 }
-run_state blocked   ""                                        "deny all;"
-run_state allowlist "203.0.113.55, 10.20.0.0/16 2001:db8::/32" "allow 203.0.113.55; allow 10.20.0.0/16; allow 2001:db8::/32; deny all;"
-run_state everyone  "all"                                     ""
-run_state invalid   "203.0.113.55 bogus;evil 1.2.3"           "allow 203.0.113.55; deny all;"
+run_case() {  # run_case LABEL ALLOW OPEN WANT_HTTP WANT_A WANT_B
+    local label="$1" allow="$2" open="$3" want_http="$4" want_a="$5" want_b="$6" f got n
+    printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=%s\nNGINX_RPC_OPEN=%s\n' "$allow" "$open" > "$T/.env"
+    # HTTP-only: one block, the server-wide default only
+    if render_http_only_conf >/dev/null; then
+        f="$T/out/http_${label}.conf"; cp "$NGINX_ACTIVE" "$f"
+        n="$(grep -c 'location ~ ^/(xmlrpc|jsonrpc)' "$f")"
+        [ "$n" -eq 1 ] && ok "$label / http: 1 RPC block" || bad "$label / http: $n RPC blocks"
+        got="$(block_of "$f" "")"
+        [ "$got" = "$want_http" ] && ok "$label / http: '$want_http'" || bad "$label / http: '$got', wanted '$want_http'"
+        grep -q 'client_max_body_size 250M;' "$f" && ok "$label / http: upload limit kept" || bad "$label / http: upload limit lost"
+        out="$(nginx_t "$f")" && ok "$label / http: nginx -t" || { bad "$label / http: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
+    else bad "$label / http: render failed"; fi
+    # HTTPS: one block per domain, each decided on its own
+    if render_active_conf a.example.org b.example.org >/dev/null; then
+        f="$T/out/https_${label}.conf"; cp "$NGINX_ACTIVE" "$f"
+        n="$(grep -c 'location ~ ^/(xmlrpc|jsonrpc)' "$f")"
+        [ "$n" -eq 2 ] && ok "$label / https: 2 RPC blocks" || bad "$label / https: $n RPC blocks"
+        got="$(block_of "$f" a.example.org)"
+        [ "$got" = "$want_a" ] && ok "$label / https a: '$want_a'" || bad "$label / https a: '$got', wanted '$want_a'"
+        got="$(block_of "$f" b.example.org)"
+        [ "$got" = "$want_b" ] && ok "$label / https b: '$want_b'" || bad "$label / https b: '$got', wanted '$want_b'"
+        grep -q 'client_max_body_size 250M;' "$f" && ok "$label / https: upload limit kept" || bad "$label / https: upload limit lost"
+        out="$(nginx_t "$f")" && ok "$label / https: nginx -t" || { bad "$label / https: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
+    else bad "$label / https: render failed"; fi
+}
+#        label       ALLOW                                       OPEN                             http           a (open?)      b
+run_case blocked     ""                                          ""                               "deny all;"    "deny all;"    "deny all;"
+run_case allowlist   "203.0.113.55, 10.20.0.0/16 2001:db8::/32"  ""                               "allow 203.0.113.55; allow 10.20.0.0/16; allow 2001:db8::/32; deny all;" \
+                                                                                                  "allow 203.0.113.55; allow 10.20.0.0/16; allow 2001:db8::/32; deny all;" \
+                                                                                                  "allow 203.0.113.55; allow 10.20.0.0/16; allow 2001:db8::/32; deny all;"
+run_case everyone    "all"                                       ""                               ""             ""             ""
+run_case invalid     "203.0.113.55 bogus;evil 1.2.3"             ""                               "allow 203.0.113.55; deny all;" "allow 203.0.113.55; deny all;" "allow 203.0.113.55; deny all;"
+run_case domain_a    ""                                          "a.example.org"                  "deny all;"    ""             "deny all;"
+run_case domain_mix  "203.0.113.55"                              "b.example.org, not..a.domain"   "allow 203.0.113.55; deny all;" "allow 203.0.113.55; deny all;" ""
+run_case domain_both ""                                          "a.example.org b.example.org"    "deny all;"    ""             ""
+
+echo; echo ".env editing"
+printf 'FOO=1\nNGINX_RPC_OPEN=a.example.org b.example.org\nBAR=2\n' > "$T/.env"
+rpc_forget_domains b.example.org && [ "$(grep -c . "$T/.env")" -eq 3 ] && [ "$(rpc_open_domains)" = "a.example.org" ] \
+    && ok "rpc_forget_domains drops one, keeps the rest and the other keys" || bad "rpc_forget_domains: $(cat "$T/.env" | xargs)"
+rpc_forget_domains c.example.org && bad "rpc_forget_domains claims a change for an unlisted domain" || ok "rpc_forget_domains: unlisted domain is a no-op"
+printf 'FOO=1\n' > "$T/.env"
+env_write_key NGINX_RPC_OPEN "x.example.org" && [ "$(grep -c . "$T/.env")" -eq 2 ] && [ "$(rpc_open_domains)" = "x.example.org" ] \
+    && ok "env_write_key appends a missing key" || bad "env_write_key append: $(cat "$T/.env" | xargs)"
 
 echo; echo "Template itself"
 out="$(nginx_t "$REPO/nginx/default.conf")" && ok "nginx/default.conf: nginx -t" || { bad "nginx/default.conf: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }

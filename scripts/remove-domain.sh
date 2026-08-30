@@ -172,6 +172,13 @@ for d in "${REMOVE[@]}"; do
     certs_refresh
 done
 
+# ── Step 4b: per-domain RPC entries ──────────
+# A domain added back later must not return with its RPC silently open.
+if rpc_forget_domains "${REMOVE[@]}"; then
+    echo ""
+    echo -e "  ${GREEN}✓${NC} dropped from NGINX_RPC_OPEN in .env (RPC no longer open per domain)"
+fi
+
 # ── Step 5: what is left behind ──────────────
 echo ""
 echo "========================================="
