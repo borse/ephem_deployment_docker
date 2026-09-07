@@ -26,6 +26,29 @@ get_server_ip() {
     printf '%s\n' "$ip"
 }
 
+# Developer mode: make sure .env says where the dev Odoo ports listen.
+# 0.0.0.0 (every interface) by default so a phone or a colleague on the LAN
+# can open the instance; a developer who wants it local sets 127.0.0.1.
+ensure_dev_bind_host() {
+    [ -f .env ] || return 0
+    if ! grep -q "^DEV_BIND_HOST=" .env; then
+        printf '\n# Developer mode: where the dev Odoo ports listen. 0.0.0.0 = every interface\n# (phones and colleagues on the LAN can open it), 127.0.0.1 = this machine only.\nDEV_BIND_HOST=0.0.0.0\n' >> .env
+        echo -e "  ${GREEN}✓${NC} DEV_BIND_HOST=0.0.0.0 added to .env (dev ports open on the LAN; set 127.0.0.1 to keep them local)"
+    fi
+}
+
+# The address other devices on the LAN use. Under WSL2 the ports are published
+# by Docker Desktop on the Windows host, so its adapter address is the right one.
+get_lan_ip() {
+    local ip=""
+    if command -v ipconfig.exe >/dev/null 2>&1; then
+        ip=$(ipconfig.exe 2>/dev/null | tr -d '\r' | awk '/IPv4/ {print $NF}' \
+             | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1) || true
+    fi
+    [ -n "$ip" ] || ip=$(get_server_ip)
+    printf '%s\n' "$ip"
+}
+
 # True when running inside WSL (Docker is Docker Desktop on the Windows host).
 is_wsl() {
     grep -qiE "microsoft|wsl" /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
@@ -1040,6 +1063,7 @@ if [ "$MODE" = "developer" ]; then
         echo "so they pick up POSTGRES_PASSWORD changes)…"
         echo ""
         # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
+        ensure_dev_bind_host
         bash scripts/dev-instances.sh up $INSTANCE_NAMES
 
         # ── Post-check: catch the auth error if any instance is still broken ──
@@ -1238,13 +1262,13 @@ services:
       - odoo-data:/var/lib/odoo
       - ./custom-addons:/mnt/extra-addons:rw
       - ./odoo.conf:/etc/odoo/odoo.conf
-    # Loopback only: Docker-published ports bypass ufw, so "8069:8069" would
-    # put raw Odoo (dev config, open db manager) on the network even with a
-    # firewall. localhost is all a dev setup needs — WSL2 forwards it to
-    # Windows automatically.
+    # Every interface by default (DEV_BIND_HOST in .env), so a phone or a
+    # colleague on the same LAN can open the instance. Docker-published ports
+    # bypass ufw, so this is raw Odoo (dev config, open db manager) on the
+    # network: set DEV_BIND_HOST=127.0.0.1 to keep it on this machine only.
     ports:
-      - "127.0.0.1:8069:8069"
-      - "127.0.0.1:8072:8072"
+      - "${DEV_BIND_HOST:-0.0.0.0}:8069:8069"
+      - "${DEV_BIND_HOST:-0.0.0.0}:8072:8072"
 
   # Nginx is not needed for local development — Odoo is exposed directly above.
   # Disabling it avoids conflicts with port 80 already in use on the machine.
@@ -1514,6 +1538,7 @@ if [ -f ".env" ]; then
             fi
         fi
         echo -e "${GREEN}✓${NC} Odoo master password pinned to local dev default: ${BOLD}$ADMIN_PASS${NC}"
+        ensure_dev_bind_host
     elif [ -z "$ADMIN_PASS" ] || [ "$ADMIN_PASS" = "CHANGE_ME" ]; then
         ADMIN_PASS=$(openssl rand -base64 16 2>/dev/null || echo "ephem-$(date +%s)")
         echo -e "${YELLOW}!${NC} Generated admin password: $ADMIN_PASS  (save this!)"

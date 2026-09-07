@@ -47,6 +47,20 @@ INSTANCES_FILE=".dev-instances"
 # random one you'd have to look up every time Odoo asks for it.
 DEV_ADMIN_PASSWORD="9090"
 
+
+# The address a phone or a colleague on the LAN uses to reach an instance.
+# Under WSL2 Docker Desktop publishes the ports on the Windows host, so the
+# Windows adapter address is the one that counts, not the WSL one.
+lan_ip() {
+    local ip=""
+    if command -v ipconfig.exe >/dev/null 2>&1; then
+        ip=$(ipconfig.exe 2>/dev/null | tr -d '\r' | awk '/IPv4/ {print $NF}' \
+             | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1) || true
+    fi
+    [ -n "$ip" ] || ip=$(hostname -I 2>/dev/null | awk '{print $1}') || true
+    printf '%s' "$ip"
+}
+
 read_admin_pass() {
     local p=""
     [ -f .env ] && p=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs || true)
@@ -141,6 +155,7 @@ cmd_up() {
 
         local web=$(( WEB_BASE + STEP * i )) long=$(( LONG_BASE + STEP * i ))
         echo -e "${BOLD}• instance '$name'${NC} → http://localhost:$web  (db: ephem_$name)"
+        [ -n "$(lan_ip)" ] && echo "    on the LAN: http://$(lan_ip):$web"
         ensure_addons "$name" "$branch"
         write_conf "$name" "$admin"
 
@@ -164,11 +179,12 @@ cmd_up() {
       - ./odoo-$name.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal
-    # Loopback only — Docker-published ports bypass ufw. localhost is all
-    # dev needs; WSL2 forwards it to Windows automatically.
+    # Every interface by default (DEV_BIND_HOST in .env), so a phone or a
+    # colleague on the LAN can open the instance. Docker-published ports
+    # bypass ufw: set DEV_BIND_HOST=127.0.0.1 to keep it on this machine.
     ports:
-      - \"127.0.0.1:$web:8069\"
-      - \"127.0.0.1:$long:8072\"
+      - \"\${DEV_BIND_HOST:-0.0.0.0}:$web:8069\"
+      - \"\${DEV_BIND_HOST:-0.0.0.0}:$long:8072\"
 "
         volumes+="  odoo-data-$name:
 "
@@ -232,6 +248,7 @@ cmd_status() {
         while IFS= read -r name; do
             [ -z "$name" ] && continue
             echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: odca$name/)"
+            [ -n "$(lan_ip)" ] && echo "      on the LAN: http://$(lan_ip):$(( WEB_BASE + STEP * i ))   (DEV_BIND_HOST in .env)"
             i=$(( i + 1 ))
         done < "$INSTANCES_FILE"
         echo ""

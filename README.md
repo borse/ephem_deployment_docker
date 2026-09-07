@@ -484,6 +484,8 @@ The menu hands off to `scripts/dev-instances.sh`, which spins up named instances
 | `2` | `http://localhost:8020` | `ephem_2` | `odca2/` |
 | `3` | `http://localhost:8030` | `ephem_3` | `odca3/` |
 
+The same ports are open on the LAN by default, so a phone or a colleague on the same network can use `http://<this machine's LAN IP>:8030` (on WSL2 that is the Windows adapter address, shown by `ipconfig`; allow the port in Windows Defender Firewall if the first connection is blocked). Set `DEV_BIND_HOST=127.0.0.1` in `.env` and rerun `up` to keep the instances on this machine only.
+
 Pin each instance to a branch when you start it:
 
 ```bash
@@ -1120,7 +1122,7 @@ ephem-deploy/
 - Containers run on a private Docker network with dropped capabilities and
   `no-new-privileges`
 
-**Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode binds Odoo to `127.0.0.1` only.
+**Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode listens on every interface by default (`DEV_BIND_HOST=0.0.0.0` in `.env`) so phones and colleagues on the LAN can open it; set it to `127.0.0.1` for a local only setup.
 
 **Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes.
 
