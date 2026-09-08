@@ -311,6 +311,17 @@ ssh -T git@github.com
 - **`Permission denied (publickey)`** — the key isn't on your GitHub account (redo Step 3), or you're on Windows but generated the key outside WSL (regenerate it in the Ubuntu terminal).
 - **Authenticates as the wrong user, or "Repository not found" when cloning** — that account isn't a collaborator on `borse/ePHEM` yet. Send your GitHub username to the ePHEM team.
 - **Have several keys?** Make sure the right one is offered: `ssh-add ~/.ssh/id_ed25519` (start the agent first with `eval "$(ssh-agent -s)"`).
+- **Asked for the key's passphrase over and over** (every `git` command; the menus report "unreachable or slow" or "could not list") — the key has a passphrase and no ssh-agent holds it. `manage.sh` and `setup.sh` notice and offer to load it once per run. To keep it loaded across terminals on WSL or Linux, install keychain (`sudo apt install -y keychain`) and add one line to `~/.bashrc`:
+
+  ```bash
+  eval "$(keychain --eval --quiet id_ed25519)"
+  ```
+
+  It asks the passphrase once per boot and every new terminal reuses the same agent. Without keychain, the plain form asks once per terminal:
+
+  ```bash
+  [ -n "$SSH_AUTH_SOCK" ] || { eval "$(ssh-agent -s)" >/dev/null; ssh-add ~/.ssh/id_ed25519; }
+  ```
 
 ### Developer Pre-Flight Menu
 
@@ -344,6 +355,7 @@ Things worth knowing about the menu:
 - **8) Multi-instance dev** runs several Odoo servers side by side — see [Multi-Instance Dev](#multi-instance-dev--several-odoo-servers-side-by-side).
 - **9) Fetch & switch to a remote branch** is for the case where a teammate pushed a new branch upstream that your local `git branch -a` doesn't see yet — see [Switching to a New Remote Branch](#switching-to-a-new-remote-branch).
 - You can re-enter this menu any time by re-running `bash setup.sh` and choosing **3 → y**.
+- Day-to-day work (status, addons pull or branch switch, restart + logs, module updates, doctor, databases) has its own menu: `bash manage.sh`. See [The menu in developer mode](#the-menu-in-developer-mode).
 
 ### What the Script Sets Up
 
@@ -493,6 +505,7 @@ bash scripts/dev-instances.sh up 1:18_national_dev 2:16_national_dev 3
 bash scripts/dev-instances.sh status      # ports + URLs + health
 bash scripts/dev-instances.sh down        # stop (keep data)
 bash scripts/dev-instances.sh down -v     # stop + wipe DB / filestore
+bash manage.sh 2                          # everything else, per instance (see The menu in developer mode)
 ```
 
 In PyCharm, make **one Shell Script run config per instance** — `scripts/dev-logs.sh a`, `scripts/dev-logs.sh b`, `scripts/dev-logs.sh c` — for a dedicated green ▶ + colored log stream per server.
@@ -912,20 +925,58 @@ docker compose start odoo
 
 Run from inside the `ephem-deploy` folder.
 
-**On a production server, start with the menu — it wraps all of the below:**
+**Start with the menu — it wraps all of the below and adapts to the mode
+setup.sh left this checkout in (`EPHEM_MODE` in `.env`):**
 
 ```bash
 bash manage.sh
 ```
 
-(Status & health, add tenants/domains, SSL, app and addon updates, backups,
-security check, and an Advanced submenu holding the sharper tools: start/stop/
-restart, per-database backup / restore / delete / duplicate, the
-database-manager lock, and the RPC endpoint switch.)
+On a **server** it is the production menu: status & health, add tenants/domains,
+SSL, app and addon updates, backups, security check, and an Advanced submenu
+holding the sharper tools (start/stop/restart, per-database backup / restore /
+delete / duplicate, the database-manager lock, the RPC endpoint switch).
+
+### The menu in developer mode
+
+In demo, developer and multi-instance developer mode the same command shows a
+developer menu instead. Multi-instance mode works **per instance**:
+
+```bash
+bash manage.sh        # the instance you used last time (EPHEM_INSTANCE in .env)
+bash manage.sh 2      # pin odca2 / ephem_2 / :8020 for this run, and remember it
+```
+
+```
+ePHEM developer menu   developer, multi-instance
+  Instance 2: odca2 on 18_national_dev   http://localhost:8020   (running)
+
+  1) Status                        every instance: state, port, branch, uncommitted work
+  2) Switch instance
+  3) Addons (odca2)                pull, fetch & switch branch, git status
+  4) Restart instance 2 + follow the log      (scripts/dev-logs.sh 2)
+  5) Update or install modules                (scripts/dev-logs.sh 2 -u ...)
+  6) Stack                         start/stop this instance, recreate or stop the whole stack, clean up leftovers
+  7) Pull the latest app image and recreate
+  8) Doctor                        scan the log for known errors, including a container docker refuses to start
+  9) Databases                     backup / restore / delete / duplicate / create
+ 10) Back up everything now        (scripts/backup.sh)
+```
+
+Everything is scoped to the pinned instance: the addons folder is `odcaN/`, a
+module update runs against `ephem_N` through `odooN`'s container, and a
+snapshot of `ephem_N` takes the filestore from **that instance's data volume**
+(`odoo-data-N`), whichever instance is pinned. The production-only items
+(domains, SSL, RPC, upload limit, security check) are not shown.
+
+The mode itself is written by `setup.sh` at the end of every run (and by
+`scripts/dev-instances.sh up`), so re-running setup defaults to what the
+checkout already is. A checkout set up before `EPHEM_MODE` existed is
+recognised from its files, and the menu offers to record it.
 
 | What you want to do | Command |
 |---------------------|---------|
-| Open the production menu | `bash manage.sh` |
+| Open the menu (production or developer, by mode) | `bash manage.sh`, or `bash manage.sh 2` to pin instance 2 |
 | Start the system | `docker compose up -d` |
 | Stop the system | `docker compose down` |
 | Start / stop / restart Odoo | `bash manage.sh` → 11 → 1, or `docker compose restart odoo` |
@@ -945,7 +996,7 @@ database-manager lock, and the RPC endpoint switch.)
 | Create an empty database | `bash manage.sh` → 11 → 2 → 5 |
 | Duplicate a database | `bash manage.sh` → 11 → 2 → 4, or `bash scripts/duplicate-db.sh source target1 target2` |
 | Snapshot a tenant on a non-Docker VM | `bash scripts/vm-snapshot.sh` (on the VM) |
-| Update modules | `bash scripts/update-modules.sh` |
+| Update modules | `bash scripts/update-modules.sh` (multi-instance: `--instance 2`, acts on `ephem_2` with `odca2/`) |
 | Re-run setup | `bash setup.sh` |
 
 > Press `Ctrl+C` to stop watching logs.
@@ -1066,7 +1117,7 @@ ephem-deploy/
 ├── .env                            ← Your settings (never committed)
 ├── odoo.conf                       ← Odoo config (generated by setup.sh)
 ├── setup.sh                        ← Main setup script — run this for installs and updates
-├── manage.sh                       ← Production menu — day-to-day server management
+├── manage.sh                       ← Day-to-day menu: production items in server mode, developer items in dev modes
 │
 ├── nginx/
 │   ├── default.conf                ← HTTP-only template (in Git, never modified)
@@ -1084,6 +1135,7 @@ ephem-deploy/
 │   ├── remove-domain.sh            ← Stop serving domains, delete their certificates
 │   ├── split-certs.sh              ← Split one shared certificate into one per domain
 │   ├── nginx-lib.sh                ← Shared nginx/certificate helpers used by the above
+│   ├── stack-lib.sh                ← Shared mode/instance helpers: EPHEM_MODE, compose files, filestore volumes
 │   ├── duplicate-db.sh             ← Copy a database (for training environments)
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)

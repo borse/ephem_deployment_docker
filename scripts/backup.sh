@@ -22,6 +22,15 @@
 #   BACKUP_KEEP_DAYS=14
 #       Local retention.
 #
+# Works in every mode setup.sh leaves a checkout in (EPHEM_MODE in .env):
+# the database dump covers every database in the shared Postgres, and the
+# filestore archive is read straight off the data volume(s), so it is
+# complete whether Odoo is running or not and, in multi-instance developer
+# mode, gathers every instance's volume into the one archive.
+#
+# BACKUP_DIR=/some/dir bash scripts/backup.sh   writes somewhere else
+# (a test run, an external disk); retention then applies there.
+#
 # Restore an ENCRYPTED snapshot (needs the private key from your vault):
 #   age -d -i ephem-backup-key.txt backups/TIMESTAMP.tar.age | tar -x
 #   → yields the same DBNAME_TIMESTAMP.sql.gz / filestore_*.tar.gz files;
@@ -30,23 +39,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BACKUP_DIR="$SCRIPT_DIR/backups"
+BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/backups}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# `|| true`: a key absent from .env must yield "", not kill the script
-# (grep exits 1 on no match, which set -e would treat as fatal).
-env_get() { grep "^$1=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2- | xargs || true; }
+# Mode, compose files, data volumes: scripts/stack-lib.sh (env_get, compose,
+# filestore_archive, DB_USER). Absolute paths, so cron can run this.
+EPHEM_ROOT="$SCRIPT_DIR"
+# shellcheck source=stack-lib.sh
+source "$SCRIPT_DIR/scripts/stack-lib.sh"
+stack_init || { echo "[$TIMESTAMP] FATAL: $STACK_ERROR" >&2; exit 1; }
+
 AGE_RECIPIENT="$(env_get BACKUP_AGE_RECIPIENT)"
 PING_URL="$(env_get BACKUP_PING_URL)"
 RETENTION_DAYS="$(env_get BACKUP_KEEP_DAYS)"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
-DB_USER="$(env_get POSTGRES_USER)"
-DB_USER="${DB_USER:-odoo}"
-
-compose() { docker compose -f "$SCRIPT_DIR/docker-compose.yml" "$@"; }
 
 mkdir -p "$BACKUP_DIR"
-echo "[$TIMESTAMP] Starting backup..."
+echo "[$TIMESTAMP] Starting backup ($(ephem_mode_label)) into $BACKUP_DIR"
 
 if [ -n "$AGE_RECIPIENT" ]; then
     if ! command -v age >/dev/null 2>&1; then
@@ -82,29 +91,32 @@ for DB in $DATABASES; do
     echo "[$TIMESTAMP] Done: $DB"
 done
 
-# Backup filestore (attachments / uploaded documents). tar exit 1 means
-# "file changed while reading" — routine on a live system, not a failure.
-# Exit 2+ is a real error and must abort instead of being swallowed.
+# Backup filestore (attachments / uploaded documents), read off the data
+# volume(s) by scripts/stack-lib.sh's filestore_archive: one directory per
+# database at the top level, every instance's volume in multi-instance
+# developer mode. tar exit 1 means "file changed while reading", routine on
+# a live system, not a failure. Exit 3 means there is no filestore yet.
+# Anything else is a real error and must abort instead of being swallowed.
 echo "[$TIMESTAMP] Backing up filestore..."
-if compose exec -T odoo test -d /var/lib/odoo/.local/share/Odoo/filestore </dev/null 2>/dev/null; then
-    rc=0
-    compose exec -T odoo tar -czf - -C /var/lib/odoo/.local/share/Odoo/filestore . \
-        > "$DEST/filestore_${TIMESTAMP}.tar.gz" || rc=$?
-    if [ "$rc" -gt 1 ]; then
-        echo "[$TIMESTAMP] FATAL: filestore backup failed (tar exit $rc)" >&2
-        exit "$rc"
-    fi
-    [ "$rc" -eq 1 ] && echo "[$TIMESTAMP] Note: files changed while archiving (normal on a live system)"
-    echo "[$TIMESTAMP] Done: filestore"
+rc=0
+filestore_archive > "$DEST/filestore_${TIMESTAMP}.tar.gz" || rc=$?
+if [ "$rc" -eq 3 ]; then
+    rm -f "$DEST/filestore_${TIMESTAMP}.tar.gz"
+    echo "[$TIMESTAMP] Note: no filestore directory yet, skipping"
+elif [ "$rc" -gt 1 ]; then
+    echo "[$TIMESTAMP] FATAL: filestore backup failed (exit $rc)" >&2
+    exit "$rc"
 else
-    echo "[$TIMESTAMP] Note: no filestore directory yet — skipping"
+    [ "$rc" -eq 1 ] && echo "[$TIMESTAMP] Note: files changed while archiving (normal on a live system)"
+    echo "[$TIMESTAMP] Done: filestore ($(du -h "$DEST/filestore_${TIMESTAMP}.tar.gz" | cut -f1))"
 fi
 
 # Config needed to rebuild this server. Bundled only into ENCRYPTED
 # snapshots, because .env and odoo.conf contain passwords.
 if [ -n "$AGE_RECIPIENT" ]; then
     CONF_FILES=()
-    for f in .env odoo.conf docker-compose.yml nginx/active.conf nginx/default.conf; do
+    for f in .env odoo.conf odoo-*.conf docker-compose.yml docker-compose.override.yml \
+             docker-compose.dev-multi.yml .dev-instances nginx/active.conf nginx/default.conf; do
         [ -f "$SCRIPT_DIR/$f" ] && CONF_FILES+=("$f")
     done
     tar -czf "$DEST/config_${TIMESTAMP}.tar.gz" -C "$SCRIPT_DIR" "${CONF_FILES[@]}"

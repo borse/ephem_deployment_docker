@@ -1,13 +1,18 @@
 #!/bin/bash
 # ──────────────────────────────────────────────
-# ePHEM Production Menu
-# Day-to-day management of an installed server: tenants, SSL, updates,
-# backups, health. Run from the repo directory:
+# ePHEM Menu
+# Day-to-day management of an installed checkout, in whatever mode setup.sh
+# left it (EPHEM_MODE in .env, see scripts/stack-lib.sh):
 #
-#     bash manage.sh
+#   server            production menu: tenants, SSL, updates, backups, health
+#   demo, dev         developer menu: addons, restart + logs, modules, doctor
+#   dev-multi         the developer menu per instance (odca1, odca2, ...)
 #
-# Everything here wraps the scripts/ tools and docker compose — each menu
-# item prints the commands it runs, so this doubles as a cheat sheet.
+#     bash manage.sh              # dev-multi: the instance used last time
+#     bash manage.sh 2            # dev-multi: pin odca2 (remembered in .env)
+#
+# Everything here wraps the scripts/ tools and docker compose. Each menu item
+# prints the commands it runs, so this doubles as a cheat sheet.
 # ──────────────────────────────────────────────
 set -uo pipefail
 
@@ -22,31 +27,61 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 if [ ! -f .env ] || [ ! -f docker-compose.yml ]; then
-    echo -e "${RED}✗${NC} Run this from the ephem-deploy directory of an installed server"
-    echo "  (.env not found — run 'bash setup.sh' first)."
+    echo -e "${RED}✗${NC} Run this from the ephem-deploy directory of an installed checkout"
+    echo "  (.env not found: run 'bash setup.sh' first)."
     exit 1
 fi
 
-# nginx + Let's Encrypt helpers, shared with the scripts/ tools:
-# active_domains, ssl_is_configured, cert_* — see scripts/nginx-lib.sh
-if [ ! -f scripts/nginx-lib.sh ]; then
-    echo -e "${RED}✗${NC} scripts/nginx-lib.sh is missing — run 'git pull' here first."
-    exit 1
-fi
+# Shared helpers:
+#   scripts/stack-lib.sh   mode, compose files, instances, filestore routing
+#   scripts/nginx-lib.sh   nginx + Let's Encrypt (active_domains, ssl_is_configured, cert_*)
+for _lib in scripts/stack-lib.sh scripts/nginx-lib.sh; do
+    if [ ! -f "$_lib" ]; then
+        echo -e "${RED}✗${NC} $_lib is missing: run 'git pull' here first."
+        exit 1
+    fi
+done
 EPHEM_ROOT="$SCRIPT_DIR"
+# shellcheck source=scripts/stack-lib.sh
+source scripts/stack-lib.sh
 # shellcheck source=scripts/nginx-lib.sh
 source scripts/nginx-lib.sh
 
-env_get() { grep "^$1=" .env 2>/dev/null | cut -d'=' -f2- | xargs || true; }
-set_env_key() {  # set_env_key KEY VALUE — update or append KEY=VALUE in .env
-    if grep -q "^$1=" .env; then
-        sed -i "s|^$1=.*|$1=$2|" .env
+# Mode and, in dev-multi, the instance to act on. A wrong instance name is a
+# hard stop: acting on the wrong odcaN by accident is what this menu exists
+# to prevent.
+if ! stack_init "${1:-}"; then
+    if [ "$EPHEM_MODE" = dev-multi ] && [ ! -f docker-compose.dev-multi.yml ] && [ "${#INSTANCES[@]}" -gt 0 ]; then
+        echo -e "${YELLOW}!${NC} $STACK_ERROR"
+        read -r -p "  Regenerate it now (data is kept)? [Y/n]: " R
+        [[ "${R:-Y}" =~ ^[Nn]$ ]] && exit 1
+        bash scripts/dev-instances.sh up "${INSTANCES[@]}" || exit 1
+        stack_init "${1:-}" || { echo -e "${RED}✗${NC} $STACK_ERROR"; exit 1; }
     else
-        echo "$1=$2" >> .env
+        echo -e "${RED}✗${NC} $STACK_ERROR"
+        exit 1
     fi
-}
+fi
 
-DB_USER="$(env_get POSTGRES_USER)"; DB_USER="${DB_USER:-odoo}"
+# Installs that predate EPHEM_MODE: the mode was read off the files on disk.
+# Record it, so every tool agrees from now on.
+if [ "$EPHEM_MODE_SOURCE" = detected ]; then
+    echo -e "${YELLOW}!${NC} EPHEM_MODE is not set in .env. From the files here this is: ${BOLD}$(ephem_mode_label)${NC}"
+    read -r -p "  Record EPHEM_MODE=$EPHEM_MODE in .env? [Y/n]: " R
+    if [[ ! "${R:-Y}" =~ ^[Nn]$ ]]; then
+        ephem_mode_save "$EPHEM_MODE"
+        echo -e "  ${GREEN}✓${NC} EPHEM_MODE=$EPHEM_MODE saved. Wrong? Edit .env, or re-run bash setup.sh."
+    fi
+fi
+# dev-multi: remember the instance for next time.
+if [ "$EPHEM_MODE" = dev-multi ] && [ "$(env_get EPHEM_INSTANCE)" != "$EPHEM_INSTANCE" ]; then
+    stack_pin_instance "$EPHEM_INSTANCE"
+fi
+
+local_mode() { [ "$EPHEM_MODE" != server ]; }
+# Where a few shared screens should send people, which differs by menu.
+services_hint() { if local_mode; then echo "Stack menu, 6"; else echo "Advanced → 1"; fi; }
+backup_item()   { if local_mode; then echo 10; else echo 7; fi; }
 
 # Every menu takes b (back) and x (exit) besides its numbers; Enter alone is
 # back as well. Sets CHOICE. x leaves the program from any depth.
@@ -62,31 +97,13 @@ ask_choice() {  # ask_choice "1-4" ["b, x"]
 }
 invalid_choice() { echo -e "  ${YELLOW}!${NC} Invalid choice."; }
 
-list_dbs() {
-    docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
-        "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres') ORDER BY datname;" \
-        </dev/null 2>/dev/null | tr -d '\r'
-}
-
-# Container state for one compose service, without parsing `docker compose ps`
-# output (its columns move between compose versions).
-svc_state() {  # svc_state SERVICE → running | stopped | absent
-    local cid; cid=$(docker compose ps -aq "$1" 2>/dev/null | head -1)
-    [ -z "$cid" ] && { echo "absent"; return; }
-    case "$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null)" in
-        running) echo "running" ;;
-        "")      echo "absent" ;;
-        *)       echo "stopped" ;;
-    esac
-}
-
-# Wait until Odoo actually accepts connections on 8069 inside the container —
+# Wait until Odoo actually accepts connections on 8069 inside the container:
 # the container is "running" seconds before the workers are ready.
 wait_for_odoo() {  # wait_for_odoo [SECONDS]
     local secs="${1:-90}" i=0
-    printf "  Waiting for Odoo to accept requests"
+    printf "  Waiting for Odoo (%s) to accept requests" "$ODOO_SVC"
     while [ "$i" -lt "$secs" ]; do
-        if docker compose exec -T odoo python3 -c \
+        if compose exec -T "$ODOO_SVC" python3 -c \
              "import socket,sys; s=socket.socket(); s.settimeout(2); sys.exit(s.connect_ex(('127.0.0.1',8069)))" \
              </dev/null >/dev/null 2>&1; then
             echo ""; echo -e "  ${GREEN}✓${NC} Odoo is answering (took ${i}s)"; return 0
@@ -94,13 +111,11 @@ wait_for_odoo() {  # wait_for_odoo [SECONDS]
         printf "."; sleep 2; i=$((i + 2))
     done
     echo ""
-    echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s — check the log (menu item 8)."
+    echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s: check its log."
     return 1
 }
 
 BACKUP_DIR="$SCRIPT_DIR/backups"
-FILESTORE="/var/lib/odoo/.local/share/Odoo/filestore"
-FS_PARENT="/var/lib/odoo/.local/share/Odoo"
 
 # Database names typed by the operator end up inside `rm -rf` paths and SQL
 # identifiers. Accept only what Odoo itself accepts, so a name can never
@@ -108,45 +123,32 @@ FS_PARENT="/var/lib/odoo/.local/share/Odoo"
 valid_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; }
 
 db_exists() {  # call valid_db_name first
-    [ "$(docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+    [ "$(compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
         "SELECT 1 FROM pg_database WHERE datname = '$1';" \
         </dev/null 2>/dev/null | tr -d '\r')" = "1" ]
 }
 
 list_dbs_sized() {
-    docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+    compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
         "SELECT datname || '  (' || pg_size_pretty(pg_database_size(datname)) || ')'
            FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres')
           ORDER BY datname;" </dev/null 2>/dev/null | tr -d '\r'
 }
 
-# Reach the filestore volume. Prefers the running container; falls back to a
-# throwaway one so the filestore stays reachable while Odoo is stopped.
-# stdin is closed: a stray `docker compose exec` must never swallow the menu's
-# own keyboard input.
-odoo_sh() {  # odoo_sh 'shell command'
-    if [ "$(svc_state odoo)" = "running" ]; then
-        docker compose exec -T odoo sh -c "$1" </dev/null
-    else
-        docker compose run --rm -T --entrypoint sh odoo -c "$1" </dev/null
-    fi
-}
-
-# Same, but stdin IS passed through — restore streams an archive in. Kept as
-# a separate function so no ordinary call can eat menu input by accident.
-odoo_pipe() {  # odoo_pipe 'shell command' < file
-    if [ "$(svc_state odoo)" = "running" ]; then
-        docker compose exec -T odoo sh -c "$1"
-    else
-        docker compose run --rm -T --entrypoint sh odoo -c "$1"
-    fi
-}
-
 # "dbname  (12M)", to read like the PostgreSQL listing above it. du prints
-# the size first, so strip the path prefix only — a greedy .*/ eats the size.
+# the size first, so strip the path prefix only (a greedy .*/ eats the size).
+# dev-multi: every instance's volume, tagged with the instance.
 list_filestores() {
-    odoo_sh "du -sh $FILESTORE/* 2>/dev/null" 2>/dev/null | tr -d '\r' \
-        | sed "s|^\([^[:space:]]*\)[[:space:]]*$FILESTORE/\(.*\)$|\2  (\1)|"
+    local n
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        for n in "${INSTANCES[@]}"; do
+            odoo_sh_on "odoo_$n" "du -sh $FILESTORE/* 2>/dev/null" 2>/dev/null | tr -d '\r' \
+                | sed "s|^\([^[:space:]]*\)[[:space:]]*$FILESTORE/\(.*\)$|\2  (\1)  [odca$n]|"
+        done
+    else
+        odoo_sh "du -sh $FILESTORE/* 2>/dev/null" 2>/dev/null | tr -d '\r' \
+            | sed "s|^\([^[:space:]]*\)[[:space:]]*$FILESTORE/\(.*\)$|\2  (\1)|"
+    fi
 }
 
 # ── Snapshots ─────────────────────────────────
@@ -173,12 +175,15 @@ manifest_get() { grep -m1 "^$2=" "$1/manifest" 2>/dev/null | cut -d'=' -f2-; }
 # the restore list is worse than no snapshot at all.
 snapshot_create() {  # snapshot_create DBNAME
     local DB="$1" TS DIR rc HAS_DB=no HAS_FS=no
+    # dev-multi: the filestore lives on the instance's own volume, whichever
+    # instance the menu is pinned to (fs_svc_for).
+    local ODOO_SH_SVC; ODOO_SH_SVC=$(fs_svc_for "$DB")
     SNAPSHOT_DIR=""
     TS=$(date +%Y%m%d_%H%M%S)
     DIR="$BACKUP_DIR/${DB}_${TS}"
 
     if [ "$(svc_state db)" != "running" ]; then
-        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first ($(services_hint))."
         return 1
     fi
     if ! mkdir -p "$DIR"; then
@@ -188,7 +193,7 @@ snapshot_create() {  # snapshot_create DBNAME
     echo -e "  ${CYAN}→${NC} Snapshot: backups/${DIR##*/}/"
 
     if db_exists "$DB"; then
-        if ! docker compose exec -T db pg_dump -U "$DB_USER" "$DB" </dev/null | gzip > "$DIR/database.sql.gz" \
+        if ! compose exec -T db pg_dump -U "$DB_USER" "$DB" </dev/null | gzip > "$DIR/database.sql.gz" \
            || ! gzip -t "$DIR/database.sql.gz" 2>/dev/null; then
             echo -e "  ${RED}✗${NC} pg_dump failed or produced a corrupt file — snapshot discarded."
             rm -rf "$DIR"
@@ -212,6 +217,7 @@ snapshot_create() {  # snapshot_create DBNAME
         [ "$rc" -eq 1 ] && echo -e "     ${YELLOW}!${NC} files changed while archiving (normal on a live system)"
         HAS_FS=yes
         echo -e "     ${GREEN}✓${NC} filestore.tar.gz   ($(du -h "$DIR/filestore.tar.gz" | cut -f1))"
+        [ "$EPHEM_MODE" = dev-multi ] && echo "       (read from the volume of instance $(svc_instance "$ODOO_SH_SVC"))"
     else
         echo -e "     ${YELLOW}!${NC} no filestore directory for '$DB' — database only"
     fi
@@ -474,7 +480,7 @@ snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
     local SQLF="$1" TARF="$2" SRC="$3" TGT="$4" LOG errs mods rc CAT dirs pick
 
     if [ "$(svc_state db)" != "running" ]; then
-        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first ($(services_hint))."
         return 1
     fi
 
@@ -486,7 +492,7 @@ snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
         echo -e "  ${CYAN}→${NC} Creating database '$TGT'"
         # template0: the cluster's template1 may carry local additions that
         # would collide with objects in the dump.
-        if ! docker compose exec -T db psql -U "$DB_USER" -d postgres -c \
+        if ! compose exec -T db psql -U "$DB_USER" -d postgres -c \
              "CREATE DATABASE \"$TGT\" WITH TEMPLATE template0 ENCODING 'UTF8';" </dev/null; then
             echo -e "  ${RED}✗${NC} Could not create '$TGT' — nothing was restored."
             return 1
@@ -495,11 +501,11 @@ snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
         CAT=cat; [ "${SQLF##*.}" = "gz" ] && CAT="gunzip -c"
         LOG=$(mktemp)
         rc=0
-        $CAT "$SQLF" | docker compose exec -T db psql -U "$DB_USER" -q -d "$TGT" >"$LOG" 2>&1 || rc=$?
+        $CAT "$SQLF" | compose exec -T db psql -U "$DB_USER" -q -d "$TGT" >"$LOG" 2>&1 || rc=$?
         errs=$(grep -c '^ERROR' "$LOG" 2>/dev/null || true)
         # psql exits 0 on a dump that produced errors, so trust the data, not
         # the exit code: an Odoo database with no ir_module_module is broken.
-        mods=$(docker compose exec -T db psql -U "$DB_USER" -d "$TGT" -t -A -c \
+        mods=$(compose exec -T db psql -U "$DB_USER" -d "$TGT" -t -A -c \
                "SELECT count(*) FROM ir_module_module;" </dev/null 2>/dev/null | tr -d '\r')
         if ! printf '%s' "$mods" | grep -Eq '^[1-9][0-9]*$'; then
             echo -e "  ${RED}✗${NC} Restore failed — '$TGT' has no ir_module_module rows (psql exit $rc)."
@@ -518,6 +524,8 @@ snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
 
     # ── filestore ─────────────────────────────────────────────────────
     if [ -n "$TARF" ]; then
+        local ODOO_SH_SVC; ODOO_SH_SVC=$(fs_svc_for "$TGT")
+        [ "$EPHEM_MODE" = dev-multi ] && echo "  Filestore goes to the volume of instance $(svc_instance "$ODOO_SH_SVC")"
         echo -e "  ${CYAN}→${NC} Unpacking $(basename "$TARF")"
         # Unpack to a staging dir first. The archive is rooted at the SOURCE
         # database's name, so extracting straight into filestore/ would
@@ -575,10 +583,11 @@ snapshot_restore() {  # snapshot_restore SQL_FILE TAR_FILE SRC_NAME TARGET_DB
 }
 
 db_size() {  # "" when the database does not exist
-    docker compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
+    compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
         "SELECT pg_size_pretty(pg_database_size('$1'));" </dev/null 2>/dev/null | tr -d '\r'
 }
 filestore_size() {  # "" when there is no filestore for this database
+    local ODOO_SH_SVC; ODOO_SH_SVC=$(fs_svc_for "$1")
     odoo_sh "du -sh $FILESTORE/$1 2>/dev/null | cut -f1" 2>/dev/null | tr -d '\r'
 }
 
@@ -641,10 +650,10 @@ confirm_destructive() {  # confirm_destructive DBNAME db|filestore|both [delete|
 
 drop_database() {  # drop_database DBNAME
     echo -e "  ${CYAN}→${NC} Disconnecting sessions, then DROP DATABASE \"$1\""
-    docker compose exec -T db psql -U "$DB_USER" -d postgres -c \
+    compose exec -T db psql -U "$DB_USER" -d postgres -c \
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
           WHERE datname = '$1' AND pid <> pg_backend_pid();" </dev/null >/dev/null 2>&1
-    if docker compose exec -T db psql -U "$DB_USER" -d postgres -c "DROP DATABASE \"$1\";" </dev/null; then
+    if compose exec -T db psql -U "$DB_USER" -d postgres -c "DROP DATABASE \"$1\";" </dev/null; then
         echo -e "  ${GREEN}✓${NC} Database '$1' dropped."
         return 0
     fi
@@ -653,6 +662,7 @@ drop_database() {  # drop_database DBNAME
 }
 
 delete_filestore() {  # delete_filestore DBNAME
+    local ODOO_SH_SVC; ODOO_SH_SVC=$(fs_svc_for "$1")
     if ! odoo_sh "test -d $FILESTORE/$1" >/dev/null 2>&1; then
         echo -e "  ${YELLOW}!${NC} No filestore directory for '$1' — nothing to delete."
         return 0
@@ -670,7 +680,7 @@ delete_filestore() {  # delete_filestore DBNAME
 menu_status() {
     echo -e "${CYAN}${BOLD}Status & health${NC}"
     echo ""
-    docker compose ps
+    compose ps
     echo ""
     echo -e "${BOLD}Databases:${NC}"
     local dbs; dbs=$(list_dbs)
@@ -785,10 +795,10 @@ menu_domain_add() {
         read -r -p "  Set ODOO_DBFILTER=^%d\$ now? [Y/n]: " DF
         if [[ ! "${DF:-Y}" =~ ^[Nn]$ ]]; then
             set_env_key ODOO_DBFILTER '^%d$'
-            if grep -q "^dbfilter" odoo.conf 2>/dev/null; then
-                sed -i 's|^dbfilter = .*|dbfilter = ^%d$|' odoo.conf
+            if grep -q "^dbfilter" "$ODOO_CONF" 2>/dev/null; then
+                sed -i 's|^dbfilter = .*|dbfilter = ^%d$|' "$ODOO_CONF"
             else
-                echo 'dbfilter = ^%d$' >> odoo.conf
+                echo 'dbfilter = ^%d$' >> "$ODOO_CONF"
             fi
             echo -e "  ${GREEN}✓${NC} dbfilter set (subdomain = database name, exact match)"
             offer_odoo_restart
@@ -901,92 +911,169 @@ menu_update_app() {
     read -r -p "  Back up before updating? [Y/n]: " B
     [[ ! "${B:-Y}" =~ ^[Nn]$ ]] && bash scripts/backup.sh
     echo ""
-    echo -e "  ${CYAN}→${NC} docker compose pull && docker compose up -d"
-    docker compose pull && docker compose up -d
+    echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
+    compose pull && compose up -d
     echo ""
     echo "  If this release includes module changes, run menu item 6 next"
     echo "  (update modules across databases). To roll back: re-run this item"
     echo "  with the previous version number."
 }
 
-# ── 6) Custom addons: fetch/switch branch, pull ─
+# ── 5) Custom addons: fetch/switch branch, pull ─
+# server: custom-addons/, shared by every tenant. dev-multi: the pinned
+# instance's odcaN/ only.
 menu_addons() {
-    echo -e "${CYAN}${BOLD}Custom addons (ePHEM modules)${NC}"
+    local dir="$ADDONS_DIR" name="$ADDONS_NAME"
+    echo -e "${CYAN}${BOLD}Addons: $name${NC}"
     echo ""
-    if [ ! -d custom-addons/.git ]; then
-        echo -e "  ${RED}✗${NC} custom-addons/ is not a git clone on this server."
+    if [ ! -d "$dir/.git" ]; then
+        echo -e "  ${RED}✗${NC} $name/ is not a git clone."
+        [ "$EPHEM_MODE" = dev-multi ] && \
+            echo "     Populate it:  bash scripts/dev-instances.sh up $EPHEM_INSTANCE:18_national_dev"
         return 1
     fi
-    local cur; cur=$(git -C custom-addons branch --show-current 2>/dev/null || echo "?")
-    echo "  Current branch: $cur"
-    # Repair: an earlier version widened the fetch refspec, which makes every
-    # fetch download ALL branches — on a slow server link that looks like a
-    # freeze. Keep it narrowed to the branch in use.
-    if [ "$cur" != "?" ] && [ -n "$cur" ] && \
-       [ "$(git -C custom-addons config --get remote.origin.fetch 2>/dev/null)" = "+refs/heads/*:refs/remotes/origin/*" ]; then
-        git -C custom-addons config remote.origin.fetch "+refs/heads/$cur:refs/remotes/origin/$cur"
-        echo -e "  ${GREEN}✓${NC} repaired fetch config (was set to fetch every branch)"
-    fi
-    # Bounded check — never lets a slow network look like a hang.
-    echo -n "  Checking origin... "
-    if timeout 15 git -C custom-addons fetch --quiet origin "$cur" 2>/dev/null; then
-        local behind; behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo "?")
-        echo "behind by ${behind} commit(s)"
+    local cur dirty=0
+    cur=$(git -C "$dir" branch --show-current 2>/dev/null || echo "?")
+    echo "  Current branch: ${cur:-(detached)}"
+    if local_mode; then
+        dirty=$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null | grep -c .) || dirty=0
+        echo "  Last commit:    $(git -C "$dir" log -1 --format='%h %ad %s' --date=short 2>/dev/null | cut -c1-90)"
+        [ "${dirty:-0}" -gt 0 ] && echo -e "  ${YELLOW}!${NC} $dirty tracked file(s) with uncommitted changes (option 3 lists them)"
     else
-        echo "unreachable or slow — skipped"
+        # Repair: an earlier version widened the fetch refspec, which makes
+        # every fetch download ALL branches; on a slow server link that looks
+        # like a freeze. Keep it narrowed to the branch in use.
+        if [ "$cur" != "?" ] && [ -n "$cur" ] && \
+           [ "$(git -C "$dir" config --get remote.origin.fetch 2>/dev/null)" = "+refs/heads/*:refs/remotes/origin/*" ]; then
+            git -C "$dir" config remote.origin.fetch "+refs/heads/$cur:refs/remotes/origin/$cur"
+            echo -e "  ${GREEN}✓${NC} repaired fetch config (was set to fetch every branch)"
+        fi
+    fi
+    # SSH first: a passphrase-protected key with no agent would make every git
+    # command below ask for it, and the bounded check under timeout fail.
+    local remote ssh_ok=1
+    remote=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
+    case "$remote" in git@*|ssh://*) ensure_github_ssh || ssh_ok=0 ;; esac
+    # Bounded check: never lets a slow network look like a hang, and never
+    # prompts (BatchMode): a prompt under timeout cannot be answered anyway.
+    echo -n "  Checking origin... "
+    if [ "$ssh_ok" -eq 0 ]; then
+        echo "skipped (no SSH access without a prompt)"
+    elif [ -n "$cur" ] && [ "$cur" != "?" ] && \
+         GIT_SSH_COMMAND="ssh -o BatchMode=yes" timeout 15 git -C "$dir" fetch --quiet origin "$cur" </dev/null 2>/dev/null; then
+        local behind ahead
+        behind=$(git -C "$dir" rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo "?")
+        ahead=$(git -C "$dir" rev-list origin/"$cur"..HEAD --count 2>/dev/null || echo "?")
+        echo "behind by ${behind} commit(s), ahead by ${ahead}"
+    else
+        echo "unreachable or slow, skipped"
     fi
     echo ""
-    echo -e "  ${YELLOW}!${NC} This changes the live code for EVERY database on this server."
-    echo "     Take a backup first for anything beyond a routine pull."
+    case "$EPHEM_MODE" in
+        server)
+            echo -e "  ${YELLOW}!${NC} This changes the live code for EVERY database on this server."
+            echo "     Take a backup first for anything beyond a routine pull."
+            ;;
+        dev-multi)
+            echo "  Only instance $EPHEM_INSTANCE uses this folder ($ODOO_URL, database $ODOO_DB)."
+            ;;
+    esac
     echo ""
     echo "  1) Pull latest on '$cur'"
     echo "  2) Fetch & switch to a different branch"
+    local_mode && echo "  3) Show local changes (git status)"
     echo "  b) Back"
     echo "  x) Exit"
-    ask_choice "1-2"
+    if local_mode; then ask_choice "1-3"; else ask_choice "1-2"; fi
     case "$CHOICE" in
         1)
-            git -C custom-addons pull --ff-only || {
-                echo -e "  ${RED}✗${NC} Pull failed (diverged or no access) — resolve manually."
+            git -C "$dir" pull --ff-only || {
+                echo -e "  ${RED}✗${NC} Pull failed (diverged, local changes in the way, or no access): resolve manually."
                 return 1
             }
             ;;
         2)
             read -r -p "  Branch name on origin: " BR
             [ -z "${BR:-}" ] && { echo "  Cancelled."; return 0; }
-            # Validate FIRST — nothing is changed until the branch is known
+            # Validate FIRST: nothing is changed until the branch is known
             # to exist under exactly this name.
-            if ! git -C custom-addons ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
+            if ! git -C "$dir" ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
                 echo -e "  ${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
-                git -C custom-addons ls-remote --heads origin 2>/dev/null \
+                git -C "$dir" ls-remote --heads origin 2>/dev/null \
                     | sed 's|.*refs/heads/|    • |' \
-                    || echo "    (could not list — is the deploy key authorized?)"
+                    || echo "    (could not list: is the deploy key or your SSH key authorized?)"
                 return 1
             fi
-            # Re-point the (narrow) refspec at the new branch, then fetch —
-            # only that one branch is ever downloaded, and git can resolve
-            # it for switch/tracking. --depth 1 keeps shallow clones small.
-            local DEPTH=""
-            [ -f custom-addons/.git/shallow ] && DEPTH="--depth 1"
-            ( cd custom-addons &&
-              git config remote.origin.fetch "+refs/heads/$BR:refs/remotes/origin/$BR" &&
-              git fetch $DEPTH origin &&
-              { git switch "$BR" 2>/dev/null || git switch -c "$BR" --track "origin/$BR"; } &&
-              git merge --ff-only "origin/$BR" &&
-              git branch --set-upstream-to="origin/$BR" "$BR"
-            ) || { echo -e "  ${RED}✗${NC} Fetch/switch failed — see the git output above."; return 1; }
-            echo -e "  ${GREEN}✓${NC} custom-addons now on '$BR'"
+            if [ "$EPHEM_MODE" = server ]; then
+                # Re-point the (narrow) refspec at the new branch, then fetch:
+                # only that one branch is ever downloaded, and git can resolve
+                # it for switch/tracking. --depth 1 keeps shallow clones small.
+                local DEPTH=""
+                [ -f "$dir/.git/shallow" ] && DEPTH="--depth 1"
+                ( cd "$dir" &&
+                  git config remote.origin.fetch "+refs/heads/$BR:refs/remotes/origin/$BR" &&
+                  git fetch $DEPTH origin &&
+                  { git switch "$BR" 2>/dev/null || git switch -c "$BR" --track "origin/$BR"; } &&
+                  git merge --ff-only "origin/$BR" &&
+                  git branch --set-upstream-to="origin/$BR" "$BR"
+                ) || { echo -e "  ${RED}✗${NC} Fetch/switch failed: see the git output above."; return 1; }
+            else
+                # A developer clone tracks every branch (setup.sh widens the
+                # refspec), so a plain fetch + switch does it. Uncommitted work
+                # is carried over when it does not conflict; git refuses the
+                # switch otherwise, and nothing is lost either way.
+                if [ "${dirty:-0}" -gt 0 ]; then
+                    echo -e "  ${YELLOW}!${NC} $dirty file(s) have uncommitted changes. They come along if they"
+                    echo "     do not conflict with '$BR'; otherwise git refuses and nothing changes."
+                    read -r -p "  Continue? [y/N]: " C
+                    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+                fi
+                ( cd "$dir" &&
+                  git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" &&
+                  git fetch origin "$BR" &&
+                  { git switch "$BR" 2>/dev/null || git switch -c "$BR" --track "origin/$BR"; }
+                ) || { echo -e "  ${RED}✗${NC} Fetch/switch failed: see the git output above."; return 1; }
+                local lr
+                lr=$(git -C "$dir" rev-list --left-right --count "$BR"...origin/"$BR" 2>/dev/null || echo "? ?")
+                if [ "${lr%%[[:space:]]*}" = "0" ] && [ "${lr##*[[:space:]]}" != "0" ]; then
+                    git -C "$dir" merge --ff-only "origin/$BR" >/dev/null 2>&1 && \
+                        echo "  fast-forwarded '$BR' by ${lr##*[[:space:]]} commit(s)"
+                elif [ "${lr%%[[:space:]]*}" != "0" ]; then
+                    echo "  note: local '$BR' is ${lr%%[[:space:]]*} commit(s) ahead of origin, left as is"
+                fi
+            fi
+            echo -e "  ${GREEN}✓${NC} $name now on '$BR'"
+            ;;
+        3)
+            local_mode || { invalid_choice; return 0; }
+            echo "  git -C $name status --short  (first 60 lines)"
+            git -C "$dir" status --short 2>/dev/null | head -60 | sed 's/^/    /'
+            [ "$(git -C "$dir" status --short 2>/dev/null | grep -c .)" -eq 0 ] && echo "    (clean)"
+            return 0
             ;;
         b) return 0 ;;
         *) invalid_choice; return 0 ;;
     esac
     echo ""
-    read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
-    if [[ ! "${U:-Y}" =~ ^[Nn]$ ]]; then
-        bash scripts/update-modules.sh --auto
+    if [ "$EPHEM_MODE" = server ]; then
+        read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
+        if [[ ! "${U:-Y}" =~ ^[Nn]$ ]]; then
+            bash scripts/update-modules.sh --auto
+        else
+            echo "  Remember: the new code is NOT active until modules are updated"
+            echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
+        fi
     else
-        echo "  Remember: the new code is NOT active until modules are updated"
-        echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
+        echo "  Apply the new code to $ODOO_SVC now?"
+        echo "    1) Restart and follow the log"
+        echo "    2) Update modules, then restart and follow the log"
+        echo "    3) Later"
+        ask_choice "1-3" "b"
+        case "$CHOICE" in
+            1) menu_restart_logs_local ;;
+            2) menu_modules_local ;;
+            *) echo "  Remember: new Python code needs a restart, new views and data a module update (menu 4 and 5)." ;;
+        esac
     fi
 }
 
@@ -1005,16 +1092,16 @@ menu_db_manager() {
         read -r -p "  Enable it temporarily? [y/N]: " E
         [[ "${E:-N}" =~ ^[Yy]$ ]] || { echo "  Left disabled."; return 0; }
         set_env_key ODOO_LIST_DB True
-        sed -i 's/^list_db = .*/list_db = True/' odoo.conf
+        sed -i 's/^list_db = .*/list_db = True/' "$ODOO_CONF"
         echo -e "  ${YELLOW}!${NC} Enabled. Come back and DISABLE it as soon as you are done."
     else
         read -r -p "  Disable it now (recommended)? [Y/n]: " D
         [[ "${D:-Y}" =~ ^[Nn]$ ]] && { echo "  Left enabled."; return 0; }
         set_env_key ODOO_LIST_DB False
-        sed -i 's/^list_db = .*/list_db = False/' odoo.conf
+        sed -i 's/^list_db = .*/list_db = False/' "$ODOO_CONF"
         echo -e "  ${GREEN}✓${NC} Disabled."
     fi
-    docker compose restart odoo >/dev/null 2>&1 && echo "  Odoo restarted."
+    $(compose_cmd_text) restart $ODOO_SVC >/dev/null 2>&1 && echo "  Odoo restarted."
 }
 
 # ── 11) Security check ────────────────────────
@@ -1108,48 +1195,40 @@ menu_service() {
     echo -e "${CYAN}${BOLD}Services — start / stop / restart${NC}"
     echo ""
     printf "  Odoo: %s      Database: %s      nginx: %s\n" \
-        "$(svc_state odoo)" "$(svc_state db)" "$(svc_state nginx)"
+        "$(svc_state "$ODOO_SVC")" "$(svc_state db)" "$(svc_state nginx)"
     echo ""
     echo -e "  ${YELLOW}!${NC} While Odoo is stopped every tenant on this server is offline"
     echo "     (visitors get '502 Bad Gateway' from nginx). Sessions survive a"
     echo "     restart; anything a user was typing does not."
     echo ""
-    echo "  1) Restart Odoo            (docker compose restart odoo)"
-    echo "  2) Stop Odoo               (docker compose stop odoo)"
-    echo "  3) Start Odoo              (docker compose start odoo)"
-    echo "  4) Restart nginx           (docker compose restart nginx, about a second offline)"
-    echo "  5) Restart everything      (docker compose restart)"
+    echo "  1) Restart Odoo            ($(compose_cmd_text) restart $ODOO_SVC)"
+    echo "  2) Stop Odoo               ($(compose_cmd_text) stop $ODOO_SVC)"
+    echo "  3) Start Odoo              ($(compose_cmd_text) start $ODOO_SVC)"
+    echo "  4) Restart nginx           ($(compose_cmd_text) restart nginx, about a second offline)"
+    echo "  5) Restart everything      ($(compose_cmd_text) restart)"
     echo "  b) Back"
     echo "  x) Exit"
     ask_choice "1-5"
     case "$CHOICE" in
         1)
-            echo -e "  ${CYAN}→${NC} docker compose restart odoo"
-            docker compose restart odoo || {
+            svc_restart "$ODOO_SVC" || {
                 echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
             wait_for_odoo
             ;;
         2)
             read -r -p "  Really stop Odoo and take every tenant offline? [y/N]: " C
             [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
-            echo -e "  ${CYAN}→${NC} docker compose stop odoo"
-            docker compose stop odoo || {
+            echo -e "  ${CYAN}→${NC} $(compose_cmd_text) stop $ODOO_SVC"
+            compose stop "$ODOO_SVC" || {
                 echo -e "  ${RED}✗${NC} Stop failed — see the output above."; return 1; }
             echo -e "  ${GREEN}✓${NC} Odoo stopped. It stays down across reboots until you start it"
             echo "     again here (option 3) — the database and nginx keep running."
             ;;
         3)
-            if [ "$(svc_state odoo)" = "absent" ]; then
-                # Never started on this host (or removed) — `start` has nothing
-                # to start, so create the container.
-                echo -e "  ${CYAN}→${NC} docker compose up -d odoo"
-                docker compose up -d odoo || {
-                    echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
-            else
-                echo -e "  ${CYAN}→${NC} docker compose start odoo"
-                docker compose start odoo || {
-                    echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
-            fi
+            # Creates the container when it never ran here, recreates it when
+            # docker refuses the old one (stale config mount), starts it else.
+            svc_start "$ODOO_SVC" || {
+                echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
             wait_for_odoo
             ;;
         4)
@@ -1157,19 +1236,19 @@ menu_service() {
             # re-attaches the active.conf mount (see nginx_apply). Odoo is
             # not touched; visitors see a blip of about a second.
             if [ "$(svc_state nginx)" = "absent" ]; then
-                echo -e "  ${CYAN}→${NC} docker compose up -d nginx"
-                docker compose up -d nginx || {
+                echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d nginx"
+                compose up -d nginx || {
                     echo -e "  ${RED}✗${NC} Start failed — see the output above."; return 1; }
             else
-                echo -e "  ${CYAN}→${NC} docker compose restart nginx"
-                docker compose restart nginx || {
+                echo -e "  ${CYAN}→${NC} $(compose_cmd_text) restart nginx"
+                compose restart nginx || {
                     echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
             fi
             sleep 2
             if [ "$(svc_state nginx)" = "running" ]; then
                 echo -e "  ${GREEN}✓${NC} nginx is running"
             else
-                echo -e "  ${RED}✗${NC} nginx is not running, check: docker compose logs nginx"
+                echo -e "  ${RED}✗${NC} nginx is not running, check: $(compose_cmd_text) logs nginx"
                 echo "     (a broken nginx/active.conf is the usual cause)"
                 return 1
             fi
@@ -1177,8 +1256,8 @@ menu_service() {
         5)
             read -r -p "  Restart Odoo, the database and nginx together? [y/N]: " C
             [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
-            echo -e "  ${CYAN}→${NC} docker compose restart"
-            docker compose restart || {
+            echo -e "  ${CYAN}→${NC} $(compose_cmd_text) restart"
+            compose restart || {
                 echo -e "  ${RED}✗${NC} Restart failed — see the output above."; return 1; }
             wait_for_odoo
             ;;
@@ -1186,7 +1265,7 @@ menu_service() {
         *) invalid_choice; return 0 ;;
     esac
     echo ""
-    echo "  Now: Odoo $(svc_state odoo), database $(svc_state db), nginx $(svc_state nginx)"
+    echo "  Now: Odoo $(svc_state "$ODOO_SVC"), database $(svc_state db), nginx $(svc_state nginx)"
 }
 
 # ── 13.2) Databases — backup / restore / delete ─
@@ -1194,7 +1273,7 @@ menu_db_admin() {
     echo -e "${CYAN}${BOLD}Databases${NC}"
     echo ""
     if [ "$(svc_state db)" != "running" ]; then
-        echo -e "  ${RED}✗${NC} The database container is not running — start it first (Advanced → 1)."
+        echo -e "  ${RED}✗${NC} The database container is not running — start it first ($(services_hint))."
         return 1
     fi
     echo -e "  ${BOLD}In PostgreSQL:${NC}"
@@ -1262,12 +1341,12 @@ menu_db_create() {
     read -r -p "  Continue? [y/N]: " OK
     [[ "${OK:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
 
-    docker compose stop odoo >/dev/null
+    compose stop "$ODOO_SVC" >/dev/null
     local FAILED=() MADE=()
     for n in "${GOOD[@]}"; do
         echo ""
-        echo -e "  ${CYAN}→${NC} docker compose run --rm odoo odoo -d $n -i base --without-demo=all"
-        if docker compose run --rm odoo odoo -d "$n" -i base --without-demo=all --stop-after-init; then
+        echo -e "  ${CYAN}→${NC} $(compose_cmd_text) run --rm $ODOO_SVC odoo -d $n -i base --without-demo=all"
+        if compose run --rm -T --no-deps "$ODOO_SVC" odoo -d "$n" -i base --without-demo=all --stop-after-init </dev/null; then
             echo -e "  ${GREEN}✓${NC} '$n' created"
             MADE+=("$n")
         else
@@ -1275,7 +1354,11 @@ menu_db_create() {
             FAILED+=("$n")
         fi
     done
-    docker compose up -d >/dev/null
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        compose up -d "$ODOO_SVC" >/dev/null     # only this instance, not ones stopped on purpose
+    else
+        compose up -d >/dev/null
+    fi
     wait_for_odoo
 
     echo ""
@@ -1297,7 +1380,7 @@ menu_db_backup() {
     echo "  holding database.sql.gz + filestore.tar.gz. The Restore menu reads"
     echo "  these folders back."
     echo ""
-    echo "  (Menu item 7 is the different, whole-server job: every database at"
+    echo "  (Menu item $(backup_item) is the different, whole-server job: every database at"
     echo "   once, encrypted, with retention — that is the one for cron.)"
     echo ""
     echo "  Keeping the newest $(env_get SNAPSHOT_KEEP | grep . || echo 10) snapshot(s) per database;"
@@ -1433,7 +1516,8 @@ _menu_db_restore_body() {
 
     # Is anything already sitting at the target? That turns a restore into an
     # overwrite, which gets the full destructive gate.
-    local EX_DB=no EX_FS=no MODE=""
+    local EX_DB=no EX_FS=no MODE="" ODOO_SH_SVC
+    ODOO_SH_SVC=$(fs_svc_for "$TGT")
     db_exists "$TGT" && EX_DB=yes
     odoo_sh "test -d $FILESTORE/$TGT" >/dev/null 2>&1 && EX_FS=yes
 
@@ -1520,11 +1604,11 @@ menu_db_delete() {
 # Odoo caches a registry per database; after dropping one, a restart clears
 # the stale entry (and any worker still holding it).
 offer_odoo_restart() {
-    [ "$(svc_state odoo)" = "running" ] || return 0
+    [ "$(svc_state "$ODOO_SVC")" = "running" ] || return 0
     echo ""
     read -r -p "  Restart Odoo to clear its cached registry? [Y/n]: " R
     [[ "${R:-Y}" =~ ^[Nn]$ ]] && return 0
-    docker compose restart odoo && wait_for_odoo
+    svc_restart "$ODOO_SVC" && wait_for_odoo
 }
 
 # ── 13.4) RPC endpoints ───────────────────────
@@ -1724,43 +1808,355 @@ menu_advanced() {
     esac
 }
 
-# ── Menu loop ─────────────────────────────────
-while true; do
+# ══════════════════════════════════════════════
+# Developer menus (demo, dev, dev-multi)
+# ══════════════════════════════════════════════
+
+# One line per instance: state, port, branch, uncommitted work, last commit.
+instances_table() {
+    local n st dirty
+    printf "  %-5s %-14s %-6s %-34s %-10s %s\n" "NAME" "STATE" "PORT" "BRANCH" "CHANGES" "LAST COMMIT"
+    for n in "${INSTANCES[@]}"; do
+        st=$(svc_detail "odoo_$n")
+        dirty=$(inst_dirty_count "$n")
+        if [ "$dirty" -gt 0 ]; then dirty="$dirty file(s)"; else dirty="clean"; fi
+        printf "  %-5s %-14s %-6s %-34s %-10s %s\n" "$n" "$st" "$(inst_port "$n")" "$(inst_branch "$n")" "$dirty" "$(inst_last_commit "$n")"
+    done
+}
+
+image_summary() {  # "abc123def456, built 2026-09-01" or "(not pulled yet)"
+    docker image inspect -f '{{.Id}} created {{.Created}}' "$(stack_image)" 2>/dev/null \
+        | sed 's/^sha256:\([0-9a-f]\{12\}\)[0-9a-f]* created \(..........\).*/\1, built \2/' \
+        || echo "(not pulled yet)"
+}
+
+# ── 1) Status (developer) ─────────────────────
+menu_status_local() {
+    echo -e "${CYAN}${BOLD}Status${NC}   $(ephem_mode_label)"
     echo ""
-    case "$(svc_state odoo)" in
-        running) STATE="${GREEN}running${NC}" ;;
-        stopped) STATE="${RED}stopped${NC}" ;;
-        *)       STATE="${YELLOW}not created${NC}" ;;
-    esac
-    echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
-    echo "  1) Status & health"
-    echo "  2) Manage domains — add / remove / certificates"
-    echo "  3) SSL — set up HTTPS / show status"
-    echo "  4) Update the ePHEM app image"
-    echo "  5) Custom addons — pull / switch branch"
-    echo "  6) Update modules across databases"
-    echo "  7) Back up now"
-    echo "  8) Follow Odoo logs (Ctrl-C to stop)"
-    echo "  9) Security check"
-    echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
-    echo " 11) Advanced — service, databases, database manager, RPC endpoints"
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        instances_table
+        echo ""
+        echo "  Pinned: instance $EPHEM_INSTANCE  ($ADDONS_NAME, $ODOO_URL, database $ODOO_DB)"
+    else
+        echo "  Odoo:    $(svc_detail "$ODOO_SVC")   $ODOO_URL"
+        if [ -d "$ADDONS_DIR/.git" ]; then
+            echo "  Addons:  $ADDONS_NAME on $(git -C "$ADDONS_DIR" branch --show-current 2>/dev/null || echo '?')   ($(git -C "$ADDONS_DIR" log -1 --format='%h %ad' --date=short 2>/dev/null))"
+        else
+            echo "  Addons:  $ADDONS_NAME (not a git clone)"
+        fi
+    fi
+    echo "  Postgres: $(svc_detail db)"
+    echo ""
+    echo -e "${BOLD}Databases:${NC}"
+    local dbs; dbs=$(list_dbs)
+    if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none, or database not running)"; fi
+    echo ""
+    echo -e "${BOLD}App image:${NC}  $(stack_image)  $(image_summary)"
+    echo -e "${BOLD}Disk:${NC}"
+    df -h / | tail -1 | awk '{printf "  root: %s used of %s (%s)\n", $3, $2, $5}'
+    echo ""
+    local LEFT; LEFT=$(stack_leftovers)
+    if [ -n "$LEFT" ]; then
+        echo -e "${BOLD}Leftovers from another mode:${NC}"
+        echo "$LEFT" | sed 's/^/  ! /'
+        [ "$EPHEM_MODE" = dev-multi ] && echo "  Remove them from the Stack menu (6)."
+        echo ""
+    fi
+    echo -e "${BOLD}Last backup:${NC}"
+    # shellcheck disable=SC2012
+    ls -t backups/*.age backups/*.gz 2>/dev/null | head -1 | xargs -r ls -lh | awk '{print "  " $NF " (" $5 ", " $6 " " $7 " " $8 ")"}'
+    [ -z "$(ls backups/*.age backups/*.gz 2>/dev/null)" ] && echo "  no whole-server backup yet (menu 10)"
+    local snap; snap=$(snapshot_list | head -1)
+    if [ -n "$snap" ]; then
+        echo "  newest snapshot: ${snap##*/} ($(manifest_get "$snap" created))"
+    else
+        echo "  no per-database snapshots yet (Databases → Backup)"
+    fi
+}
+
+# ── 2) Switch instance (dev-multi) ────────────
+menu_switch_instance() {
+    echo -e "${CYAN}${BOLD}Switch instance${NC}"
+    echo ""
+    instances_table
+    echo ""
+    read -r -p "  Instance to work on [${INSTANCES[*]}] (empty to keep $EPHEM_INSTANCE): " N
+    [ -z "${N:-}" ] && return 0
+    if ! inst_index "$N" >/dev/null; then
+        echo -e "  ${RED}✗${NC} No instance named '$N'. Configured: ${INSTANCES[*]}"
+        return 1
+    fi
+    stack_use_instance "$N"
+    stack_pin_instance "$N"
+    FS_SVC_CACHE=()
+    echo -e "  ${GREEN}✓${NC} Instance $N: $ADDONS_NAME on $(inst_branch "$N"), $ODOO_URL, database $ODOO_DB (remembered in .env)"
+}
+
+# ── 4) Restart + follow the log ───────────────
+# scripts/dev-logs.sh is the same script PyCharm run configs use. Its tail
+# ends with Ctrl-C, which brings the menu back.
+menu_restart_logs_local() {
+    echo -e "  ${CYAN}→${NC} bash scripts/dev-logs.sh ${EPHEM_INSTANCE:-}   (Ctrl-C ends the log tail and returns here)"
+    echo ""
+    run_interruptible bash scripts/dev-logs.sh ${EPHEM_INSTANCE:+"$EPHEM_INSTANCE"} || true
+}
+
+# ── 5) Update or install modules ──────────────
+# Through scripts/dev-logs.sh: it stops the server, runs the one-shot
+# odoo -u/-i, starts the server again and tails the log, which is where a
+# failed update shows.
+menu_modules_local() {
+    echo -e "${CYAN}${BOLD}Update or install modules${NC}   ($ODOO_SVC, code from $ADDONS_NAME)"
+    echo ""
+    local db="$ODOO_DB" MODS="" FLAG="-u" n
+    if [ -z "$db" ]; then
+        echo "  Databases:"
+        list_dbs | sed 's/^/    • /' | grep . || echo "    (none, or database not running)"
+        read -r -p "  Database (empty to cancel): " db
+        [ -z "${db:-}" ] && { echo "  Cancelled."; return 0; }
+        valid_db_name "$db" || { echo -e "  ${RED}✗${NC} '$db' is not a valid database name."; return 1; }
+    fi
+    echo "  Database: $db"
+    echo ""
+    echo "  1) Update every ePHEM module installed on $db (eoc_*, ephem_*, cmp_*)"
+    echo "  2) Update specific modules"
+    echo "  3) Install a module"
+    echo "  b) Back"
     echo "  x) Exit"
-    echo ""
-    ask_choice "1-11" "x"
+    ask_choice "1-3"
     case "$CHOICE" in
-        1)  menu_status ;;
-        2)  menu_domains ;;
-        3)  menu_ssl ;;
-        4)  menu_update_app ;;
-        5)  menu_addons ;;
-        6)  bash scripts/update-modules.sh ;;
-        7)  bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
-        8)  docker compose logs -f --tail=100 odoo || true ;;
-        9)  menu_security ;;
-        10) menu_upload_limit ;;
-        11) menu_advanced ;;
-        0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;   # old habit, still works
-        b)  ;;
-        *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
+        1)
+            MODS=$(compose exec -T db psql -U "$DB_USER" -d "$db" -t -A -c \
+                "SELECT string_agg(name, ',' ORDER BY name) FROM ir_module_module
+                  WHERE state = 'installed'
+                    AND (name LIKE 'eoc\_%' OR name LIKE 'ephem\_%' OR name LIKE 'cmp\_%');" \
+                </dev/null 2>/dev/null | tr -d '\r')
+            if [ -z "$MODS" ]; then
+                echo -e "  ${RED}✗${NC} No ePHEM modules installed on '$db', or the database is not reachable."
+                return 1
+            fi
+            n=$(printf '%s' "$MODS" | tr ',' '\n' | grep -c .)
+            echo "  $n module(s): $MODS" | fold -s -w 96 | sed '2,$s/^/     /'
+            ;;
+        2) read -r -p "  Modules to update, comma-separated: " MODS ;;
+        3) read -r -p "  Module(s) to install, comma-separated: " MODS; FLAG="-i" ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
     esac
-done
+    MODS=$(printf '%s' "${MODS:-}" | tr -d ' ')
+    [ -z "$MODS" ] && { echo "  Cancelled."; return 0; }
+    if ! printf '%s' "$MODS" | grep -Eq '^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$'; then
+        echo -e "  ${RED}✗${NC} Module names: letters, digits and underscores, separated by commas."
+        return 1
+    fi
+    echo ""
+    echo -e "  ${CYAN}→${NC} bash scripts/dev-logs.sh ${EPHEM_INSTANCE:-} $FLAG $MODS -d $db   (Ctrl-C ends the log tail)"
+    echo ""
+    run_interruptible bash scripts/dev-logs.sh ${EPHEM_INSTANCE:+"$EPHEM_INSTANCE"} "$FLAG" "$MODS" -d "$db" || true
+}
+
+# ── 6) Stack: start / stop / recreate ─────────
+menu_stack_local() {
+    local what="Odoo"
+    [ "$EPHEM_MODE" = dev-multi ] && what="instance $EPHEM_INSTANCE"
+    echo -e "${CYAN}${BOLD}Stack${NC}"
+    echo ""
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        instances_table
+        echo ""
+        echo "  Postgres (shared): $(svc_detail db)"
+    else
+        echo "  Odoo: $(svc_detail "$ODOO_SVC")      Postgres: $(svc_detail db)"
+    fi
+    echo ""
+    echo "  1) Start $what                ($(compose_cmd_text) start $ODOO_SVC)"
+    echo "  2) Stop $what                 ($(compose_cmd_text) stop $ODOO_SVC)"
+    echo "  3) Restart $what, no log tail ($(compose_cmd_text) restart $ODOO_SVC)"
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        echo "  4) Recreate the whole stack from the roster   (bash scripts/dev-instances.sh up ${INSTANCES[*]})"
+        echo "  5) Stop the whole stack, keep data            (bash scripts/dev-instances.sh down)"
+        echo "  6) Clean up leftovers from single-instance mode"
+        echo "  b) Back"
+        echo "  x) Exit"
+        ask_choice "1-6"
+    else
+        echo "  4) Start everything                           ($(compose_cmd_text) up -d)"
+        echo "  5) Stop everything, keep data                 ($(compose_cmd_text) down)"
+        echo "  b) Back"
+        echo "  x) Exit"
+        ask_choice "1-5"
+    fi
+    case "$CHOICE" in
+        1)
+            svc_start "$ODOO_SVC" || return 1
+            wait_for_odoo
+            ;;
+        2)
+            compose stop "$ODOO_SVC" && echo -e "  ${GREEN}✓${NC} $ODOO_SVC stopped (start it again with option 1)."
+            ;;
+        3)
+            svc_restart "$ODOO_SVC" || return 1
+            wait_for_odoo
+            ;;
+        4)
+            if [ "$EPHEM_MODE" = dev-multi ]; then
+                echo "  Regenerates docker-compose.dev-multi.yml and the odoo-N.conf files, then"
+                echo "  recreates every container in the roster (the shared Postgres restarts"
+                echo "  too). Databases, filestores and addons folders are kept."
+                read -r -p "  Continue? [y/N]: " C
+                [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+                bash scripts/dev-instances.sh up "${INSTANCES[@]}"
+            else
+                compose up -d && wait_for_odoo
+            fi
+            ;;
+        5)
+            read -r -p "  Stop every container (data is kept)? [y/N]: " C
+            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+            if [ "$EPHEM_MODE" = dev-multi ]; then
+                bash scripts/dev-instances.sh down
+            else
+                compose down
+            fi
+            ;;
+        6)
+            [ "$EPHEM_MODE" = dev-multi ] || { invalid_choice; return 0; }
+            local LEFT; LEFT=$(stack_leftovers)
+            if [ -z "$LEFT" ]; then echo -e "  ${GREEN}✓${NC} Nothing left over."; return 0; fi
+            echo "$LEFT" | sed 's/^/  ! /'
+            echo ""
+            echo "  Removing them: the override file goes (setup.sh writes it again if you"
+            echo "  ever go back to single-instance mode) and the ephem-app container is"
+            echo "  deleted. Its data volume (odoo-data) is NOT touched."
+            read -r -p "  Remove them? [y/N]: " C
+            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+            retire_single_override || true
+            if docker container inspect ephem-app >/dev/null 2>&1; then
+                docker rm -f ephem-app >/dev/null && echo -e "  ${GREEN}✓${NC} removed container ephem-app"
+            fi
+            ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
+    esac
+}
+
+# ── 7) Pull the app image ─────────────────────
+menu_image_local() {
+    echo -e "${CYAN}${BOLD}Update the app image${NC}   $(stack_image)"
+    echo ""
+    echo "  Now:  $(image_summary)"
+    echo ""
+    echo "  Pulls the newest image and recreates the Odoo container(s) on it."
+    echo "  Databases, filestores and addons folders are untouched."
+    [ "$EPHEM_MODE" = dev-multi ] && \
+        echo "  Every instance in the roster is recreated and started, including ones stopped on purpose."
+    read -r -p "  Continue? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
+    compose pull && compose up -d || { echo -e "  ${RED}✗${NC} See the output above."; return 1; }
+    echo "  Now:  $(image_summary)"
+    wait_for_odoo
+    echo "  If the release includes module changes, run menu 5 next."
+}
+
+# ── Main menu, developer ──────────────────────
+menu_main_local() {
+    local st what
+    while true; do
+        echo ""
+        st=$(svc_detail "$ODOO_SVC")
+        case "$st" in
+            running)       st="${GREEN}running${NC}" ;;
+            "not created") st="${YELLOW}not created${NC}" ;;
+            *)             st="${RED}$st${NC}" ;;
+        esac
+        echo -e "${BOLD}ePHEM developer menu${NC}   $(ephem_mode_label)"
+        if [ "$EPHEM_MODE" = dev-multi ]; then
+            what="instance $EPHEM_INSTANCE"
+            echo -e "  Instance ${BOLD}$EPHEM_INSTANCE${NC}: $ADDONS_NAME on $(inst_branch "$EPHEM_INSTANCE")   $ODOO_URL   ($st)"
+        else
+            what="Odoo"
+            echo -e "  $ADDONS_NAME on $(git -C "$ADDONS_DIR" branch --show-current 2>/dev/null || echo '?')   $ODOO_URL   ($st)"
+        fi
+        echo ""
+        printf "  1) %s\n" "Status"
+        [ "$EPHEM_MODE" = dev-multi ] && \
+        printf "  2) %-44s (%s)\n" "Switch instance" "bash manage.sh <name> does the same"
+        printf "  3) %s\n" "Addons ($ADDONS_NAME): pull, switch branch, local changes"
+        printf "  4) %-44s (%s)\n" "Restart $what and follow the log" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
+        printf "  5) %-44s (%s)\n" "Update or install modules" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-} -u ..."
+        printf "  6) %s\n" "Stack: start, stop, recreate, leftovers"
+        printf "  7) %s\n" "Pull the latest app image and recreate"
+        printf "  8) %s\n" "Doctor: scan the log for known errors"
+        printf "  9) %s\n" "Databases: backup, restore, delete, duplicate, create"
+        printf " 10) %-44s (%s)\n" "Back up everything now" "scripts/backup.sh"
+        printf "  x) %s\n" "Exit"
+        echo ""
+        ask_choice "1-10" "x"
+        case "$CHOICE" in
+            1)  menu_status_local ;;
+            2)  if [ "$EPHEM_MODE" = dev-multi ]; then menu_switch_instance; else invalid_choice; fi ;;
+            3)  menu_addons ;;
+            4)  menu_restart_logs_local ;;
+            5)  menu_modules_local ;;
+            6)  menu_stack_local ;;
+            7)  menu_image_local ;;
+            8)  stack_doctor "$ODOO_SVC" ;;
+            9)  menu_db_admin ;;
+            10) bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
+            b)  ;;
+            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-10, or x to exit." ;;
+        esac
+    done
+}
+
+# ── Main menu, server ─────────────────────────
+menu_main_server() {
+    while true; do
+        echo ""
+        case "$(svc_state "$ODOO_SVC")" in
+            running) STATE="${GREEN}running${NC}" ;;
+            stopped) STATE="${RED}stopped${NC}" ;;
+            *)       STATE="${YELLOW}not created${NC}" ;;
+        esac
+        echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
+        echo "  1) Status & health"
+        echo "  2) Manage domains — add / remove / certificates"
+        echo "  3) SSL — set up HTTPS / show status"
+        echo "  4) Update the ePHEM app image"
+        echo "  5) Custom addons — pull / switch branch"
+        echo "  6) Update modules across databases"
+        echo "  7) Back up now"
+        echo "  8) Follow Odoo logs (Ctrl-C to stop)"
+        echo "  9) Security check"
+        echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
+        echo " 11) Advanced — service, databases, database manager, RPC endpoints"
+        echo "  x) Exit"
+        echo ""
+        ask_choice "1-11" "x"
+        case "$CHOICE" in
+            1)  menu_status ;;
+            2)  menu_domains ;;
+            3)  menu_ssl ;;
+            4)  menu_update_app ;;
+            5)  menu_addons ;;
+            6)  bash scripts/update-modules.sh ;;
+            7)  bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
+            8)  run_interruptible compose logs -f --tail=100 "$ODOO_SVC" || true ;;
+            9)  menu_security ;;
+            10) menu_upload_limit ;;
+            11) menu_advanced ;;
+            0)  echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;   # old habit, still works
+            b)  ;;
+            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
+        esac
+    done
+}
+
+# ── Menu loop ─────────────────────────────────
+if local_mode; then
+    menu_main_local
+else
+    menu_main_server
+fi

@@ -30,6 +30,12 @@ set -euo pipefail
 # Always operate from the repo root, wherever this is invoked from.
 cd "$(dirname "$0")/.."
 
+# Shared with setup.sh and manage.sh: the mode record in .env (EPHEM_MODE),
+# the instance roster, leftovers of single-instance mode. scripts/stack-lib.sh
+EPHEM_ROOT="$PWD"
+# shellcheck source=stack-lib.sh
+source scripts/stack-lib.sh
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 MULTI_FILE="docker-compose.dev-multi.yml"
@@ -212,6 +218,18 @@ $volumes
 HEADER
 
     printf '%s\n' "${names[@]}" > "$INSTANCES_FILE"
+
+    # Record the mode for manage.sh and the scripts/ tools, keep the pinned
+    # instance valid, and retire the single-instance override: a plain
+    # `docker compose` would otherwise still load it and start ephem-app
+    # next to the instances.
+    ephem_mode_save dev-multi
+    local pinned; pinned=$(env_get EPHEM_INSTANCE)
+    if [ -z "$pinned" ] || ! printf '%s\n' "${names[@]}" | grep -qx "$pinned"; then
+        set_env_key EPHEM_INSTANCE "${names[0]}"
+    fi
+    echo -e "  ${GREEN}✓${NC} EPHEM_MODE=dev-multi recorded in .env (manage.sh shows the developer menu)"
+    retire_single_override || true
 
     echo ""
     # Clear any running single-instance stack first — same project, so it would

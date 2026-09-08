@@ -13,6 +13,13 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Shared with manage.sh and the scripts/ tools: the mode record (EPHEM_MODE in
+# .env), compose files per mode, the instance roster. scripts/stack-lib.sh
+EPHEM_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=scripts/stack-lib.sh
+source "$EPHEM_ROOT/scripts/stack-lib.sh"
+ephem_mode    # what this checkout is now (from .env, else from the files)
+
 get_server_ip() {
     # Try each source in turn, checking OUTPUT (not exit code): on macOS
     # `hostname -I` fails but the awk pipeline still exits 0, so an exit-code
@@ -426,44 +433,28 @@ dev_prereq_check() {
 }
 
 dev_status() {
-    echo -e "${CYAN}${BOLD}Container status${NC}"
+    echo -e "${CYAN}${BOLD}Container status${NC}   $(ephem_mode_label)"
     echo ""
-    docker compose ps 2>/dev/null || echo -e "${YELLOW}!${NC} Could not read compose status (no containers yet?)"
+    stack_init >/dev/null 2>&1 || true
+    compose ps 2>/dev/null || echo -e "${YELLOW}!${NC} Could not read compose status (no containers yet?)"
+    echo ""
+    echo "  Day-to-day work (status, addons, restart + logs, modules, doctor):  bash manage.sh"
 }
 
 dev_doctor() {
-    echo -e "${CYAN}${BOLD}Doctor — scanning recent Odoo logs${NC}"
-    echo ""
-    if ! docker compose ps --status=running 2>/dev/null | grep -q odoo; then
-        echo -e "${YELLOW}!${NC} Odoo container isn't running — start it first: docker compose up -d"
-        return 0
+    stack_init >/dev/null 2>&1 || true
+    local svc="$ODOO_SVC" n
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        echo "  Instances: ${INSTANCES[*]}"
+        read -p "  Which instance? [${EPHEM_INSTANCE}]: " n
+        n="${n:-$EPHEM_INSTANCE}"
+        if ! inst_index "$n" >/dev/null; then
+            echo -e "${RED}✗${NC} No instance named '$n'."
+            return 1
+        fi
+        svc="odoo_$n"
     fi
-    local LOGS found=0 MISSING
-    LOGS=$(docker compose logs --tail=300 odoo 2>&1 || true)
-    if echo "$LOGS" | grep -q "ModuleNotFoundError"; then
-        found=1
-        MISSING=$(echo "$LOGS" | sed -n "s/.*ModuleNotFoundError: No module named '\([^']*\)'.*/\1/p" | sort -u | tr '\n' ' ')
-        echo -e "${RED}✗${NC} Missing Python module(s): ${BOLD}${MISSING}${NC}"
-        echo "   A custom addon imports a package that isn't in the app image."
-        echo "   Permanent fix: add it to the image (rebuild & push), then: docker compose pull"
-        echo "   Quick local patch:"
-        echo "     docker compose exec -u root odoo pip install --break-system-packages ${MISSING}"
-        echo "     docker compose restart odoo"
-        echo ""
-    fi
-    if echo "$LOGS" | grep -q "Failed to load registry"; then
-        found=1
-        echo -e "${RED}✗${NC} Registry failed to load — every page will return 500."
-        echo "   Usually a module raising on import (see above) or a bad XML/data file."
-        echo ""
-    fi
-    if echo "$LOGS" | grep -qiE "could not translate host name|connection refused.*5432|database .* does not exist"; then
-        found=1
-        echo -e "${RED}✗${NC} Database connectivity/availability issue."
-        echo "   Check:  docker compose ps   and   docker compose logs db"
-        echo ""
-    fi
-    [ "$found" -eq 0 ] && echo -e "${GREEN}✓${NC} No known error signatures in the last 300 log lines."
+    stack_doctor "$svc"
 }
 
 dev_reset() {
@@ -616,6 +607,7 @@ dev_fetch_branch() {
         echo "  Cancelled — no branch name given."
         return 0
     fi
+    ensure_github_ssh || true    # one passphrase prompt at most, not one per git command
     if [ ! -d "$REPO/.git" ]; then
         echo ""
         echo -e "${YELLOW}!${NC} '$REPO' is not a git repository — cloning fresh from origin."
@@ -765,9 +757,10 @@ select_instance_layout() {
     echo -e "${BOLD}Are you running a single Odoo or multiple Odoos side by side?${NC}"
     echo ""
     local default_choice=1 default_label="single-instance"
-    if [ -f docker-compose.dev-multi.yml ] && [ -f .dev-instances ] && [ -s .dev-instances ]; then
+    if [ "$EPHEM_MODE" = dev-multi ] || \
+       { [ -f docker-compose.dev-multi.yml ] && [ -f .dev-instances ] && [ -s .dev-instances ]; }; then
         default_choice=2
-        default_label="multi-instance (detected: $(tr '\n' ' ' < .dev-instances | sed 's/ *$//'))"
+        default_label="multi-instance (instances: $(tr '\n' ' ' < .dev-instances 2>/dev/null | sed 's/ *$//'))"
     fi
     echo "  1) Single-instance — one Odoo on :8069"
     echo "  2) Multi-instance  — several Odoos on :8010, :8020, …  (scripts/dev-instances.sh)"
@@ -790,6 +783,7 @@ dev_preflight_menu() {
         return 0
     fi
     echo "Welcome back. Use the menu below, or choose 'Continue' to re-run setup."
+    echo "  (Day-to-day work has its own menu:  bash manage.sh)"
     while true; do
         echo ""
         echo -e "${BOLD}Developer pre-flight menu${NC}"
@@ -837,7 +831,26 @@ echo -e "  ${BOLD}1)${NC} ${GREEN}Server deploy${NC}     — Production or stagi
 echo -e "  ${BOLD}2)${NC} ${YELLOW}Demo / Evaluate${NC}   — Try ePHEM locally (no development)"
 echo -e "  ${BOLD}3)${NC} ${CYAN}Developer${NC}         — I'm a collaborator; I want to edit addons and use PyCharm"
 echo ""
-read -p "Choose [1-3]: " MODE_CHOICE
+# A checkout that has been set up before defaults to what it already is.
+DEFAULT_MODE_CHOICE=""
+if [ -f .env ]; then
+    case "$EPHEM_MODE" in
+        server)        DEFAULT_MODE_CHOICE=1 ;;
+        demo)          DEFAULT_MODE_CHOICE=2 ;;
+        dev|dev-multi) DEFAULT_MODE_CHOICE=3 ;;
+    esac
+fi
+if [ -n "$DEFAULT_MODE_CHOICE" ]; then
+    if [ "$EPHEM_MODE_SOURCE" = env ]; then
+        echo -e "  This checkout is set up as: ${BOLD}$(ephem_mode_label)${NC}  (EPHEM_MODE in .env)"
+    else
+        echo -e "  From the files here this checkout looks like: ${BOLD}$(ephem_mode_label)${NC}"
+    fi
+    read -p "Choose [1-3] (Enter keeps $DEFAULT_MODE_CHOICE): " MODE_CHOICE
+    MODE_CHOICE="${MODE_CHOICE:-$DEFAULT_MODE_CHOICE}"
+else
+    read -p "Choose [1-3]: " MODE_CHOICE
+fi
 
 case "${MODE_CHOICE:-}" in
     1) MODE="server" ;;
@@ -891,6 +904,9 @@ if [ "$MODE" = "developer" ]; then
         echo "  single 'docker compose up -d') will be SKIPPED — they would fight"
         echo "  the multi-instance stack. Delegating to scripts/dev-instances.sh."
         echo ""
+        # The single-instance override must not linger: a plain `docker compose`
+        # would still load it and start ephem-app next to the instances.
+        retire_single_override || true
 
         # ── Ensure .env exists (self-contained — no single-instance run needed) ──
         # Multi-instance is local dev, so we auto-generate passwords the same way
@@ -964,6 +980,7 @@ if [ "$MODE" = "developer" ]; then
         # ── Verify GitHub SSH access before we try to clone addons ──────────
         echo ""
         echo "  Verifying your GitHub SSH access…"
+        ensure_github_ssh || true    # loads a passphrase-protected key once, so clone/fetch below do not ask
         SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
         if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
             GH_USER=$(printf '%s' "$SSH_TEST" | sed -n 's/.*Hi \([^!]*\)!.*/\1/p' | head -1)
@@ -1098,8 +1115,10 @@ if [ "$MODE" = "developer" ]; then
             fi
         fi
 
+        # Recorded by dev-instances.sh as well; stated here so it cannot be missed.
+        ephem_mode_save dev-multi
         echo ""
-        echo -e "${GREEN}✓ Multi-instance dev is up.${NC}"
+        echo -e "${GREEN}✓ Multi-instance dev is up.${NC}   (EPHEM_MODE=dev-multi in .env)"
         echo ""
         echo "  Instances created:"
         _pi=0
@@ -1110,6 +1129,7 @@ if [ "$MODE" = "developer" ]; then
         done
         echo ""
         echo "  Manage the stack:"
+        echo "    Everything, per instance:  bash manage.sh <name>     (status, addons, restart + logs, modules, doctor)"
         echo "    Status:               bash scripts/dev-instances.sh status"
         echo "    Restart + tail one:   bash scripts/dev-logs.sh <name>"
         echo "    Stop (keep data):     bash scripts/dev-instances.sh down"
@@ -1169,6 +1189,7 @@ if [ "$MODE" = "developer" ]; then
     fi
 
     echo "Verifying your GitHub SSH access..."
+    ensure_github_ssh || true    # loads a passphrase-protected key once, so clone/fetch below do not ask
     SSH_TEST="$(ssh -T git@github.com 2>&1 || true)"
 
     if echo "$SSH_TEST" | grep -qi "successfully authenticated"; then
@@ -1786,9 +1807,26 @@ echo ""
 echo "========================================="
 echo ""
 docker compose ps
+# Record the mode for manage.sh and the scripts/ tools.
+case "$MODE" in
+    server)    ephem_mode_save server ;;
+    demo)      ephem_mode_save demo ;;
+    developer) ephem_mode_save dev ;;
+esac
+compose_files_init
+if [ "$MODE" != server ]; then
+    LEFT=$(stack_leftovers) || true
+    if [ -n "$LEFT" ]; then
+        echo ""
+        echo -e "${YELLOW}!${NC} Left over from multi-instance mode (still running or on disk):"
+        echo "$LEFT" | sed 's/^/    /'
+        echo "    Stop and remove the instances with:  bash scripts/dev-instances.sh down"
+    fi
+fi
+
 echo ""
 echo "========================================="
-echo -e "${GREEN}ePHEM is running!${NC}"
+echo -e "${GREEN}ePHEM is running!${NC}   (EPHEM_MODE=$EPHEM_MODE in .env)"
 echo ""
 
 ENV_DOMAIN=$(grep "^DOMAIN=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
@@ -1836,6 +1874,9 @@ if [ "$MODE" = "developer" ]; then
     echo "  Same thing from the terminal:"
     echo "         bash scripts/dev-logs.sh"
     echo "         bash scripts/dev-logs.sh -u eoc_signals -d yourdb"
+    echo ""
+    echo -e "${CYAN}${BOLD}Day-to-day menu${NC}"
+    echo "  bash manage.sh    (status, addons pull/switch, restart + logs, module updates, doctor, databases)"
     echo ""
     echo -e "${CYAN}${BOLD}Need several Odoo servers at once?${NC}"
     echo "  Re-run:  bash setup.sh → 3 (Developer) → y (already set up) → 8 (Multi-instance)"

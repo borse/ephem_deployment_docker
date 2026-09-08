@@ -7,6 +7,15 @@
 #   ./scripts/update-modules.sh              (interactive — pick modules & databases)
 #   ./scripts/update-modules.sh --auto       (update all modules on all databases)
 #   ./scripts/update-modules.sh --auto --db training-server
+#
+# Multi-instance developer mode (EPHEM_MODE=dev-multi in .env): acts on ONE
+# instance, its odcaN/ code and, by default, its own database ephem_N. The
+# instance is --instance N, else the one manage.sh pinned last (EPHEM_INSTANCE
+# in .env), else the first in .dev-instances:
+#   ./scripts/update-modules.sh --instance 2            (pick modules, ephem_2)
+#   ./scripts/update-modules.sh --instance 2 --auto     (every module, ephem_2)
+# The instance is stopped for the run (a dev server holds the registry) and
+# started again afterwards, the same way scripts/dev-logs.sh does it.
 # ──────────────────────────────────────────────
 
 set -euo pipefail
@@ -24,15 +33,34 @@ LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/update_${TIMESTAMP}.log"
 
-# ── Read database credentials from .env ──────
-DB_USER=$(grep "^POSTGRES_USER=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2- || echo "odoo")
-DB_PASS=$(grep "^POSTGRES_PASSWORD=" "$SCRIPT_DIR/.env" 2>/dev/null | cut -d'=' -f2-)
-DB_USER="${DB_USER:-odoo}"
+# Mode, compose files and the Odoo to act on: scripts/stack-lib.sh
+EPHEM_ROOT="$SCRIPT_DIR"
+# shellcheck source=stack-lib.sh
+source "$SCRIPT_DIR/scripts/stack-lib.sh"
 
+DB_PASS=$(env_get POSTGRES_PASSWORD)
 if [ -z "$DB_PASS" ]; then
     echo -e "${RED}✗${NC} Cannot read POSTGRES_PASSWORD from .env"
     exit 1
 fi
+
+# ── Parse arguments ──────────────────────────
+AUTO_MODE=false
+SPECIFIC_DB=""
+SPECIFIC_ACTION=""
+INSTANCE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --auto)     AUTO_MODE=true; shift ;;
+        --db)       SPECIFIC_DB="$2"; shift 2 ;;
+        --install)  SPECIFIC_ACTION="install"; shift ;;
+        --instance) INSTANCE="$2"; shift 2 ;;
+        *)          echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+stack_init "$INSTANCE" || { echo -e "${RED}✗${NC} $STACK_ERROR"; exit 1; }
 
 # ── Module list (in update order) ────────────
 MODULES=(
@@ -78,13 +106,13 @@ MODULES=(
   "web_hierarchy"
 )
 
-# ── Auto-include every eoc_* / ephem_* module in custom-addons ─────────
+# ── Auto-include every eoc_* / ephem_* module in the addons folder ──────
 # The curated list above fixes the update order for the core chain; any
 # module matching these prefixes that is not already listed is appended.
 # New modules added to the repo are picked up automatically — no need to
 # edit this script. Safe against every database: Odoo's -u simply skips
 # module names that are not installed on that database.
-for _dir in "$SCRIPT_DIR"/custom-addons/eoc_*/ "$SCRIPT_DIR"/custom-addons/ephem_*/; do
+for _dir in "$ADDONS_DIR"/eoc_*/ "$ADDONS_DIR"/ephem_*/ "$ADDONS_DIR"/cmp_*/; do
     [ -f "$_dir/__manifest__.py" ] || continue
     _mod=$(basename "$_dir")
     _known=false
@@ -93,26 +121,39 @@ for _dir in "$SCRIPT_DIR"/custom-addons/eoc_*/ "$SCRIPT_DIR"/custom-addons/ephem
 done
 unset _dir _mod _known _m
 
-# ── Parse arguments ──────────────────────────
-AUTO_MODE=false
-SPECIFIC_DB=""
-SPECIFIC_ACTION=""
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --auto)     AUTO_MODE=true; shift ;;
-        --db)       SPECIFIC_DB="$2"; shift 2 ;;
-        --install)  SPECIFIC_ACTION="install"; shift ;;
-        *)          echo "Unknown option: $1"; exit 1 ;;
-    esac
-done
-
 # ── Get all databases ────────────────────────
-get_databases() {
-    docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T db \
-        psql -U odoo -d postgres -t -A -c \
-        "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres') ORDER BY datname;" \
-        2>/dev/null | tr -d '\r'
+get_databases() { list_dbs; }
+
+# ── Stop / start the Odoo around the run ─────
+# A developer server (workers=0, dev_mode) holds the registry and reloads on
+# file changes, so the one-shot runs against a stopped instance, as
+# scripts/dev-logs.sh does. A production server keeps serving: the update
+# runs inside the live container, and Odoo is restarted at the end.
+ODOO_WAS_RUNNING=false
+[ "$(svc_state "$ODOO_SVC")" = "running" ] && ODOO_WAS_RUNNING=true
+
+odoo_pause() {
+    if [ "$EPHEM_MODE" != server ] && [ "$ODOO_WAS_RUNNING" = true ]; then
+        echo "Stopping $ODOO_SVC for the run..."
+        compose stop "$ODOO_SVC" >/dev/null
+    fi
+}
+
+odoo_resume() {
+    echo ""
+    if [ "$EPHEM_MODE" != server ]; then
+        if [ "$ODOO_WAS_RUNNING" = true ]; then
+            svc_start "$ODOO_SVC" >/dev/null 2>&1 || svc_start "$ODOO_SVC"
+        else
+            echo "$ODOO_SVC was not running before; leaving it stopped."
+            echo "  Start it:  bash scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
+        fi
+    else
+        echo "Restarting Odoo..."
+        svc_restart "$ODOO_SVC"
+    fi
+    echo -e "${GREEN}✓${NC} Done."
+    echo ""
 }
 
 # ── Update modules on a database (batch) ─────
@@ -136,11 +177,18 @@ run_batch_update() {
     echo -e "  ${BOLD}Action:${NC}  $ACTION"
     echo ""
 
-    # Run with live output
-    # Use sh -c so the command inherits the container's environment variables
-    docker compose -f "$SCRIPT_DIR/docker-compose.yml" exec -T odoo \
+    # Run with live output. sh -c so the command inherits the container's
+    # environment (HOST, PORT, USER, PASSWORD). Inside the live container
+    # when it is running, else in a throwaway one on the same volumes.
+    local -a RUNNER
+    if [ "$(svc_state "$ODOO_SVC")" = "running" ]; then
+        RUNNER=(compose exec -T "$ODOO_SVC")
+    else
+        RUNNER=(compose run --rm -T --no-deps "$ODOO_SVC")
+    fi
+    "${RUNNER[@]}" \
         sh -c "odoo $FLAG $MODULES_CSV -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER --db_password \$PASSWORD --stop-after-init --no-http" \
-        2>&1 | \
+        </dev/null 2>&1 | \
         tee -a "$LOG_FILE" | \
         grep --line-buffered -E "INFO|WARNING|ERROR|CRITICAL|Loading|loading|Updat|updat|instal" | \
         sed 's/^/    /'
@@ -157,11 +205,20 @@ echo "  ePHEM — Module Update"
 echo "========================================="
 echo ""
 echo -e "Log file: ${CYAN}$LOG_FILE${NC}"
+echo -e "Mode:     $(ephem_mode_label)"
+if [ "$EPHEM_MODE" = dev-multi ]; then
+    echo -e "Instance: ${BOLD}$EPHEM_INSTANCE${NC}  (code: $ADDONS_NAME, service: $ODOO_SVC)"
+fi
 echo ""
 
 # ── Get database list ────────────────────────
+# dev-multi: the instance's own database only. The other instances run other
+# branches of the code; updating their databases through this container
+# would load the wrong modules into them.
 if [ -n "$SPECIFIC_DB" ]; then
     DATABASES=("$SPECIFIC_DB")
+elif [ "$EPHEM_MODE" = dev-multi ]; then
+    DATABASES=("$ODOO_DB")
 else
     mapfile -t DATABASES < <(get_databases)
 fi
@@ -182,6 +239,7 @@ if [ "$AUTO_MODE" = true ]; then
     echo ""
 
     FAILED_DBS=()
+    odoo_pause
 
     for DB in "${DATABASES[@]}"; do
         echo ""
@@ -213,11 +271,7 @@ if [ "$AUTO_MODE" = true ]; then
     echo ""
     echo -e "Full log: ${CYAN}$LOG_FILE${NC}"
     echo "========================================="
-    echo ""
-    echo "Restarting Odoo..."
-    docker compose -f "$SCRIPT_DIR/docker-compose.yml" restart odoo
-    echo -e "${GREEN}✓${NC} Done."
-    echo ""
+    odoo_resume
     exit 0
 fi
 
@@ -313,6 +367,7 @@ fi
 echo ""
 
 FAILED_DBS=()
+odoo_pause
 
 for DB in "${SELECTED_DBS[@]}"; do
     echo ""
@@ -346,8 +401,4 @@ fi
 echo ""
 echo -e "Full log: ${CYAN}$LOG_FILE${NC}"
 echo "========================================="
-echo ""
-echo "Restarting Odoo..."
-docker compose -f "$SCRIPT_DIR/docker-compose.yml" restart odoo
-echo -e "${GREEN}✓${NC} Done."
-echo ""
+odoo_resume
