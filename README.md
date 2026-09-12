@@ -26,7 +26,7 @@ Deploy and develop ePHEM using Docker. The setup script handles everything — j
 - [Mode 3 — Developer](#mode-3--developer)
   - [Developer Prerequisites](#developer-prerequisites)
   - [GitHub SSH Key](#github-ssh-key)
-  - [Developer Pre-Flight Menu](#developer-pre-flight-menu)
+  - [Returning Developers](#returning-developers)
   - [What the Script Sets Up](#what-the-script-sets-up)
   - [Open in PyCharm](#open-in-pycharm)
   - [Docker Plugin for PyCharm](#docker-plugin-for-pycharm)
@@ -323,39 +323,26 @@ ssh -T git@github.com
   [ -n "$SSH_AUTH_SOCK" ] || { eval "$(ssh-agent -s)" >/dev/null; ssh-add ~/.ssh/id_ed25519; }
   ```
 
-### Developer Pre-Flight Menu
+### Returning Developers
 
-After choosing mode 3, the script first asks whether you've set up this machine before:
+In developer mode the script first asks whether this machine was set up before:
 
 ```
 Have you already set up the ePHEM dev environment on this machine before? [y/N]:
 ```
 
 - **First-time (`N` or just press Enter)** — installation continues straight away. No menu, no clicks.
-- **Returning (`y`)** — you get a menu of day-to-day developer actions before re-running setup:
+- **Returning (`y`)** — three choices:
 
 ```
-  1) View relevant commands
-  2) Suggest commands (based on current state)
-  3) Open GitHub README / docs
-  4) Prerequisite check (docker, compose, git, ssh)
-  5) Container status / health
-  6) Doctor — scan logs for common errors
-  7) Reset / clean environment (keeps custom-addons)
-  8) Multi-instance dev — run several Odoo side by side
-  9) Fetch & switch to a remote branch (custom-addons or other)
- 10) Continue with setup
- 11) Exit
+  1) Open the management menu now          (bash manage.sh)
+  2) Re-run setup: refresh containers, add instances, change the layout
+  3) Exit
 ```
 
-Things worth knowing about the menu:
+Day-to-day work is `bash manage.sh`, and choice 1 simply opens it: status, addons (pull, fetch & switch a branch, local changes), restart + logs, module updates, doctor (prerequisites, then the log scan), databases, the stack (start, stop, recreate, change the roster, full reset) and the app image (with the wrong-architecture fix and a diagnosis when a pull fails). See [The menu in developer mode](#the-menu-in-developer-mode).
 
-- **6) Doctor** scans the last 300 lines of Odoo's log for common errors (missing Python module, registry failure, DB connectivity) and prints the exact fix command.
-- **7) Reset** is the safe way to wipe DB + filestore volumes when you want a clean start. It **never** touches `custom-addons/`.
-- **8) Multi-instance dev** runs several Odoo servers side by side — see [Multi-Instance Dev](#multi-instance-dev--several-odoo-servers-side-by-side).
-- **9) Fetch & switch to a remote branch** is for the case where a teammate pushed a new branch upstream that your local `git branch -a` doesn't see yet — see [Switching to a New Remote Branch](#switching-to-a-new-remote-branch).
-- You can re-enter this menu any time by re-running `bash setup.sh` and choosing **3 → y**.
-- Day-to-day work (status, addons pull or branch switch, restart + logs, module updates, doctor, databases) has its own menu: `bash manage.sh`. See [The menu in developer mode](#the-menu-in-developer-mode).
+Re-running setup (choice 2) is for the installation itself: refreshing the containers against `.env`, adding an instance to a multi-instance stack, or switching between the single and multi-instance layout. It never touches an addons folder that already holds a checkout.
 
 ### What the Script Sets Up
 
@@ -457,18 +444,15 @@ bash scripts/update-modules.sh
 
 ### Switching to a New Remote Branch
 
-A teammate just pushed a new branch (e.g. `18_national_dev_new_IAP_levels`) and your `git branch -a` doesn't see it? Developer mode clones with `--single-branch`, so the remote refspec only tracks the branch you originally chose. To pull in any other branch, use the pre-flight menu:
+A teammate just pushed a new branch (e.g. `18_national_dev_new_IAP_levels`) and your `git branch -a` doesn't see it? Developer mode clones with `--single-branch`, so the remote refspec only tracks the branch you originally chose. To pull in any other branch, use the management menu:
 
 ```bash
-bash setup.sh    # → 3 (Developer) → y (already set up) → 9 (Fetch & switch)
+bash manage.sh    # → 3 (Addons) → 2 (Fetch & switch to a different branch)
 ```
 
-You'll be prompted for:
+In a multi-instance checkout the Addons item first shows the roster with the branch each `odcaN/` folder is on and asks which instance to work in (Enter keeps the pinned one), so a branch never lands in the wrong folder. The branch name is checked against origin before anything changes, uncommitted work comes along when it does not conflict (git refuses the switch otherwise), and afterwards the menu offers to restart or update modules on that same instance.
 
-- **Repo folder** — defaults to `custom-addons` (just press Enter). Any other path is allowed too.
-- **Branch name** — e.g. `18_national_dev_new_IAP_levels`.
-
-The script then runs, inside that folder:
+What runs inside the folder:
 
 ```bash
 git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
@@ -478,17 +462,17 @@ git switch <branch>
 
 The first command rewrites the clone's refspec so future `git fetch` calls pick up **all** remote branches — a one-time fix for the `--single-branch` clone.
 
-> **Manual equivalent:** run the three commands above from inside the target folder (`cd custom-addons` first). The menu option is exactly this, with prompts.
+> **Manual equivalent:** run the three commands above from inside the target folder (`cd odca2` or `cd custom-addons` first). The menu item is exactly this, with prompts.
 
 ### Multi-Instance Dev — Several Odoo Servers Side by Side
 
-When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_national_dev`, or running a per-developer sandbox — use the pre-flight menu:
+When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_national_dev`, or running a per-developer sandbox — choose the multi-instance layout in setup:
 
 ```bash
-bash setup.sh    # → 3 (Developer) → y (already set up) → 8 (Multi-instance)
+bash setup.sh    # → 3 (Developer), then 2 (Multi-instance) at the layout question
 ```
 
-The menu hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs:
+Setup hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs. Later, add or remove an instance from `bash manage.sh` → 6 (Stack) → 7, or with the commands further down:
 
 | Instance name | URL | Database | Custom-addons folder |
 |---------------|-----|----------|----------------------|
@@ -953,12 +937,12 @@ ePHEM developer menu   developer, multi-instance
 
   1) Status                        every instance: state, port, branch, uncommitted work
   2) Switch instance
-  3) Addons (odca2)                pull, fetch & switch branch, git status
+  3) Addons                        asks which odcaN/ first, then pull, fetch & switch branch, git status
   4) Restart instance 2 + follow the log      (scripts/dev-logs.sh 2)
   5) Update or install modules                (scripts/dev-logs.sh 2 -u ...)
-  6) Stack                         start/stop this instance, recreate or stop the whole stack, clean up leftovers
-  7) Pull the latest app image and recreate
-  8) Doctor                        scan the log for known errors, including a container docker refuses to start
+  6) Stack                         start/stop this instance, recreate or stop the whole stack, clean up leftovers, change the roster, full reset
+  7) Pull the latest app image and recreate   (fixes a wrong-architecture image first, explains a failed pull)
+  8) Doctor                        prerequisites (docker, compose, git, ssh), then scan the log for known errors
   9) Databases                     backup / restore / delete / duplicate / create
  10) Back up everything now        (scripts/backup.sh)
 ```
@@ -966,8 +950,13 @@ ePHEM developer menu   developer, multi-instance
 Everything is scoped to the pinned instance: the addons folder is `odcaN/`, a
 module update runs against `ephem_N` through `odooN`'s container, and a
 snapshot of `ephem_N` takes the filestore from **that instance's data volume**
-(`odoo-data-N`), whichever instance is pinned. The production-only items
-(domains, SSL, RPC, upload limit, security check) are not shown.
+(`odoo-data-N`), whichever instance is pinned. The Addons item is the one
+exception to acting silently: it shows the roster with the branch each
+folder is on and asks which instance to work in before it pulls or switches
+anything (Enter keeps the pinned one). Picking another instance pins it, so
+the restart and module update that follow act on the folder whose code just
+changed. The production-only items (domains, SSL, RPC, upload limit,
+security check) are not shown.
 
 The mode itself is written by `setup.sh` at the end of every run (and by
 `scripts/dev-instances.sh up`), so re-running setup defaults to what the

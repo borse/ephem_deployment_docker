@@ -230,6 +230,116 @@ stack_image() {
     echo "borrs/ephem:${t:-latest}"
 }
 
+# ── App image: architecture and pulls ─────────
+# Shared by setup.sh (install) and manage.sh (Update the app image).
+
+# Apple Silicon and other arm64 hosts: a forced DOCKER_DEFAULT_PLATFORM or a
+# cached amd64 image makes Docker run the app under emulation, and it never
+# re-selects the native build on its own. Asks before changing anything.
+ensure_native_image_arch() {
+    local image machine host_arch img_arch R
+    image=$(stack_image)
+    machine=$(uname -m 2>/dev/null || echo unknown)
+    case "$machine" in
+        arm64|aarch64) host_arch="arm64" ;;
+        x86_64|amd64)  host_arch="amd64" ;;
+        *) return 0 ;;   # unknown host arch: do not guess
+    esac
+    if [ -n "${DOCKER_DEFAULT_PLATFORM:-}" ] && [ "${DOCKER_DEFAULT_PLATFORM##*/}" != "$host_arch" ]; then
+        echo -e "${YELLOW}!${NC} DOCKER_DEFAULT_PLATFORM=${DOCKER_DEFAULT_PLATFORM} forces non-native images on this $host_arch machine."
+        read -r -p "  Ignore it for this run so the native $host_arch image is used? [Y/n]: " R
+        if [[ ! "${R:-Y}" =~ ^[Nn]$ ]]; then
+            unset DOCKER_DEFAULT_PLATFORM
+            echo -e "  ${GREEN}✓${NC} Unset for this run. Make it permanent by removing it from your"
+            echo "     shell profile (e.g. ~/.zshrc) and Docker Desktop → Settings → Docker Engine."
+        else
+            echo "  Keeping it: the app will run under emulation."
+        fi
+    fi
+    img_arch=$(docker image inspect "$image" --format '{{.Architecture}}' 2>/dev/null || echo "")
+    if [ -n "$img_arch" ] && [ "$img_arch" != "$host_arch" ]; then
+        echo -e "${YELLOW}!${NC} Cached $image is ${BOLD}$img_arch${NC} but this machine is ${BOLD}$host_arch${NC}: Docker will not switch it on its own."
+        read -r -p "  Remove it and re-pull the native $host_arch build? [Y/n]: " R
+        if [[ ! "${R:-Y}" =~ ^[Nn]$ ]]; then
+            docker rmi "$image" >/dev/null 2>&1 || true
+            echo "  Pulling the native $host_arch image…"
+            docker pull "$image" || true
+            echo -e "  ${GREEN}✓${NC} Native image pulled"
+        else
+            echo "  Keeping the $img_arch image: it will run under emulation."
+        fi
+    fi
+    return 0
+}
+
+# Pull compose service image(s) and, on failure, explain the ACTUAL cause
+# instead of blaming "docker login". Handles the classic WSL breakage where
+# ~/.docker/config.json points 'credsStore' at a Windows .exe that cannot run
+# in Linux: for a public image that is not an auth problem, so it offers to
+# fix it. Uses the compose files of the current mode when they are set
+# (manage.sh) and a plain `docker compose` otherwise (setup.sh).
+# Usage: docker_pull_with_diagnosis [service…]   (no argument: every service)
+docker_pull_with_diagnosis() {
+    local tmp rc=0 out cfg R
+    tmp="$(mktemp 2>/dev/null || echo "/tmp/ephem-pull.$$")"
+    docker compose ${COMPOSE_FILES[@]+"${COMPOSE_FILES[@]}"} pull "$@" 2>&1 | tee "$tmp" || rc=$?
+    out="$(cat "$tmp" 2>/dev/null)"; rm -f "$tmp"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo ""
+    # Broken credential helper (not an auth problem for a public image).
+    if printf '%s' "$out" | grep -qiE "error getting credentials|resolve credential|docker-credential-[a-z.]*: (exec format error|not found|no such file|executable file not found)|exec format error"; then
+        echo -e "  ${YELLOW}!${NC} This is NOT a login problem: borrs/ephem is public. Docker's"
+        echo "    credential helper is misconfigured (common in WSL: ~/.docker/config.json"
+        echo "    sets 'credsStore' to a Windows .exe that cannot run inside Linux)."
+        cfg="$HOME/.docker/config.json"
+        if [ -f "$cfg" ] && grep -qE '"credsStore"|"credHelpers"' "$cfg" 2>/dev/null; then
+            read -r -p "    Fix it now (back up config.json, drop the credential helper, retry)? [Y/n]: " R
+            if [[ ! "${R:-Y}" =~ ^[Nn]$ ]]; then
+                cp "$cfg" "$cfg.bak" 2>/dev/null || true
+                if command -v python3 >/dev/null 2>&1; then
+                    python3 - "$cfg" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+d.pop('credsStore', None); d.pop('credHelpers', None)
+json.dump(d, open(p, 'w'), indent=2)
+PYFIX
+                else
+                    sed -i.sedbak '/"credsStore"/d; /"credHelpers"/d' "$cfg" 2>/dev/null || true
+                fi
+                echo -e "    ${GREEN}✓${NC} Credential helper removed (backup: $cfg.bak). Retrying…"
+                if docker compose ${COMPOSE_FILES[@]+"${COMPOSE_FILES[@]}"} pull "$@"; then
+                    return 0
+                fi
+                echo -e "    ${RED}✗${NC} Still failing after the fix: see the output above."
+                return 1
+            fi
+        fi
+        echo "    Manual fix: remove the \"credsStore\" line from ~/.docker/config.json"
+        echo "    (or re-enable WSL interop), then try again."
+        return 1
+    fi
+    # Genuine auth failure: THIS is when to log in (private image).
+    if printf '%s' "$out" | grep -qiE "unauthorized|authentication required|access to the resource is denied|denied: |forbidden|pull access denied"; then
+        echo -e "  ${YELLOW}!${NC} The registry denied access. If the image is private, log in first:"
+        echo "        docker login"
+        echo "    then try again. (The public borrs/ephem image needs no login.)"
+        return 1
+    fi
+    # Network / DNS.
+    if printf '%s' "$out" | grep -qiE "no such host|lookup .*: | timeout|temporary failure|connection refused|network is unreachable|TLS handshake|i/o timeout"; then
+        echo -e "  ${YELLOW}!${NC} Looks like a network problem reaching Docker Hub: check your"
+        echo "    internet connection / proxy / VPN, then try again."
+        return 1
+    fi
+    echo -e "  ${YELLOW}!${NC} Pull failed: see the output above for the cause."
+    return 1
+}
+
 # ── Instances (dev-multi) ─────────────────────
 # The roster is .dev-instances, one name per line, written by
 # scripts/dev-instances.sh. A name's position gives its ports: the first

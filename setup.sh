@@ -71,10 +71,6 @@ open_url() {
     elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1
     else return 1; fi
 }
-have_opener() {
-    command -v open >/dev/null 2>&1 || command -v wslview >/dev/null 2>&1 \
-        || command -v explorer.exe >/dev/null 2>&1 || command -v xdg-open >/dev/null 2>&1
-}
 
 # Echoes the platform family: mac | windows | wsl | linux | unknown.
 detect_platform() {
@@ -276,403 +272,9 @@ ensure_docker_ready() {
     echo -e "${GREEN}✓${NC} Docker is installed, running, and Compose v2 is available"
 }
 
-# ── Architecture guard ────────────────────────
-# A multi-arch image normally resolves to the host's native arch automatically.
-# Two things override that and silently install the wrong arch (then run under
-# emulation, e.g. amd64 on an Apple Silicon Mac): DOCKER_DEFAULT_PLATFORM, or a
-# stale same-tag image already cached. Detect both and offer to fix so the
-# native build is used.
-ensure_native_image_arch() {
-    local image="borrs/ephem:latest" machine host_arch
-    machine=$(uname -m 2>/dev/null || echo unknown)
-    case "$machine" in
-        arm64|aarch64) host_arch="arm64" ;;
-        x86_64|amd64)  host_arch="amd64" ;;
-        *) return 0 ;;   # unknown host arch — don't guess
-    esac
-
-    # (1) Forced platform env var overrides the manifest for every pull.
-    if [ -n "${DOCKER_DEFAULT_PLATFORM:-}" ] \
-       && [ "${DOCKER_DEFAULT_PLATFORM##*/}" != "$host_arch" ]; then
-        echo -e "${YELLOW}!${NC} DOCKER_DEFAULT_PLATFORM=${DOCKER_DEFAULT_PLATFORM} forces non-native images on this $host_arch machine."
-        read -p "  Ignore it for this run so the native $host_arch image is used? [Y/n]: " UNSET_PLAT
-        if [[ ! "${UNSET_PLAT:-Y}" =~ ^[Nn]$ ]]; then
-            unset DOCKER_DEFAULT_PLATFORM
-            echo -e "  ${GREEN}✓${NC} Unset for this run. Make it permanent by removing it from your"
-            echo "     shell profile (e.g. ~/.zshrc) and Docker Desktop → Settings → Docker Engine."
-        else
-            echo "  Keeping it — the app will run under emulation."
-        fi
-    fi
-
-    # (2) A stale cached image of the wrong arch is not re-selected on its own.
-    local img_arch
-    img_arch=$(docker image inspect "$image" --format '{{.Architecture}}' 2>/dev/null || echo "")
-    if [ -n "$img_arch" ] && [ "$img_arch" != "$host_arch" ]; then
-        echo -e "${YELLOW}!${NC} Cached $image is ${BOLD}$img_arch${NC} but this machine is ${BOLD}$host_arch${NC} — Docker won't switch it automatically."
-        read -p "  Remove it and re-pull the native $host_arch build? [Y/n]: " REPULL
-        if [[ ! "${REPULL:-Y}" =~ ^[Nn]$ ]]; then
-            docker rmi "$image" >/dev/null 2>&1 || true
-            echo "  Pulling native $host_arch image…"
-            docker compose pull odoo 2>/dev/null || docker pull "$image" || true
-            echo -e "  ${GREEN}✓${NC} Native image pulled"
-        else
-            echo "  Keeping the $img_arch image — it will run under emulation."
-        fi
-    fi
-}
-
-# ── Developer pre-flight helpers ───────────────
-# Used by the developer-mode menu shown before installation.
-
-dev_cheatsheet() {
-    echo -e "${CYAN}${BOLD}Common developer commands${NC} (run from this repo dir)"
-    echo ""
-    echo "  Logs:"
-    echo "    docker compose logs -f odoo            # live tail (Ctrl-C to stop)"
-    echo "    docker compose logs --tail=100 odoo    # last 100 lines"
-    echo "    docker logs -f ephem-app               # raw odoo lines (no compose prefix)"
-    echo "      ↳ PyCharm: add this as a Shell Script run config for colored logs."
-    echo "        Colors come from Odoo itself (ODOO_PY_COLORS=1, set in the override) —"
-    echo "        no IDE plugin needed; the console just renders the ANSI codes."
-    echo "  Service:"
-    echo "    bash scripts/dev-logs.sh               # restart Odoo + follow colored logs"
-    echo "    bash scripts/dev-logs.sh <name>        # same, for a multi-instance server (e.g. 'a')"
-    echo "      ↳ PyCharm: one Shell Script run config per instance (dev-logs.sh a, …) = a green ▶ each"
-    echo "    docker compose restart odoo            # restart Odoo only"
-    echo "    docker compose up -d                   # start everything"
-    echo "    docker compose down                    # stop (keep data)"
-    echo "  Image:"
-    echo "    docker compose pull                    # fetch a newer app image"
-    echo "  Addons (your live git work in custom-addons/):"
-    echo "    git -C custom-addons status"
-    echo "    git -C custom-addons pull"
-    echo "    git -C custom-addons branch --show-current"
-    echo "  Update a module after editing:"
-    echo "    docker compose exec odoo odoo -u <module> -d <db> --stop-after-init"
-}
-
-dev_suggest() {
-    echo -e "${CYAN}${BOLD}Suggested next commands${NC} (based on current state)"
-    echo ""
-    local running=0
-    docker compose ps --status=running 2>/dev/null | grep -q odoo && running=1
-    if [ "$running" -eq 1 ]; then
-        echo "  • Odoo is running. Watch logs:    docker compose logs -f odoo"
-        echo "  • After editing addons, restart:  docker compose restart odoo"
-    else
-        echo "  • Stack is down. Start it:        docker compose up -d"
-        echo "  • Then watch startup:             docker compose logs -f odoo"
-    fi
-    if [ -d custom-addons/.git ]; then
-        local cur behind
-        cur=$(git -C custom-addons branch --show-current 2>/dev/null || echo "?")
-        echo "  • custom-addons branch:           $cur"
-        # timeout: a slow/unreachable origin must not make the menu hang
-        if timeout 10 git -C custom-addons fetch origin >/dev/null 2>&1; then
-            behind=$(git -C custom-addons rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo 0)
-            [ "${behind:-0}" -gt 0 ] 2>/dev/null && \
-                echo "  • $behind commit(s) behind — update:  git -C custom-addons pull"
-        fi
-    fi
-}
-
-dev_readme() {
-    echo -e "${CYAN}${BOLD}Documentation${NC}"
-    echo ""
-    echo "  Deployment / setup (this repo):"
-    echo "    https://github.com/borse/ephem_deployment_docker#readme"
-    echo "  ePHEM addons:"
-    echo "    https://github.com/borse/ePHEM"
-    echo ""
-    if [ -f README.md ]; then
-        read -p "  View the local README.md now? [y/N]: " V
-        if [[ "${V:-N}" =~ ^[Yy]$ ]]; then
-            ${PAGER:-less} README.md 2>/dev/null || cat README.md
-        fi
-    fi
-    if have_opener; then
-        read -p "  Open the deployment README in a browser? [y/N]: " O
-        [[ "${O:-N}" =~ ^[Yy]$ ]] && open_url "https://github.com/borse/ephem_deployment_docker#readme" || true
-    fi
-}
-
-dev_prereq_check() {
-    echo -e "${CYAN}${BOLD}Prerequisite check${NC}"
-    echo ""
-    local ok=1
-    if command -v docker >/dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} docker     $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
-    else
-        echo -e "${RED}✗${NC} docker not found — install Docker Engine/Desktop"; ok=0
-    fi
-    if docker compose version >/dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} compose    $(docker compose version --short 2>/dev/null)"
-    else
-        echo -e "${RED}✗${NC} docker compose v2 not found"; ok=0
-    fi
-    if command -v git >/dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} git        $(git --version 2>/dev/null | awk '{print $3}')"
-    else
-        echo -e "${RED}✗${NC} git not found"; ok=0
-    fi
-    if command -v ssh >/dev/null 2>&1; then
-        echo -e "${GREEN}✓${NC} ssh        present"
-    else
-        echo -e "${RED}✗${NC} ssh not found"; ok=0
-    fi
-    if ! docker info >/dev/null 2>&1; then
-        echo -e "${YELLOW}!${NC} Docker daemon not responding — is Docker running?"; ok=0
-    fi
-    echo ""
-    if [ "$ok" -eq 1 ]; then
-        echo -e "${GREEN}✓${NC} All prerequisites present."
-    else
-        echo -e "${YELLOW}!${NC} Some prerequisites are missing (see above)."
-    fi
-}
-
-dev_status() {
-    echo -e "${CYAN}${BOLD}Container status${NC}   $(ephem_mode_label)"
-    echo ""
-    stack_init >/dev/null 2>&1 || true
-    compose ps 2>/dev/null || echo -e "${YELLOW}!${NC} Could not read compose status (no containers yet?)"
-    echo ""
-    echo "  Day-to-day work (status, addons, restart + logs, modules, doctor):  bash manage.sh"
-}
-
-dev_doctor() {
-    stack_init >/dev/null 2>&1 || true
-    local svc="$ODOO_SVC" n
-    if [ "$EPHEM_MODE" = dev-multi ]; then
-        echo "  Instances: ${INSTANCES[*]}"
-        read -p "  Which instance? [${EPHEM_INSTANCE}]: " n
-        n="${n:-$EPHEM_INSTANCE}"
-        if ! inst_index "$n" >/dev/null; then
-            echo -e "${RED}✗${NC} No instance named '$n'."
-            return 1
-        fi
-        svc="odoo_$n"
-    fi
-    stack_doctor "$svc"
-}
-
-dev_reset() {
-    echo -e "${CYAN}${BOLD}Reset / clean environment${NC}"
-    echo ""
-    echo -e "${GREEN}Your custom-addons/ is a host folder and is NEVER touched by any option here.${NC}"
-    echo ""
-    echo "  1) Stop containers, keep data    (docker compose down)"
-    echo "  2) Full reset: wipe DB + Odoo filestore volumes, KEEP custom-addons"
-    echo "       (docker compose down -v  — removes postgres-data & odoo-data)"
-    echo "  3) Cancel"
-    echo ""
-    read -p "Choose [1-3]: " R
-    case "${R:-3}" in
-        1) docker compose down && echo -e "${GREEN}✓${NC} Stopped (data preserved)." ;;
-        2)
-            echo ""
-            echo -e "${RED}This deletes the database and Odoo filestore volumes.${NC} custom-addons/ stays."
-            read -p "Type RESET to confirm: " CONF
-            if [ "$CONF" = "RESET" ]; then
-                docker compose down -v && \
-                    echo -e "${GREEN}✓${NC} Volumes wiped, custom-addons/ untouched. Start fresh: docker compose up -d"
-            else
-                echo "  Cancelled."
-            fi
-            ;;
-        *) echo "  Cancelled." ;;
-    esac
-}
-
-# Pull compose service image(s) and, on failure, explain the ACTUAL cause
-# instead of blaming "docker login". Handles the classic WSL breakage where
-# ~/.docker/config.json points 'credsStore' at a Windows .exe that can't run in
-# Linux — for a public image that's not an auth problem, so it offers to fix it.
-# Usage: docker_pull_with_diagnosis <compose pull args…>   (e.g. odoo)
-docker_pull_with_diagnosis() {
-    local tmp rc out
-    tmp="$(mktemp 2>/dev/null || echo "/tmp/ephem-pull.$$")"
-    docker compose pull "$@" 2>&1 | tee "$tmp"
-    rc=${PIPESTATUS[0]}
-    out="$(cat "$tmp" 2>/dev/null)"; rm -f "$tmp"
-    [ "$rc" -eq 0 ] && return 0
-
-    echo ""
-    # ── Broken credential helper (not an auth problem for a public image) ──
-    if printf '%s' "$out" | grep -qiE "error getting credentials|resolve credential|docker-credential-[a-z.]*: (exec format error|not found|no such file|executable file not found)|exec format error"; then
-        echo -e "  ${YELLOW}!${NC} This is NOT a login problem — borrs/ephem is public. Docker's"
-        echo "    credential helper is misconfigured (common in WSL: ~/.docker/config.json"
-        echo "    sets 'credsStore' to a Windows .exe that can't run inside Linux)."
-        local cfg="$HOME/.docker/config.json"
-        if [ -f "$cfg" ] && grep -qE '"credsStore"|"credHelpers"' "$cfg" 2>/dev/null; then
-            read -p "    Fix it now (back up config.json, drop the credential helper, retry)? [Y/n]: " FIXCRED
-            if [[ ! "${FIXCRED:-Y}" =~ ^[Nn]$ ]]; then
-                cp "$cfg" "$cfg.bak" 2>/dev/null || true
-                if command -v python3 >/dev/null 2>&1; then
-                    python3 - "$cfg" <<'PY'
-import json, sys
-p = sys.argv[1]
-try:
-    d = json.load(open(p))
-except Exception:
-    d = {}
-d.pop('credsStore', None); d.pop('credHelpers', None)
-json.dump(d, open(p, 'w'), indent=2)
-PY
-                else
-                    sed -i.sedbak '/"credsStore"/d; /"credHelpers"/d' "$cfg" 2>/dev/null || true
-                fi
-                echo -e "    ${GREEN}✓${NC} Credential helper removed (backup: $cfg.bak). Retrying…"
-                if docker compose pull "$@"; then
-                    return 0
-                fi
-                echo -e "    ${RED}✗${NC} Still failing after the fix — see output above."
-                return 1
-            fi
-        fi
-        echo "    Manual fix: remove the \"credsStore\" line from ~/.docker/config.json"
-        echo "    (or re-enable WSL interop), then try again."
-        return 1
-    fi
-    # ── Genuine auth failure → THIS is when to log in (private image) ──
-    if printf '%s' "$out" | grep -qiE "unauthorized|authentication required|access to the resource is denied|denied: |forbidden|pull access denied"; then
-        echo -e "  ${YELLOW}!${NC} The registry denied access. If the image is private, log in first:"
-        echo "        docker login"
-        echo "    then try again. (The public borrs/ephem image needs no login.)"
-        return 1
-    fi
-    # ── Network / DNS ──
-    if printf '%s' "$out" | grep -qiE "no such host|lookup .*: | timeout|temporary failure|connection refused|network is unreachable|TLS handshake|i/o timeout"; then
-        echo -e "  ${YELLOW}!${NC} Looks like a network problem reaching Docker Hub — check your"
-        echo "    internet connection / proxy / VPN, then try again."
-        return 1
-    fi
-    echo -e "  ${YELLOW}!${NC} Pull failed — see the output above for the cause."
-    return 1
-}
-
-dev_update_image() {
-    echo -e "${CYAN}${BOLD}Update / repair app image${NC}"
-    echo ""
-    echo "  Fixes a wrong-architecture image (e.g. amd64 pulled on an Apple Silicon"
-    echo "  Mac), then pulls the latest borrs/ephem:latest."
-    echo ""
-    # Detect & offer to fix a forced platform / stale wrong-arch cached image.
-    ensure_native_image_arch
-    echo ""
-    read -p "  Pull the latest app image now? [Y/n]: " PULL_NOW
-    if [[ "${PULL_NOW:-Y}" =~ ^[Nn]$ ]]; then
-        echo "  Skipped."
-        return 0
-    fi
-    echo "  Pulling borrs/ephem:latest (this may take a few minutes)…"
-    if docker_pull_with_diagnosis odoo; then
-        echo -e "  ${GREEN}✓${NC} Image up to date. Apply it:  docker compose up -d"
-    fi
-}
-
-dev_multi_instance() {
-    echo -e "${CYAN}${BOLD}Multi-instance dev — run several Odoo servers side by side${NC}"
-    echo ""
-    echo "  Runs N Odoo containers sharing ONE Postgres, each with its own:"
-    echo "    • port            (8010, 8020, 8030, …)"
-    echo "    • custom-addons   (odca<name>/)"
-    echo "    • config + DB     (odoo-<name>.conf, database ephem_<name>)"
-    echo ""
-    echo "  This is separate from the single-instance stack. Examples:"
-    echo "    bash scripts/dev-instances.sh up 1 2 3"
-    echo "    bash scripts/dev-instances.sh up a:18_national_dev b:16_national_dev c"
-    echo "    bash scripts/dev-instances.sh status   # ports + URLs"
-    echo "    bash scripts/dev-instances.sh down     # stop (keep data)"
-    echo ""
-    read -p "  Start instances now? Enter names (space-separated) or blank for '1 2 3', or 'n' to skip: " MI
-    case "${MI:-}" in
-        n|N) echo "  Skipped." ;;
-        "")  bash scripts/dev-instances.sh up 1 2 3 ;;
-        *)   bash scripts/dev-instances.sh up $MI ;;
-    esac
-}
-
-dev_fetch_branch() {
-    echo -e "${CYAN}${BOLD}Fetch & switch to a remote branch${NC}"
-    echo ""
-    echo "  Use this when a teammate created a new branch upstream and your"
-    echo "  local clone doesn't see it yet (common after a --single-branch clone)."
-    echo ""
-    read -p "  Repo folder [custom-addons]: " REPO
-    REPO="${REPO:-custom-addons}"
-    read -p "  Branch name on origin (e.g. 18_national_dev_new): " BR
-    if [ -z "${BR:-}" ]; then
-        echo "  Cancelled — no branch name given."
-        return 0
-    fi
-    ensure_github_ssh || true    # one passphrase prompt at most, not one per git command
-    if [ ! -d "$REPO/.git" ]; then
-        echo ""
-        echo -e "${YELLOW}!${NC} '$REPO' is not a git repository — cloning fresh from origin."
-        # Validate the branch BEFORE deleting or cloning anything, so a typo
-        # can never cost you an existing folder or a wasted clone.
-        if ! git ls-remote --exit-code --heads git@github.com:borse/ePHEM.git "$BR" >/dev/null 2>&1; then
-            echo ""
-            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
-            git ls-remote --heads git@github.com:borse/ePHEM.git 2>/dev/null \
-                | sed 's|.*refs/heads/|    • |' \
-                || echo "    (could not list — is your SSH key authorized? ssh -T git@github.com)"
-            return 1
-        fi
-        if [ -e "$REPO" ] && [ -n "$(ls -A "$REPO" 2>/dev/null)" ]; then
-            read -p "  '$REPO' exists and is not empty. Delete it and clone fresh? [y/N]: " CONF
-            if [[ ! "${CONF:-N}" =~ ^[Yy]$ ]]; then
-                echo "  Cancelled."
-                return 0
-            fi
-            rm -rf "$REPO"
-        elif [ -e "$REPO" ]; then
-            rm -rf "$REPO"
-        fi
-        echo ""
-        echo "  Cloning git@github.com:borse/ePHEM.git (branch: $BR) into $REPO..."
-        if git clone git@github.com:borse/ePHEM.git \
-               --branch "$BR" \
-               --single-branch \
-               "$REPO" \
-               --progress; then
-            echo -e "${GREEN}✓${NC} $REPO cloned (branch: $BR)"
-        else
-            echo -e "${RED}✗${NC} Clone failed — does branch '$BR' exist on origin, and is your SSH key authorized?"
-            return 1
-        fi
-        return 0
-    fi
-    echo ""
-    echo "  In $REPO, running:"
-    echo "    git config remote.origin.fetch \"+refs/heads/*:refs/remotes/origin/*\""
-    echo "    git fetch origin $BR"
-    echo "    git switch $BR"
-    echo ""
-    (
-        cd "$REPO" || exit 1
-        # Validate BEFORE widening the refspec: a failed fetch after widening
-        # leaves the config fetching every branch, which reads as a freeze on
-        # slow links the next time anything runs a plain `git fetch`.
-        if ! git ls-remote --exit-code --heads origin "$BR" >/dev/null 2>&1; then
-            echo ""
-            echo -e "${RED}✗${NC} No branch named '$BR' on origin. Branches that exist:"
-            git ls-remote --heads origin 2>/dev/null \
-                | sed 's|.*refs/heads/|    • |' \
-                || echo "    (could not list — is your SSH key authorized? ssh -T git@github.com)"
-            exit 1
-        fi
-        git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-        if ! git fetch origin "$BR"; then
-            echo ""
-            echo -e "${RED}✗${NC} Fetch failed — network or access problem?"
-            exit 1
-        fi
-        git switch "$BR"
-    ) && echo -e "${GREEN}✓${NC} $REPO now on branch '$BR'"
-}
+# ── Multi-instance addons folders ─────────────
+# (The architecture guard and the pull diagnosis live in scripts/stack-lib.sh,
+# shared with manage.sh.)
 
 # Sanitise an instance name into the folder/service-safe form dev-instances.sh uses.
 san_name() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_'; }
@@ -689,64 +291,62 @@ multi_switch_branch() {
     )
 }
 
+# "1 2" → "odca1 odca2"
+odca_names() { local n out=""; for n in $1; do out="$out odca$n"; done; printf '%s' "${out# }"; }
+
 prepare_multi_addons() {
-    # $1 = branch, remaining args = instance names.
+    # $1 = branch, remaining args = every instance name.
     #
-    # Downloads ePHEM ONCE into the first instance's odca dir, then copies that
-    # folder (including its .git) to the other instances — so the branch is
-    # cloned a single time, not once per instance.
-    #
-    # On a re-run where a dir already has .git, it fetches + switches to the
-    # requested branch instead of copying. That's why we keep .git around: the
-    # second time you pick a branch it's an incremental fetch, not a full clone.
+    # A folder with no clone yet gets one: the first such folder by a single
+    # git clone, the rest by copying that folder (.git included) and
+    # switching the copy, so the branch is downloaded once. A folder that
+    # already holds a clone is never touched here: it may be on its own
+    # branch on purpose, and switching is manage.sh → Addons, per instance.
     local branch="$1"; shift
     local repo="git@github.com:borse/ePHEM.git"
-    local first="" first_dir="" name dir
+    local source_dir="" name dir cur
 
     echo ""
-    echo -e "${CYAN}${BOLD}Preparing custom-addons for each instance (branch: $branch)${NC}"
+    echo -e "${CYAN}${BOLD}Preparing custom-addons per instance (branch: $branch)${NC}"
     echo ""
 
     for raw in "$@"; do
         name=$(san_name "$raw")
         dir="odca$name"
 
-        if [ -z "$first" ]; then
-            first="$name"; first_dir="$dir"
-            if [ -d "$dir/.git" ]; then
-                echo -e "  ${CYAN}↻${NC} $dir exists — fetching & switching to '$branch'…"
-                if ! multi_switch_branch "$dir" "$branch"; then
-                    echo -e "  ${RED}✗${NC} Could not switch $dir to '$branch'."
-                    echo "     Check the branch name and your SSH access to borse/ePHEM."
-                    return 1
-                fi
-            else
-                echo -e "  ${CYAN}⬇${NC} Cloning ePHEM ($branch) into $dir (one download for all instances)…"
-                rm -rf "$dir"
-                if ! git clone "$repo" --branch "$branch" --single-branch "$dir" --progress; then
-                    echo -e "  ${RED}✗${NC} Clone failed — does branch '$branch' exist, and is your SSH key authorized?"
-                    rm -rf "$dir"
-                    return 1
-                fi
-            fi
-            echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
+        if [ -d "$dir/.git" ]; then
+            [ -z "$source_dir" ] && source_dir="$dir"
+            cur=$(git -C "$dir" branch --show-current 2>/dev/null) || cur=""
+            echo -e "  ${GREEN}·${NC} $dir kept as it is (branch: ${cur:-(detached)})"
             continue
         fi
 
-        # Subsequent instances: reuse the first clone.
-        if [ -d "$dir/.git" ]; then
-            echo -e "  ${CYAN}↻${NC} $dir exists — fetching & switching to '$branch'…"
-            if multi_switch_branch "$dir" "$branch"; then
-                echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
-            else
-                echo -e "  ${YELLOW}!${NC} $dir could not switch to '$branch' — leaving it as-is."
-            fi
-        else
-            echo -e "  ${CYAN}⧉${NC} Copying $first_dir → $dir (no re-download)…"
-            rm -rf "$dir"
-            cp -a "$first_dir" "$dir"
-            echo -e "  ${GREEN}✓${NC} $dir ready (copied from $first_dir, branch: $branch)"
+        # No clone here. A folder with files but no .git is someone's work,
+        # not ours to replace.
+        if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+            echo -e "  ${YELLOW}!${NC} $dir has files but is not a git clone — left as it is."
+            continue
         fi
+        if [ -z "$source_dir" ]; then
+            echo -e "  ${CYAN}⬇${NC} Cloning ePHEM ($branch) into $dir (one download for all instances)…"
+            rm -rf "$dir"
+            if ! git clone "$repo" --branch "$branch" --single-branch "$dir" --progress; then
+                echo -e "  ${RED}✗${NC} Clone failed — does branch '$branch' exist, and is your SSH key authorized?"
+                rm -rf "$dir"
+                return 1
+            fi
+            source_dir="$dir"
+        else
+            echo -e "  ${CYAN}⧉${NC} Copying $source_dir → $dir (no re-download)…"
+            rm -rf "$dir"
+            cp -a "$source_dir" "$dir"
+            cur=$(git -C "$dir" branch --show-current 2>/dev/null) || cur=""
+            if [ "$cur" != "$branch" ] && ! multi_switch_branch "$dir" "$branch"; then
+                echo -e "  ${YELLOW}!${NC} $dir copied, but could not switch it to '$branch' — left on '${cur:-(detached)}'."
+                continue
+            fi
+        fi
+        echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
     done
 }
 
@@ -773,51 +373,29 @@ select_instance_layout() {
     esac
 }
 
-dev_preflight_menu() {
+# Returning developers: day-to-day work is manage.sh's job, so offer it
+# before the install steps run again. Continuing is safe (every step keeps
+# data), it is just the long way round for a status check or a branch switch.
+dev_returning_gate() {
     read -p "Have you already set up the ePHEM dev environment on this machine before? [y/N]: " ALREADY_SETUP
     echo ""
     if [[ ! "${ALREADY_SETUP:-N}" =~ ^[Yy]$ ]]; then
         echo -e "${CYAN}First-time setup — continuing with installation…${NC}"
-        echo "  (Re-run this script later to access the developer menu:"
-        echo "   prereq checks, doctor, multi-instance, etc.)"
         return 0
     fi
-    echo "Welcome back. Use the menu below, or choose 'Continue' to re-run setup."
-    echo "  (Day-to-day work has its own menu:  bash manage.sh)"
-    while true; do
-        echo ""
-        echo -e "${BOLD}Developer pre-flight menu${NC}"
-        echo "  1) View relevant commands"
-        echo "  2) Suggest commands (based on current state)"
-        echo "  3) Open GitHub README / docs"
-        echo "  4) Prerequisite check (docker, compose, git, ssh)"
-        echo "  5) Container status / health"
-        echo "  6) Doctor — scan logs for common errors"
-        echo "  7) Reset / clean environment (keeps custom-addons)"
-        echo "  8) Multi-instance dev — run several Odoo side by side"
-        echo "  9) Fetch & switch to a remote branch (custom-addons or other)"
-        echo " 10) Update / repair app image (re-pull latest, fix Mac architecture)"
-        echo " 11) Continue with setup"
-        echo " 12) Exit"
-        echo ""
-        read -p "Choose [1-12] (default: 11): " PRE
-        echo ""
-        case "${PRE:-11}" in
-            1) dev_cheatsheet || true ;;
-            2) dev_suggest || true ;;
-            3) dev_readme || true ;;
-            4) dev_prereq_check || true ;;
-            5) dev_status || true ;;
-            6) dev_doctor || true ;;
-            7) dev_reset || true ;;
-            8) dev_multi_instance || true ;;
-            9) dev_fetch_branch || true ;;
-            10) dev_update_image || true ;;
-            11) echo -e "${CYAN}Continuing with setup…${NC}"; break ;;
-            12) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
-            *) echo -e "${YELLOW}!${NC} Invalid choice — pick 1-12." ;;
-        esac
-    done
+    echo "Welcome back. Day-to-day work lives in the management menu: status, addons"
+    echo "and branches, restart + logs, module updates, doctor, databases, stack, app image."
+    echo ""
+    echo "  1) Open the management menu now          (bash manage.sh)"
+    echo "  2) Re-run setup: refresh containers, add instances, change the layout"
+    echo "  3) Exit"
+    echo ""
+    read -p "Choose [1-3] (default: 1): " R
+    case "${R:-1}" in
+        2) echo -e "${CYAN}Continuing with setup…${NC}" ;;
+        3) echo "Exiting. Re-run anytime: bash setup.sh"; exit 0 ;;
+        *) exec bash manage.sh ;;
+    esac
 }
 
 echo ""
@@ -888,8 +466,8 @@ if [ "$MODE" = "developer" ]; then
     echo "and you must be a collaborator on borse/ePHEM."
     echo ""
 
-    # Pre-flight hub: commands, diagnostics, reset — before any install steps.
-    dev_preflight_menu
+    # Returning developers get sent to manage.sh before any install step runs.
+    dev_returning_gate
     echo ""
 
     # Ask single vs multi BEFORE any single-instance work — so re-running
@@ -992,31 +570,51 @@ if [ "$MODE" = "developer" ]; then
             exit 1
         fi
 
-        # ── Choose the branch (downloaded once, shared by all instances) ────
-        echo ""
-        echo "  Which branch do you want to work on?"
-        echo "  It is downloaded once into odca${INSTANCE_NAMES%% *} and copied to the other instances."
-        echo ""
-        echo "    1) 18_national_dev    — Odoo 18 development (recommended)"
-        echo "    2) 18_national_master — Odoo 18 stable"
-        echo "    3) 16_national_dev    — Odoo 16 development"
-        echo "    4) 16_national_master — Odoo 16 stable"
-        echo "    5) Other (type a branch name)"
-        echo ""
-        read -p "  Choose [1-5] (default: 1): " BRANCH_CHOICE
-        case "${BRANCH_CHOICE:-1}" in
-            2) BRANCH="18_national_master" ;;
-            3) BRANCH="16_national_dev" ;;
-            4) BRANCH="16_national_master" ;;
-            5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-18_national_dev}" ;;
-            *) BRANCH="18_national_dev" ;;
-        esac
+        # ── Addons folders ──────────────────────────────────────────────────
+        # First run: every odcaN/ is empty and all of them get the clone.
+        # Re-run: a folder that already holds a checkout is left exactly as it
+        # is (pull and branch switching are manage.sh → Addons, per instance);
+        # only a folder with no clone yet gets one.
+        MISSING=""
+        for _n in $INSTANCE_NAMES; do
+            _n=$(san_name "$_n")
+            [ -d "odca$_n/.git" ] || MISSING="$MISSING $_n"
+        done
+        MISSING="${MISSING# }"
+        if [ -z "$MISSING" ]; then
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Every instance already has ePHEM checked out; the folders are left as they are."
+            echo "     Pull or switch a branch per instance:  bash manage.sh → Addons"
+        else
+            echo ""
+            echo "  Which branch do you want to work on?"
+            if [ "$(printf '%s\n' $MISSING | wc -l)" -eq "$(printf '%s\n' $INSTANCE_NAMES | wc -l)" ]; then
+                echo "  It is downloaded once into odca${MISSING%% *} and copied to the other instances."
+            else
+                echo "  It goes to $(odca_names "$MISSING"), copied from an existing folder (no re-download)."
+            fi
+            echo ""
+            echo "    1) 18_national_dev    — Odoo 18 development (recommended)"
+            echo "    2) 18_national_master — Odoo 18 stable"
+            echo "    3) 16_national_dev    — Odoo 16 development"
+            echo "    4) 16_national_master — Odoo 16 stable"
+            echo "    5) Other (type a branch name)"
+            echo ""
+            read -p "  Choose [1-5] (default: 1): " BRANCH_CHOICE
+            case "${BRANCH_CHOICE:-1}" in
+                2) BRANCH="18_national_master" ;;
+                3) BRANCH="16_national_dev" ;;
+                4) BRANCH="16_national_master" ;;
+                5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-18_national_dev}" ;;
+                *) BRANCH="18_national_dev" ;;
+            esac
 
-        # ── Clone once, copy to the rest (or fetch+switch if already cloned) ─
-        # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
-        if ! prepare_multi_addons "$BRANCH" $INSTANCE_NAMES; then
-            echo -e "${RED}✗${NC} Could not prepare custom-addons — see the error above. Aborting."
-            exit 1
+            # ── Clone once, copy to the rest ────────────────────────────────
+            # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
+            if ! prepare_multi_addons "$BRANCH" $INSTANCE_NAMES; then
+                echo -e "${RED}✗${NC} Could not prepare custom-addons — see the error above. Aborting."
+                exit 1
+            fi
         fi
 
         echo ""
@@ -1134,9 +732,9 @@ if [ "$MODE" = "developer" ]; then
         echo "    Restart + tail one:   bash scripts/dev-logs.sh <name>"
         echo "    Stop (keep data):     bash scripts/dev-instances.sh down"
         echo ""
-        echo -e "  ${CYAN}Fetch a different branch later?${NC} Just re-run this script and choose"
-        echo "  multi-instance again — the git history is already on disk, so it's an"
-        echo "  incremental fetch, not a fresh download."
+        echo -e "  ${CYAN}Everything from here on is bash manage.sh:${NC} it asks which instance,"
+        echo "  then pulls or switches that folder alone, restarts, updates modules, and"
+        echo "  changes the roster. Re-running this script never touches an existing folder."
 
         # ── PyCharm handoff — copy/paste-ready run-config guidance ──────────
         # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches
@@ -1657,7 +1255,7 @@ ensure_native_image_arch
 # missing image reliably resolves to a clean "none".
 echo ""
 echo "Checking for Docker image updates..."
-CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' borrs/ephem:latest 2>/dev/null || true)
+CURRENT_IMAGE=$(docker inspect --format='{{.Id}}' "$(stack_image)" 2>/dev/null || true)
 CURRENT_IMAGE="${CURRENT_IMAGE:-none}"
 
 if [ "$CURRENT_IMAGE" = "none" ]; then
@@ -1668,12 +1266,19 @@ else
     read -p "  Check for Odoo image updates? [y/N]: " CHECK_IMAGE
     if [[ "${CHECK_IMAGE:-N}" =~ ^[Yy]$ ]]; then
         echo "  Pulling latest image (this may take a few minutes)..."
-        if docker compose pull odoo 2>&1 | grep -q "Downloaded newer image\|Pull complete"; then
-            echo -e "${GREEN}✓${NC} Image updated"
-            IMAGE_UPDATED=true
+        # Compared by image id: the pull output is not a stable API, and a
+        # failed pull is explained by the helper instead of read as "no update".
+        IMAGE_UPDATED=false
+        if docker_pull_with_diagnosis odoo; then
+            NEW_IMAGE=$(docker inspect --format='{{.Id}}' "$(stack_image)" 2>/dev/null || true)
+            if [ "${NEW_IMAGE:-none}" != "$CURRENT_IMAGE" ]; then
+                echo -e "${GREEN}✓${NC} Image updated"
+                IMAGE_UPDATED=true
+            else
+                echo -e "${GREEN}✓${NC} Image is already up to date"
+            fi
         else
-            echo -e "${GREEN}✓${NC} Image is already up to date"
-            IMAGE_UPDATED=false
+            echo -e "${YELLOW}!${NC} Pull failed (see above); continuing with the image already here."
         fi
     else
         echo "  Skipped — image not updated"

@@ -920,9 +920,42 @@ menu_update_app() {
 }
 
 # ── 5) Custom addons: fetch/switch branch, pull ─
-# server: custom-addons/, shared by every tenant. dev-multi: the pinned
-# instance's odcaN/ only.
+# server: custom-addons/, shared by every tenant. dev-multi: one odcaN/,
+# asked for on every visit (ask_addons_instance below).
+
+# dev-multi: which odcaN/ this visit works in. Asked every time, with the
+# roster on screen: the pinned instance is only whatever the last run used,
+# and pulling or switching the wrong folder is the accident this menu exists
+# to prevent. Choosing another instance pins it, so Restart and Update
+# modules then act on the folder whose code just changed.
+ask_addons_instance() {
+    local N
+    echo -e "${CYAN}${BOLD}Addons: which instance?${NC}"
+    echo ""
+    instances_table
+    echo ""
+    read -r -p "  Work in the folder of instance [${INSTANCES[*]}] (Enter = $EPHEM_INSTANCE, odca$EPHEM_INSTANCE; b back): " N || return 1
+    N="${N#odca}"
+    N="${N:-$EPHEM_INSTANCE}"
+    if ! inst_index "$N" >/dev/null; then
+        case "$N" in
+            b|B) return 1 ;;
+            x|X) echo "Bye. Re-open anytime:  bash manage.sh"; exit 0 ;;
+        esac
+        echo -e "  ${RED}✗${NC} No instance named '$N'. Configured: ${INSTANCES[*]}"
+        return 1
+    fi
+    if [ "$N" != "$EPHEM_INSTANCE" ]; then
+        stack_use_instance "$N"
+        stack_pin_instance "$N"
+        FS_SVC_CACHE=()
+        echo -e "  ${GREEN}✓${NC} Instance $N pinned: the menu now acts on odca$N, $ODOO_URL, database $ODOO_DB (remembered in .env)"
+    fi
+    echo ""
+}
+
 menu_addons() {
+    if [ "$EPHEM_MODE" = dev-multi ]; then ask_addons_instance || return 1; fi
     local dir="$ADDONS_DIR" name="$ADDONS_NAME"
     echo -e "${CYAN}${BOLD}Addons: $name${NC}"
     echo ""
@@ -1873,6 +1906,8 @@ menu_status_local() {
     else
         echo "  no per-database snapshots yet (Databases → Backup)"
     fi
+    echo ""
+    echo -e "${BOLD}Docs:${NC}  README.md here   ·   https://github.com/borse/ephem_deployment_docker#readme   ·   https://github.com/borse/ePHEM"
 }
 
 # ── 2) Switch instance (dev-multi) ────────────
@@ -1977,15 +2012,18 @@ menu_stack_local() {
         echo "  4) Recreate the whole stack from the roster   (bash scripts/dev-instances.sh up ${INSTANCES[*]})"
         echo "  5) Stop the whole stack, keep data            (bash scripts/dev-instances.sh down)"
         echo "  6) Clean up leftovers from single-instance mode"
+        echo "  7) Change the roster: add or remove instances (bash scripts/dev-instances.sh up <names>)"
+        echo "  8) Full reset: wipe every database and filestore, keep addons   (dev-instances.sh down -v)"
         echo "  b) Back"
         echo "  x) Exit"
-        ask_choice "1-6"
+        ask_choice "1-8"
     else
         echo "  4) Start everything                           ($(compose_cmd_text) up -d)"
         echo "  5) Stop everything, keep data                 ($(compose_cmd_text) down)"
+        echo "  6) Full reset: wipe the database and filestore, keep addons   ($(compose_cmd_text) down -v)"
         echo "  b) Back"
         echo "  x) Exit"
-        ask_choice "1-5"
+        ask_choice "1-6"
     fi
     case "$CHOICE" in
         1)
@@ -2021,24 +2059,90 @@ menu_stack_local() {
             fi
             ;;
         6)
+            if [ "$EPHEM_MODE" = dev-multi ]; then menu_stack_leftovers; else menu_stack_wipe; fi
+            ;;
+        7)
             [ "$EPHEM_MODE" = dev-multi ] || { invalid_choice; return 0; }
-            local LEFT; LEFT=$(stack_leftovers)
-            if [ -z "$LEFT" ]; then echo -e "  ${GREEN}✓${NC} Nothing left over."; return 0; fi
-            echo "$LEFT" | sed 's/^/  ! /'
-            echo ""
-            echo "  Removing them: the override file goes (setup.sh writes it again if you"
-            echo "  ever go back to single-instance mode) and the ephem-app container is"
-            echo "  deleted. Its data volume (odoo-data) is NOT touched."
-            read -r -p "  Remove them? [y/N]: " C
-            [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
-            retire_single_override || true
-            if docker container inspect ephem-app >/dev/null 2>&1; then
-                docker rm -f ephem-app >/dev/null && echo -e "  ${GREEN}✓${NC} removed container ephem-app"
-            fi
+            menu_stack_roster
+            ;;
+        8)
+            [ "$EPHEM_MODE" = dev-multi ] || { invalid_choice; return 0; }
+            menu_stack_wipe
             ;;
         b) return 0 ;;
         *) invalid_choice ;;
     esac
+}
+
+# dev-multi: the single-instance override file and the ephem-app container
+# from before the switch. Harmless until a plain `docker compose` loads them.
+menu_stack_leftovers() {
+    local LEFT; LEFT=$(stack_leftovers)
+    if [ -z "$LEFT" ]; then echo -e "  ${GREEN}✓${NC} Nothing left over."; return 0; fi
+    echo "$LEFT" | sed 's/^/  ! /'
+    echo ""
+    echo "  Removing them: the override file goes (setup.sh writes it again if you"
+    echo "  ever go back to single-instance mode) and the ephem-app container is"
+    echo "  deleted. Its data volume (odoo-data) is NOT touched."
+    read -r -p "  Remove them? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    retire_single_override || true
+    if docker container inspect ephem-app >/dev/null 2>&1; then
+        docker rm -f ephem-app >/dev/null && echo -e "  ${GREEN}✓${NC} removed container ephem-app"
+    fi
+}
+
+# dev-multi: the roster is whatever scripts/dev-instances.sh up was last
+# given. A new list regenerates the compose file and the odoo-N.conf files
+# and recreates the containers. An instance left out loses its container
+# only: its database, data volume and odcaN/ folder stay on disk.
+menu_stack_roster() {
+    echo -e "${CYAN}${BOLD}Change the roster${NC}"
+    echo ""
+    instances_table
+    echo ""
+    echo "  Give the complete new list. Keep the existing names in their current"
+    echo "  order: the position in the list gives the ports. A new name gets an"
+    echo "  odcaN/ folder; add :branch to clone ePHEM into it (4:18_national_dev),"
+    echo "  otherwise it starts empty. A name left out keeps its database, data"
+    echo "  volume and folder, it just stops being part of the stack."
+    echo ""
+    read -r -p "  New roster [${INSTANCES[*]}] (Enter = cancel): " NEW
+    [ -z "${NEW:-}" ] && { echo "  Cancelled."; return 0; }
+    read -r -p "  Recreate the stack as: $NEW ? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    # shellcheck disable=SC2086  # the roster is a word list on purpose
+    bash scripts/dev-instances.sh up $NEW || return 1
+    # dev-instances.sh re-pins when the pinned instance left the roster.
+    stack_init "$(env_get EPHEM_INSTANCE)" || echo -e "  ${YELLOW}!${NC} $STACK_ERROR"
+    FS_SVC_CACHE=()
+    echo -e "  ${GREEN}✓${NC} Roster is now: ${INSTANCES[*]}   (pinned: instance $EPHEM_INSTANCE)"
+}
+
+# The one place here that deletes data wholesale. Every other Stack item
+# keeps the volumes; this drops all of them: every database and every
+# filestore of this checkout. Addons folders are host folders and stay.
+menu_stack_wipe() {
+    local addons="custom-addons/" dbs CONF
+    [ "$EPHEM_MODE" = dev-multi ] && addons="The odcaN/ folders"
+    echo -e "${CYAN}${BOLD}Full reset${NC}"
+    echo ""
+    echo -e "  ${RED}Deletes every database and filestore of this checkout${NC} (the postgres-data"
+    echo "  and odoo-data volumes). $addons stay as they are, and so does .env."
+    echo ""
+    echo -e "${BOLD}Databases that go:${NC}"
+    dbs=$(list_dbs)
+    if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none listed, or the database is not running)"; fi
+    echo ""
+    echo "  Take a backup first if any of them matters: main menu $(backup_item), or Databases → Backup."
+    read -r -p "  Type RESET to continue, anything else cancels: " CONF
+    [ "${CONF:-}" = RESET ] || { echo "  Cancelled."; return 0; }
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        bash scripts/dev-instances.sh down -v || return 1
+    else
+        compose down -v || return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Volumes wiped, addons untouched. Start fresh: Stack → 4, then create the databases again."
 }
 
 # ── 7) Pull the app image ─────────────────────
@@ -2053,11 +2157,56 @@ menu_image_local() {
         echo "  Every instance in the roster is recreated and started, including ones stopped on purpose."
     read -r -p "  Continue? [y/N]: " C
     [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    # A wrong-architecture image (Apple Silicon) is fixed before the pull, and
+    # a failed pull is explained (WSL credential helper, registry, network).
+    ensure_native_image_arch
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
-    compose pull && compose up -d || { echo -e "  ${RED}✗${NC} See the output above."; return 1; }
+    docker_pull_with_diagnosis || return 1
+    compose up -d || { echo -e "  ${RED}✗${NC} See the output above."; return 1; }
     echo "  Now:  $(image_summary)"
     wait_for_odoo
     echo "  If the release includes module changes, run menu 5 next."
+}
+
+# ── 8) Doctor ─────────────────────────────────
+# The tools first: a missing docker, compose, git or ssh, or a stopped
+# daemon, explains most "nothing works" reports before any log is worth
+# reading.
+check_prereqs() {
+    local ok=1
+    echo -e "${CYAN}${BOLD}Prerequisites${NC}"
+    if command -v docker >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} docker     $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+    else
+        echo -e "  ${RED}✗${NC} docker not found: install Docker Engine or Docker Desktop"; ok=0
+    fi
+    if docker compose version >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} compose    $(docker compose version --short 2>/dev/null)"
+    else
+        echo -e "  ${RED}✗${NC} docker compose v2 not found"; ok=0
+    fi
+    if command -v git >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} git        $(git --version 2>/dev/null | awk '{print $3}')"
+    else
+        echo -e "  ${RED}✗${NC} git not found"; ok=0
+    fi
+    if command -v ssh >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} ssh        present"
+    else
+        echo -e "  ${RED}✗${NC} ssh not found"; ok=0
+    fi
+    if docker info >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} daemon     responding"
+    else
+        echo -e "  ${RED}✗${NC} Docker daemon not responding: is Docker running?"; ok=0
+    fi
+    echo ""
+    [ "$ok" -eq 1 ]
+}
+
+menu_doctor_local() {
+    check_prereqs || echo -e "  ${YELLOW}!${NC} Fix the missing prerequisite first; the log scan below may be empty."
+    stack_doctor "$ODOO_SVC"
 }
 
 # ── Main menu, developer ──────────────────────
@@ -2083,12 +2232,16 @@ menu_main_local() {
         printf "  1) %s\n" "Status"
         [ "$EPHEM_MODE" = dev-multi ] && \
         printf "  2) %-44s (%s)\n" "Switch instance" "bash manage.sh <name> does the same"
+        if [ "$EPHEM_MODE" = dev-multi ]; then
+        printf "  3) %-44s (%s)\n" "Addons: pull, switch branch, local changes" "asks which odcaN/ first"
+        else
         printf "  3) %s\n" "Addons ($ADDONS_NAME): pull, switch branch, local changes"
+        fi
         printf "  4) %-44s (%s)\n" "Restart $what and follow the log" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
         printf "  5) %-44s (%s)\n" "Update or install modules" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-} -u ..."
         printf "  6) %s\n" "Stack: start, stop, recreate, leftovers"
         printf "  7) %s\n" "Pull the latest app image and recreate"
-        printf "  8) %s\n" "Doctor: scan the log for known errors"
+        printf "  8) %s\n" "Doctor: prerequisites, then scan the log for known errors"
         printf "  9) %s\n" "Databases: backup, restore, delete, duplicate, create"
         printf " 10) %-44s (%s)\n" "Back up everything now" "scripts/backup.sh"
         printf "  x) %s\n" "Exit"
@@ -2102,7 +2255,7 @@ menu_main_local() {
             5)  menu_modules_local ;;
             6)  menu_stack_local ;;
             7)  menu_image_local ;;
-            8)  stack_doctor "$ODOO_SVC" ;;
+            8)  menu_doctor_local ;;
             9)  menu_db_admin ;;
             10) bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
             b)  ;;
