@@ -63,7 +63,14 @@ done
 stack_init "$INSTANCE" || { echo -e "${RED}✗${NC} $STACK_ERROR"; exit 1; }
 
 # ── Module list (in update order) ────────────
+# Where a new entry goes: a new eoc_ module after the last eoc_ entry, any
+# other module at the bottom of the list. The three below are the one
+# exception, and only because eoc_base depends on the theme: Odoo refuses to
+# update a module whose new dependency is not yet installed.
 MODULES=(
+  "disable_odoo_online"
+  "remove_odoo_enterprise"
+  "ephem_theme_backend"
   "eoc_base"
   "eoc_actors"
   "eoc_signals"
@@ -139,7 +146,6 @@ MODULES=(
   "eoc_uganda"
   "eoc_yemen"
   "ephem_api_base"
-  "ephem_theme_backend"
   "ephem_theme_push"
   "ephem_survey"
   "ephem_analytics"
@@ -164,7 +170,6 @@ MODULES=(
   "cmp_working_plan"
   "ephem_analytics_cmp"
   "web_replace_url"
-  "remove_odoo_enterprise"
   "mail"
   "web_hierarchy"
 )
