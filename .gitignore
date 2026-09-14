@@ -15,6 +15,7 @@ odoo-data/
 # all of it is health data or derived from it, none of it belongs in Git
 backups/
 .env
+addons/
 custom-addons/
 odoo.conf
 

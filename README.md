@@ -112,7 +112,7 @@ Because `setup.sh` runs *inside* WSL, it can't install WSL itself — that one b
 
 **Using PyCharm on Windows with WSL:**
 
-- Open the project from the WSL filesystem: `File → Open` and paste `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\custom-addons`.
+- Open the project from the WSL filesystem: `File → Open` and paste `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\addons` (the ePHEM clone is `ePHEM-core/` inside it).
 - Optional but recommended: configure a **WSL-based Python interpreter** (PyCharm Professional) or just open the WSL path — Community Edition handles it fine for editing.
 - For the Shell Script run config that calls `scripts/dev-logs.sh` (see [Colored Logs + One-Click Restart in PyCharm](#colored-logs--one-click-restart-in-pycharm)), point **Script path** at the WSL form, e.g.:
 
@@ -352,7 +352,7 @@ When you choose mode 3, `setup.sh`:
 2. Asks which branch to work on (`18_national_dev` recommended)
 3. Clones the addons repo with **full write access** (not depth-limited)
 4. Creates `docker-compose.override.yml` with:
-   - `custom-addons/` mounted **read-write** (live editing — no container rebuild needed)
+   - `addons/` mounted **read-write** (live editing — no container rebuild needed); the ePHEM clone is `addons/ePHEM-core/`, and other repositories added later sit next to it (see [Adding more addons repositories](#adding-more-addons-repositories))
    - Nginx and Certbot disabled — Odoo is accessed directly on `:8069`
 5. Writes a developer `odoo.conf` with:
    - `workers = 0` — threading mode, simpler for local use
@@ -364,20 +364,23 @@ When you choose mode 3, `setup.sh`:
 ### Open in PyCharm
 
 1. Open PyCharm
-2. **File → Open** → select the `custom-addons/` folder
+2. **File → Open** → select the `addons/` folder
 3. PyCharm opens with all ePHEM modules in the project tree
 
 Your project structure will look like:
 
 ```
-custom-addons/
-├── eoc_base/
-├── eoc_signals/
-├── eoc_actors/
-├── eoc_incident_management/
-├── eoc_dashboard/
-├── ...
+addons/
+└── ePHEM-core/            ← the ePHEM clone (git); other repositories sit next to it
+    ├── eoc_base/
+    ├── eoc_signals/
+    ├── eoc_actors/
+    ├── eoc_incident_management/
+    ├── eoc_dashboard/
+    ├── ...
 ```
+
+PyCharm treats each subfolder that is a git clone as its own VCS root (**Settings → Version Control → Directory Mappings**), so commits and branch switching stay per repository.
 
 PyCharm Community understands Odoo's Python and XML — you get full autocomplete, go-to-definition, and error highlighting without any extra configuration.
 
@@ -405,7 +408,7 @@ The whole loop is one command: **`scripts/dev-logs.sh`** restarts Odoo and strea
 
 **Edit → Restart → Test:**
 
-1. Edit any file in `custom-addons/` in PyCharm.
+1. Edit any file in `addons/ePHEM-core/` in PyCharm.
 2. Restart Odoo and watch the logs:
 
    ```bash
@@ -450,7 +453,7 @@ A teammate just pushed a new branch (e.g. `18_national_dev_new_IAP_levels`) and 
 bash manage.sh    # → 3 (Addons) → 2 (Fetch & switch to a different branch)
 ```
 
-In a multi-instance checkout the Addons item first shows the roster with the branch each `odcaN/` folder is on and asks which instance to work in (Enter keeps the pinned one), so a branch never lands in the wrong folder. The branch name is checked against origin before anything changes, uncommitted work comes along when it does not conflict (git refuses the switch otherwise), and afterwards the menu offers to restart or update modules on that same instance.
+In a multi-instance checkout the Addons item first shows the roster with the branch each instance's `ePHEM-core` clone is on and asks which instance to work in (Enter keeps the pinned one), so a branch never lands in the wrong folder. It then lists the sources in that folder and asks which one to work on (Enter = `ePHEM-core`). The branch name is checked against origin before anything changes, uncommitted work comes along when it does not conflict (git refuses the switch otherwise), and afterwards the menu offers to restart or update modules on that same instance.
 
 What runs inside the folder:
 
@@ -462,7 +465,7 @@ git switch <branch>
 
 The first command rewrites the clone's refspec so future `git fetch` calls pick up **all** remote branches — a one-time fix for the `--single-branch` clone.
 
-> **Manual equivalent:** run the three commands above from inside the target folder (`cd odca2` or `cd custom-addons` first). The menu item is exactly this, with prompts.
+> **Manual equivalent:** run the three commands above from inside the target clone (`cd odca2/ePHEM-core` or `cd addons/ePHEM-core` first). The menu item is exactly this, with prompts.
 
 ### Multi-Instance Dev — Several Odoo Servers Side by Side
 
@@ -474,11 +477,13 @@ bash setup.sh    # → 3 (Developer), then 2 (Multi-instance) at the layout ques
 
 Setup hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs. Later, add or remove an instance from `bash manage.sh` → 6 (Stack) → 7, or with the commands further down:
 
-| Instance name | URL | Database | Custom-addons folder |
-|---------------|-----|----------|----------------------|
-| `1` | `http://localhost:8010` | `ephem_1` | `odca1/` |
-| `2` | `http://localhost:8020` | `ephem_2` | `odca2/` |
-| `3` | `http://localhost:8030` | `ephem_3` | `odca3/` |
+| Instance name | URL | Database | Addons folder (mounted) | ePHEM clone |
+|---------------|-----|----------|-------------------------|-------------|
+| `1` | `http://localhost:8010` | `ephem_1` | `odca1/` | `odca1/ePHEM-core/` |
+| `2` | `http://localhost:8020` | `ephem_2` | `odca2/` | `odca2/ePHEM-core/` |
+| `3` | `http://localhost:8030` | `ephem_3` | `odca3/` | `odca3/ePHEM-core/` |
+
+Each `odcaN/` folder is the parent mounted into its container; repositories added from `bash manage.sh` → Addons go next to `ePHEM-core/` in the same folder and only that instance sees them.
 
 The same ports are open on the LAN by default, so a phone or a colleague on the same network can use `http://<this machine's LAN IP>:8030` (on WSL2 that is the Windows adapter address, shown by `ipconfig`; allow the port in Windows Defender Firewall if the first connection is blocked). Set `DEV_BIND_HOST=127.0.0.1` in `.env` and rerun `up` to keep the instances on this machine only.
 
@@ -567,7 +572,7 @@ bash scripts/dev-logs.sh 1 -u eoc_base,eoc_incident_management   # update module
 
 ### Git Workflow
 
-Work in the `custom-addons/` folder — that's the repo you push to.
+Work in the `addons/ePHEM-core/` folder — that's the repo you push to (or in `odcaN/ePHEM-core/` in multi-instance mode). Every other source folder is its own repository with its own remote.
 
 **From PyCharm** (recommended):
 
@@ -579,7 +584,7 @@ Work in the `custom-addons/` folder — that's the repo you push to.
 **From the terminal:**
 
 ```bash
-cd custom-addons
+cd addons/ePHEM-core
 git status
 git add .
 git commit -m "your message"
@@ -597,6 +602,30 @@ The ePHEM custom modules live in a private repository.
 **For developers (mode 3):** You need collaborator access on `borse/ePHEM`. Request this from the ePHEM team before running setup. Once granted, the script clones using your personal SSH key.
 
 > **While waiting for access**, ePHEM runs with standard Odoo modules. You can create databases, configure users, and explore the interface. ePHEM-specific modules appear in **Apps** after access is granted and setup is re-run.
+
+### Adding more addons repositories
+
+Odoo mounts one folder, `addons/` (`odcaN/` per instance in multi-instance mode), and that folder is a parent: `setup.sh` clones ePHEM into `addons/ePHEM-core/`, and every other repository you want on the addons path gets its own subfolder next to it. `odoo.conf` lists each subfolder in `addons_path`, `ePHEM-core` first, so a module that exists in two folders is loaded from `ePHEM-core` (the menu warns about such duplicates).
+
+Add a repository after installation from the menu:
+
+```bash
+bash manage.sh    # → Addons → 3) Add a source
+```
+
+It asks for:
+
+1. **The repository** — `owner/repo`, `git@host:owner/repo.git` or `https://host/owner/repo`. A local path works too.
+2. **The folder name** — defaults to the repository name.
+3. **The branch** — defaults to the branch `ePHEM-core` is on, since ePHEM repositories share branch names.
+4. **How this machine reaches it:**
+   - **A deploy key made for this repository** (default on a server). A GitHub deploy key opens exactly one repository, so each private repository gets its own key (`~/.ssh/ephem_addons_<name>`) and its own ssh alias. The menu prints the public key; add it under the repository's **Settings → Deploy keys**, or email it to `ephem@pheoc.com` for an ePHEM repository, then run the same menu item again with the same repository and folder name: the key is kept and reused.
+   - **Your own SSH key** (default in developer mode): the key `ssh -T git@github.com` uses.
+   - **No key**: the repository is public and is cloned over HTTPS.
+
+After the clone the menu rewrites `addons_path` and offers a restart or module update. The new modules appear in **Apps → Update Apps List**. The same menu pulls every source at once, works on one source (pull, switch branch, status), removes a source, or renames one. Renaming `ePHEM-core` records the new name as `EPHEM_CORE_NAME` in `.env` (and renames it in every instance folder in multi-instance mode).
+
+> **Updating from the earlier layout:** installs made before this change had the ePHEM clone *as* the mounted folder (`custom-addons/`, or `odcaN/` itself). The next `bash setup.sh` (or the Addons menu item) renames `custom-addons/` to `addons/`, moves the clone one level down into `addons/ePHEM-core/` (`odcaN/ePHEM-core/` per instance), rewrites `addons_path`, and recreates the Odoo container so it sees the new place. Nothing is deleted; databases, filestores and uncommitted work are untouched. Re-open `addons/` (or `odcaN/`) in PyCharm afterwards and let it re-detect the git root.
 
 ---
 
@@ -721,7 +750,7 @@ bash setup.sh
 ```
 
 The script will:
-- Check if `custom-addons/` has new commits and ask if you want to pull
+- Check every source in `addons/` (`ePHEM-core` and any repository added next to it) for new commits and ask if you want to pull
 - Ask if you want to check for a newer Docker image
 - Warn you clearly if an addon update requires running `bash scripts/update-modules.sh`
 
@@ -1055,9 +1084,11 @@ bash setup.sh
 ### Custom modules not appearing
 
 ```bash
-chmod -R 755 custom-addons/
+chmod -R 755 addons/
 docker compose restart odoo
 ```
+
+If a module was moved, renamed or deleted by hand, `odoo.conf` may still list a folder that is gone and Odoo refuses to start (`addons-path: no such directory`). `bash manage.sh` → Addons rewrites the addons path from what is on disk, and so does `bash setup.sh`.
 
 Go to **Apps → Update Apps List**.
 
@@ -1115,8 +1146,9 @@ ephem-deploy/
 ├── db-init/
 │   └── 01-app-role.sh              ← Creates the unprivileged DB role on first start
 │
-├── custom-addons/                  ← ePHEM modules (private repo)
-│                                     read-only in server/demo, read-write in developer mode
+├── addons/                         ← the folder mounted into Odoo (read-only in server/demo, read-write in developer mode)
+│   ├── ePHEM-core/                 ← ePHEM modules (private repo, cloned by setup.sh)
+│   └── <other>/                    ← any repository added from manage.sh → Addons, one folder each
 │
 ├── scripts/
 │   ├── ssl-setup.sh                ← Set up HTTPS with Let's Encrypt

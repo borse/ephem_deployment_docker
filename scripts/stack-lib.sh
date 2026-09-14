@@ -7,7 +7,7 @@
 #
 #   EPHEM_MODE=server     production or staging: nginx + certbot + one Odoo
 #   EPHEM_MODE=demo       local evaluation: one Odoo on :8069, no nginx
-#   EPHEM_MODE=dev        one Odoo on :8069, custom-addons/ mounted read-write
+#   EPHEM_MODE=dev        one Odoo on :8069, addons/ mounted read-write
 #   EPHEM_MODE=dev-multi  several Odoos (odca1/, odca2/, ...) on one Postgres
 #
 # setup.sh writes the key at the end of every successful run, and
@@ -340,6 +340,254 @@ PYFIX
     return 1
 }
 
+# ── Addons sources ────────────────────────────
+# Every Odoo mounts ONE host folder at /mnt/extra-addons, and that folder is
+# a PARENT holding one subfolder per source: the ePHEM clone setup.sh makes
+# ($CORE_NAME, ePHEM-core by default) and any repository added later from
+# manage.sh → Addons → Add a source. Single modes mount addons/, dev-multi
+# mounts odcaN/. The generated odoo config lists every subfolder in its
+# addons_path, so a source is nothing more than a subfolder with Odoo modules
+# in it; each clone keeps its own remote (and ssh alias), so pull and switch
+# work per source with plain git.
+#
+# Installs made before this layout mounted the ePHEM clone ITSELF
+# (custom-addons/, or odcaN/). addons_migrate_legacy moves such a clone one
+# level down into <parent>/$CORE_NAME; nothing is deleted. The container
+# must then be recreated: its bind mount still shows the moved folder
+# (odoo_mount_stale tells).
+ADDONS_MOUNT="/mnt/extra-addons"
+ODOO_STOCK_ADDONS="/usr/lib/python3/dist-packages/odoo/addons"
+CORE_NAME="$(env_get EPHEM_CORE_NAME)"; CORE_NAME="${CORE_NAME:-ePHEM-core}"
+CORE_REPO="borse/ePHEM"                    # owner/name, GitHub
+
+# DIR directly holds Odoo modules (name/__manifest__.py).
+dir_has_modules() { local m; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && return 0; done; return 1; }
+
+# The mounted folder is still the clone itself (layout before $CORE_NAME/).
+addons_is_legacy() { [ -d "$1/.git" ] || dir_has_modules "$1"; }
+
+# One source name per line: $CORE_NAME first (even while still empty, it is
+# the clone target), then every other subfolder that holds modules, sorted.
+# Hidden folders and folders without modules are not sources.
+addons_sources() {  # addons_sources PARENT
+    local p="$1" d n
+    [ -d "$p" ] || return 0
+    [ -d "$p/$CORE_NAME" ] && echo "$CORE_NAME"
+    for d in "$p"/*/; do
+        [ -d "$d" ] || continue
+        n=$(basename "$d")
+        [ "$n" = "$CORE_NAME" ] && continue
+        dir_has_modules "$d" && echo "$n"
+    done
+    return 0
+}
+
+addons_source_count() { addons_sources "$1" | grep -c . || true; }
+
+# The folders update-modules.sh and the doctor scan for modules: every
+# source, or the parent itself while it is still the legacy clone.
+addons_module_dirs() {  # addons_module_dirs PARENT → one host path per line
+    local p="$1" s
+    if addons_is_legacy "$p"; then echo "$p"; return 0; fi
+    while IFS= read -r s; do [ -n "$s" ] && echo "$p/$s"; done < <(addons_sources "$p")
+    return 0
+}
+
+# The value of the addons_path option inside the container. A parent with no
+# source yet (deploy key not granted) lists the mount itself, which exists.
+addons_path_value() {  # addons_path_value PARENT
+    local s out=""
+    while IFS= read -r s; do
+        [ -n "$s" ] && out="$out,$ADDONS_MOUNT/$s"
+    done < <(addons_sources "$1")
+    [ -z "$out" ] && out=",$ADDONS_MOUNT"
+    echo "${out#,},$ODOO_STOCK_ADDONS"
+}
+
+# Rewrite the addons_path line of a generated odoo config IN PLACE: the file
+# is a single-file bind mount, a new inode would leave the container reading
+# the old one (see svc_start_error).
+odoo_conf_set_addons_path() {  # odoo_conf_set_addons_path CONF PARENT
+    local conf="$1" val content
+    [ -f "$conf" ] || return 1
+    val=$(addons_path_value "$2")
+    content=$(awk -v v="$val" '/^addons_path *=/ { print "addons_path = " v; next } { print }' "$conf")
+    printf '%s\n' "$content" > "$conf"
+}
+
+# Move the legacy clone one level down: PARENT → PARENT/$CORE_NAME. Returns
+# 0 when it moved, 1 when the layout was already right, 2 on failure (the
+# folder is put back). Prints what it did.
+addons_migrate_legacy() {  # addons_migrate_legacy PARENT
+    local p="${1%/}" tmp
+    addons_is_legacy "$p" || return 1
+    tmp="$p.migrating.$$"
+    if ! mv "$p" "$tmp"; then
+        echo -e "  ${RED}✗${NC} Could not rename $p (permissions?)." >&2
+        return 2
+    fi
+    if ! mkdir "$p" || ! mv "$tmp" "$p/$CORE_NAME"; then
+        rmdir "$p" 2>/dev/null || true
+        [ -e "$p" ] || mv "$tmp" "$p"
+        echo -e "  ${RED}✗${NC} Could not move $p into $p/$CORE_NAME; put back as it was." >&2
+        return 2
+    fi
+    echo -e "  ${GREEN}✓${NC} $(basename "$p")/ was the ePHEM clone itself: moved into $(basename "$p")/$CORE_NAME/ (nothing deleted)"
+    return 0
+}
+
+# Single modes: the folder used to be custom-addons/. Adopt it as addons/
+# (a docker-created empty addons/ gives way), then move the clone down.
+# Returns 0 when anything moved.
+addons_adopt_single_legacy() {
+    local old="$EPHEM_ROOT/custom-addons" new="$EPHEM_ROOT/addons" moved=1
+    if [ -d "$old" ] && { [ ! -e "$new" ] || { [ -d "$new" ] && [ -z "$(ls -A "$new" 2>/dev/null)" ]; }; }; then
+        [ -d "$new" ] && rmdir "$new"
+        mv "$old" "$new" || return 2
+        echo -e "  ${GREEN}✓${NC} custom-addons/ renamed to addons/"
+        moved=0
+    elif [ -d "$old" ] && [ -d "$new" ]; then
+        echo -e "  ${YELLOW}!${NC} Both custom-addons/ and addons/ exist. addons/ is the folder in use;"
+        echo "     custom-addons/ is ignored from now on (move or delete it yourself)."
+    fi
+    addons_migrate_legacy "$new" && moved=0
+    return $moved
+}
+
+# The container still shows the folder that was moved: it runs, the host has
+# PARENT/$CORE_NAME, the container does not see it under the mount.
+odoo_mount_stale() {  # odoo_mount_stale SERVICE PARENT
+    [ "$(svc_state "$1")" = running ] || return 1
+    [ -d "$2/$CORE_NAME" ] || return 1
+    ! compose exec -T "$1" test -d "$ADDONS_MOUNT/$CORE_NAME" </dev/null >/dev/null 2>&1
+}
+
+# Modules present in more than one source: "module: src1 src2" per line.
+# Odoo loads the first one in addons_path order (the order of addons_sources).
+addons_duplicates() {  # addons_duplicates PARENT
+    local p="$1" s m
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        for m in "$p/$s"/*/__manifest__.py; do
+            [ -f "$m" ] && printf '%s %s\n' "$(basename "$(dirname "$m")")" "$s"
+        done
+    done < <(addons_sources "$p") \
+    | awk '{ n[$1]++; w[$1] = w[$1] " " $2 } END { for (k in n) if (n[k] > 1) print k ":" w[k] }' | sort
+}
+
+addons_warn_duplicates() {  # addons_warn_duplicates PARENT → prints, returns 1 when any
+    local d; d=$(addons_duplicates "$1")
+    [ -z "$d" ] && return 0
+    echo -e "  ${YELLOW}!${NC} The same module exists in more than one source. Odoo loads the FIRST"
+    echo "     one in addons path order and ignores the other silently:"
+    echo "$d" | sed 's/^/       /'
+    return 1
+}
+
+# Per-source git facts (DIR = one source folder). Safe on a plain folder.
+src_branch() {
+    local b
+    [ -d "$1/.git" ] || { echo "not a git clone"; return 0; }
+    b=$(git -C "$1" branch --show-current 2>/dev/null) || b=""
+    echo "${b:-(detached)}"
+}
+src_last_commit() { git -C "$1" log -1 --format='%h %ad' --date=short 2>/dev/null || echo "-"; }
+# grep -c reads to the end, so this is safe under pipefail.
+src_dirty_count() {
+    local n
+    n=$(git -C "$1" status --porcelain --untracked-files=no 2>/dev/null | grep -c .) || n=0
+    echo "${n:-0}"
+}
+src_module_count() { local c=0 m; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && c=$((c + 1)); done; echo "$c"; }
+
+# A valid source folder name: what a path segment and an Odoo addons_path
+# entry both accept, no leading dot.
+valid_source_name() { printf '%s' "${1:-}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; }
+
+# ── Git remotes and deploy keys ───────────────
+# owner/repo, git@host:owner/repo.git, ssh://git@host/owner/repo.git and
+# https://host/owner/repo(.git) name the same repository. Parsed into
+# GIT_HOST and GIT_PATH so the access method chosen by the operator decides
+# the URL actually used. A local path (/… or ./…) leaves GIT_HOST empty.
+GIT_HOST=""; GIT_PATH=""
+git_url_parse() {  # git_url_parse URL → 0 and GIT_HOST/GIT_PATH, 1 when unreadable
+    local u="${1:-}"
+    GIT_HOST=""; GIT_PATH=""
+    [ -n "$u" ] || return 1
+    case "$u" in
+        /*|./*|../*|file://*) GIT_PATH="${u#file://}"; return 0 ;;
+    esac
+    u="${u%/}"; u="${u%.git}"
+    case "$u" in
+        ssh://*)   u="${u#ssh://}"; u="${u#*@}"; GIT_HOST="${u%%/*}"; GIT_PATH="${u#*/}" ;;
+        https://*|http://*) u="${u#*://}"; GIT_HOST="${u%%/*}"; GIT_PATH="${u#*/}" ;;
+        *@*:*)     u="${u#*@}"; GIT_HOST="${u%%:*}"; GIT_PATH="${u#*:}" ;;
+        */*)       GIT_HOST="github.com"; GIT_PATH="$u" ;;
+        *)         return 1 ;;
+    esac
+    [ -n "$GIT_HOST" ] && [ -n "$GIT_PATH" ] && [[ "$GIT_PATH" == */* ]]
+}
+git_url_ssh()   { echo "git@$1:$2.git"; }      # git_url_ssh HOST-OR-ALIAS PATH
+git_url_https() { echo "https://$1/$2.git"; }
+
+# Can git reach URL without prompting? (BatchMode: a prompt could not be
+# answered under a timeout anyway.)
+repo_reachable() {  # repo_reachable URL
+    GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=15" GIT_TERMINAL_PROMPT=0 \
+        timeout 40 git ls-remote --exit-code -h "$1" >/dev/null 2>&1
+}
+
+# A GitHub deploy key opens ONE repository, so every private source gets its
+# own key and ssh alias: ~/.ssh/ephem_addons_<name>, reached as
+# git@ephem-addons-<name>:owner/repo.git. The core keeps the key and alias
+# setup.sh has always used (ephem_addons_deploy, github-ephem-addons).
+deploy_slug()      { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-'; }
+deploy_key_for()   { if [ "$1" = "$CORE_NAME" ]; then echo "$HOME/.ssh/ephem_addons_deploy"; else echo "$HOME/.ssh/ephem_addons_$(deploy_slug "$1")"; fi; }
+deploy_alias_for() { if [ "$1" = "$CORE_NAME" ]; then echo "github-ephem-addons"; else echo "ephem-addons-$(deploy_slug "$1")"; fi; }
+
+# Key file and ssh alias for a source, created when missing. Prints nothing.
+ensure_deploy_key() {  # ensure_deploy_key NAME HOST
+    local key alias cfg="$HOME/.ssh/config"
+    key=$(deploy_key_for "$1"); alias=$(deploy_alias_for "$1")
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+    if [ ! -f "$key" ]; then
+        ssh-keygen -t ed25519 -f "$key" -C "ephem-addons-$(hostname 2>/dev/null || echo unknown)-$1" -N "" -q
+        chmod 600 "$key"; chmod 644 "$key.pub"
+    fi
+    if ! grep -q "^Host $alias\$" "$cfg" 2>/dev/null; then
+        printf '\nHost %s\n    HostName %s\n    User git\n    IdentityFile %s\n    IdentitiesOnly yes\n' "$alias" "$2" "$key" >> "$cfg"
+        chmod 600 "$cfg"
+    fi
+    if ! grep -q "$2" "$HOME/.ssh/known_hosts" 2>/dev/null; then
+        ssh-keyscan "$2" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+        chmod 644 "$HOME/.ssh/known_hosts" 2>/dev/null || true
+    fi
+}
+
+# The box operators copy into an email or into the repository settings.
+print_deploy_key_notice() {  # print_deploy_key_notice NAME PUBKEY-FILE REPO-PATH
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  DEPLOY KEY FOR $3 — ACTION REQUIRED${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "  This key opens only that repository, read-only. Give it access:"
+    echo "    • an ePHEM repository:  email the key to ephem@pheoc.com, with your"
+    echo "      country or server name and the repository name in the subject"
+    echo "    • your own repository:  Settings → Deploy keys → Add deploy key"
+    echo ""
+    echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${GREEN}║  COPY EVERYTHING BETWEEN THE LINES                          ║${NC}"
+    echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${CYAN}$(cat "$2")${NC}"
+    echo ""
+    echo -e "  ${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${GREEN}║  END OF KEY                                                 ║${NC}"
+    echo -e "  ${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
 # ── Instances (dev-multi) ─────────────────────
 # The roster is .dev-instances, one name per line, written by
 # scripts/dev-instances.sh. A name's position gives its ports: the first
@@ -378,31 +626,29 @@ inst_conf()      { echo "odoo-$1.conf"; }
 inst_db()        { echo "ephem_$1"; }
 inst_volume()    { echo "odoo-data-$1"; }
 
-inst_branch() {  # current branch of odcaN, or why there is none
-    local b
-    [ -d "$EPHEM_ROOT/odca$1/.git" ] || { echo "not a git clone"; return 0; }
-    b=$(git -C "$EPHEM_ROOT/odca$1" branch --show-current 2>/dev/null) || b=""
-    echo "${b:-(detached)}"
+# The ePHEM clone of instance N: odcaN/$CORE_NAME, or odcaN itself while it
+# is still the legacy layout (so the roster reads right before the move).
+inst_core_dir() {
+    local p="$EPHEM_ROOT/odca$1"
+    if [ -d "$p/$CORE_NAME" ]; then echo "$p/$CORE_NAME"; else echo "$p"; fi
 }
-
-inst_last_commit() {
-    git -C "$EPHEM_ROOT/odca$1" log -1 --format='%h %ad' --date=short 2>/dev/null || echo "-"
-}
-
-# Number of tracked files with uncommitted changes in odcaN (0 when clean or
-# not a clone). grep -c reads to the end, so this is safe under pipefail.
-inst_dirty_count() {
-    local n
-    n=$(git -C "$EPHEM_ROOT/odca$1" status --porcelain --untracked-files=no 2>/dev/null | grep -c .) || n=0
-    echo "${n:-0}"
+inst_branch()       { src_branch "$(inst_core_dir "$1")"; }          # of the core clone
+inst_last_commit()  { src_last_commit "$(inst_core_dir "$1")"; }
+inst_dirty_count()  { src_dirty_count "$(inst_core_dir "$1")"; }
+inst_source_count() { addons_source_count "$EPHEM_ROOT/odca$1"; }
+# "18_national_dev +2": the core branch, and how many other sources there are.
+inst_branch_label() {
+    local n; n=$(inst_source_count "$1")
+    if [ "${n:-0}" -gt 1 ]; then echo "$(inst_branch "$1") +$((n - 1))"; else inst_branch "$1"; fi
 }
 
 # ── The Odoo a tool acts on ───────────────────
 EPHEM_INSTANCE=""
 ODOO_SVC=odoo
 ODOO_CTN=ephem-app
-ADDONS_DIR=""
-ADDONS_NAME=custom-addons
+ADDONS_DIR=""            # the mounted parent folder (host path)
+ADDONS_NAME=addons       # its name, for messages
+CORE_DIR=""              # the ePHEM clone inside it: $ADDONS_DIR/$CORE_NAME
 ODOO_CONF=""
 ODOO_DB=""
 ODOO_VOL=odoo-data
@@ -412,7 +658,8 @@ ODOO_URL=""
 stack_use_single() {
     EPHEM_INSTANCE=""
     ODOO_SVC=odoo; ODOO_CTN=ephem-app
-    ADDONS_DIR="$EPHEM_ROOT/custom-addons"; ADDONS_NAME=custom-addons
+    ADDONS_DIR="$EPHEM_ROOT/addons"; ADDONS_NAME=addons
+    CORE_DIR="$ADDONS_DIR/$CORE_NAME"
     ODOO_CONF="$EPHEM_ROOT/odoo.conf"
     ODOO_DB=""; ODOO_VOL=odoo-data; ODOO_PORT=8069
     case "$EPHEM_MODE" in
@@ -426,6 +673,7 @@ stack_use_instance() {  # stack_use_instance NAME (must be in the roster)
     EPHEM_INSTANCE="$1"
     ODOO_SVC="odoo_$1"; ODOO_CTN="ephem-$1"
     ADDONS_DIR="$EPHEM_ROOT/odca$1"; ADDONS_NAME="odca$1"
+    CORE_DIR="$ADDONS_DIR/$CORE_NAME"
     ODOO_CONF="$EPHEM_ROOT/odoo-$1.conf"
     ODOO_DB="ephem_$1"; ODOO_VOL="odoo-data-$1"
     ODOO_PORT=$(inst_port "$1"); ODOO_URL="http://localhost:$ODOO_PORT"
@@ -696,6 +944,12 @@ stack_doctor() {  # stack_doctor SERVICE
         echo "   Check:  $(compose_cmd_text) ps   and   $(compose_cmd_text) logs db"
         echo ""
     fi
+    if grep -qE "addons-path: no such directory|addons_path.*(does not exist|no such)" <<< "$LOGS"; then
+        found=1
+        echo -e "${RED}✗${NC} A folder listed in addons_path is gone (a source was moved, renamed or deleted"
+        echo "   by hand). Regenerate the config: manage.sh → Addons, or bash setup.sh."
+        echo ""
+    fi
     if grep -q "Address already in use" <<< "$LOGS"; then
         found=1
         echo -e "${RED}✗${NC} A port inside the container is already taken: two Odoo processes in one container."
@@ -715,7 +969,9 @@ stack_doctor() {  # stack_doctor SERVICE
 }
 
 # ── GitHub SSH access ─────────────────────────
-# Every git operation on borse/ePHEM goes over SSH. A key with a passphrase
+# Developer clones reach borse/ePHEM over SSH with the operator's own key
+# (server clones use a deploy key behind an ssh alias and never come here:
+# see remote_uses_own_key). A key with a passphrase
 # and no agent makes ssh ask for it on EVERY git command; one menu action runs
 # several, and a command under `timeout` cannot even show the prompt (it sits
 # in a background process group), so it just fails. Before the first git
@@ -724,6 +980,10 @@ stack_doctor() {  # stack_doctor SERVICE
 # has (SSH_AUTH_SOCK) is reused, so the key stays loaded after this script
 # ends; otherwise one is started for this process and stopped with it.
 GITHUB_SSH_STATE=""     # "" (not checked yet) | ok | declined | no-access
+
+# True for a remote that ssh reaches as git@github.com with the default key,
+# i.e. one that may need the agent above. Deploy-key aliases and HTTPS do not.
+remote_uses_own_key() { case "${1:-}" in git@github.com:*|ssh://git@github.com/*) return 0 ;; esac; return 1; }
 
 github_ssh_ok() {  # never prompts; GitHub answers "successfully authenticated" and exits 1
     local out

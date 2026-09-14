@@ -8,6 +8,10 @@
 #   demo, dev         developer menu: addons, restart + logs, modules, doctor
 #   dev-multi         the developer menu per instance (odca1, odca2, ...)
 #
+# Addons: every Odoo mounts one parent folder (addons/, or odcaN/) holding
+# one subfolder per source: the ePHEM clone (ePHEM-core) and any repository
+# added from the Addons item, each with its own remote and access key.
+#
 #     bash manage.sh              # dev-multi: the instance used last time
 #     bash manage.sh 2            # dev-multi: pin odca2 (remembered in .env)
 #
@@ -77,6 +81,19 @@ fi
 if [ "$EPHEM_MODE" = dev-multi ] && [ "$(env_get EPHEM_INSTANCE)" != "$EPHEM_INSTANCE" ]; then
     stack_pin_instance "$EPHEM_INSTANCE"
 fi
+
+# Layout from before addons/$CORE_NAME: the clone WAS the mounted folder.
+# The Addons item (and bash setup.sh) moves it one level down.
+if [ "$EPHEM_MODE" = dev-multi ]; then
+    for _n in "${INSTANCES[@]}"; do
+        addons_is_legacy "$EPHEM_ROOT/odca$_n" && \
+            echo -e "${YELLOW}!${NC} odca$_n/ is still the ePHEM clone itself: menu 3 (Addons) moves it into odca$_n/$CORE_NAME/."
+    done
+elif { [ -d "$EPHEM_ROOT/custom-addons" ] && [ ! -d "$ADDONS_DIR/$CORE_NAME" ]; } || addons_is_legacy "$ADDONS_DIR"; then
+    echo -e "${YELLOW}!${NC} The addons folder still has the old layout (custom-addons/ as the clone): the"
+    echo "   Addons menu item moves it into addons/$CORE_NAME/, and so does bash setup.sh."
+fi
+unset _n
 
 local_mode() { [ "$EPHEM_MODE" != server ]; }
 # Where a few shared screens should send people, which differs by menu.
@@ -687,6 +704,8 @@ menu_status() {
     if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none, or database not running)"; fi
     echo ""
     echo -e "${BOLD}App image:${NC}  borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest  (! unpinned — set EPHEM_IMAGE_TAG in .env on production)')"
+    echo -e "${BOLD}Addons ($ADDONS_NAME/):${NC}"
+    sources_table "$ADDONS_DIR"
     echo -e "${BOLD}Disk:${NC}"
     df -h / | tail -1 | awk '{printf "  root: %s used of %s (%s)\n", $3, $2, $5}'
     echo ""
@@ -919,9 +938,14 @@ menu_update_app() {
     echo "  with the previous version number."
 }
 
-# ── 5) Custom addons: fetch/switch branch, pull ─
-# server: custom-addons/, shared by every tenant. dev-multi: one odcaN/,
-# asked for on every visit (ask_addons_instance below).
+# ── 5) Addons: the sources of one Odoo ────────
+# The mounted folder (addons/, or odcaN/ in dev-multi) holds one subfolder
+# per SOURCE: $CORE_NAME, the ePHEM clone setup.sh made, and every
+# repository added here. Each source is its own git clone, so pull, branch
+# switching and status act on one source at a time; add, remove and rename
+# change the folders and rewrite the Odoo config's addons_path in place.
+# server: one addons/, shared by every tenant. dev-multi: one odcaN/, asked
+# for on every visit (ask_addons_instance below).
 
 # dev-multi: which odcaN/ this visit works in. Asked every time, with the
 # roster on screen: the pinned instance is only whatever the last run used,
@@ -954,15 +978,204 @@ ask_addons_instance() {
     echo ""
 }
 
+# One line per source: branch, uncommitted work, module count, last commit.
+sources_table() {  # sources_table PARENT
+    local s dir dirty
+    printf "  %-24s %-32s %-11s %-8s %s\n" "SOURCE" "BRANCH" "CHANGES" "MODULES" "LAST COMMIT"
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        dir="$1/$s"
+        if [ -d "$dir/.git" ]; then
+            dirty=$(src_dirty_count "$dir")
+            if [ "$dirty" -gt 0 ]; then dirty="$dirty file(s)"; else dirty="clean"; fi
+            printf "  %-24s %-32s %-11s %-8s %s\n" "$s" "$(src_branch "$dir")" "$dirty" "$(src_module_count "$dir")" "$(src_last_commit "$dir")"
+        else
+            printf "  %-24s %-32s %-11s %-8s %s\n" "$s" "(not a git clone)" "-" "$(src_module_count "$dir")" "-"
+        fi
+    done < <(addons_sources "$1")
+}
+
+# Set by the actions below when the code on disk changed, so the restart /
+# module update is offered once, at the end of the visit.
+ADDONS_CHANGED=0
+PICKED_SOURCE=""
+
+# Rewrite addons_path for the pinned Odoo, in place (single-file mount).
+addons_conf_refresh() {
+    if odoo_conf_set_addons_path "$ODOO_CONF" "$ADDONS_DIR"; then
+        echo -e "  ${GREEN}✓${NC} $(basename "$ODOO_CONF"): addons_path = $(addons_path_value "$ADDONS_DIR")"
+    else
+        echo -e "  ${YELLOW}!${NC} $(basename "$ODOO_CONF") not found: bash setup.sh regenerates it."
+    fi
+}
+
+# The container from before a move still shows the folder that was moved (a
+# bind mount follows the inode, not the path): recreate it. Data volumes stay.
+addons_recreate_if_stale() {
+    [ "$(svc_state "$ODOO_SVC")" = absent ] && return 0
+    if odoo_mount_stale "$ODOO_SVC" "$ADDONS_DIR" || [ "$(svc_state "$ODOO_SVC")" != running ]; then
+        echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d --force-recreate --no-deps $ODOO_SVC   (its mount still showed the moved folder)"
+        compose up -d --force-recreate --no-deps "$ODOO_SVC" || return 1
+        wait_for_odoo || true
+    fi
+}
+
+# Move a folder from before the layout one level down, then make the
+# running Odoo follow. Single modes also adopt custom-addons/ as addons/.
+addons_fix_legacy() {
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        addons_migrate_legacy "$ADDONS_DIR" || return 1
+    else
+        addons_adopt_single_legacy || return 1
+    fi
+    addons_conf_refresh
+    addons_recreate_if_stale
+}
+
+addons_apply_prompt() {
+    echo ""
+    if [ "$EPHEM_MODE" = server ]; then
+        read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
+        if [[ ! "${U:-Y}" =~ ^[Nn]$ ]]; then
+            bash scripts/update-modules.sh --auto
+        else
+            echo "  Remember: the new code is NOT active until modules are updated"
+            echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
+        fi
+    else
+        echo "  Apply the new code to $ODOO_SVC now?"
+        echo "    1) Restart and follow the log"
+        echo "    2) Update modules, then restart and follow the log"
+        echo "    3) Later"
+        ask_choice "1-3" "b"
+        case "$CHOICE" in
+            1) menu_restart_logs_local ;;
+            2) menu_modules_local ;;
+            *) echo "  Remember: new Python code needs a restart, new views and data a module update (menu 4 and 5)." ;;
+        esac
+    fi
+}
+
+# Numbered choice among the sources → PICKED_SOURCE; 1 when cancelled.
+pick_source() {  # pick_source PARENT [nocore]
+    local parent="$1" skip_core="${2:-}" i=1 s N
+    local -a names=()
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        [ "$skip_core" = nocore ] && [ "$s" = "$CORE_NAME" ] && continue
+        names+=("$s")
+    done < <(addons_sources "$parent")
+    [ "${#names[@]}" -eq 0 ] && { echo "  (no source to choose from)"; return 1; }
+    for s in "${names[@]}"; do echo "  $i) $s"; i=$((i + 1)); done
+    read -r -p "  Which one [1-${#names[@]}] (Enter = 1, b back): " N
+    N="${N:-1}"
+    case "$N" in b|B) return 1 ;; esac
+    if ! printf '%s' "$N" | grep -Eq '^[0-9]+$' || [ "$N" -lt 1 ] || [ "$N" -gt "${#names[@]}" ]; then
+        invalid_choice; return 1
+    fi
+    PICKED_SOURCE="${names[$((N - 1))]}"
+    echo ""
+}
+
 menu_addons() {
     if [ "$EPHEM_MODE" = dev-multi ]; then ask_addons_instance || return 1; fi
-    local dir="$ADDONS_DIR" name="$ADDONS_NAME"
-    echo -e "${CYAN}${BOLD}Addons: $name${NC}"
+    local parent="$ADDONS_DIR" pname="$ADDONS_NAME" M
+    ADDONS_CHANGED=0
+    echo -e "${CYAN}${BOLD}Addons: $pname/${NC}"
+    echo ""
+    # The layout before $CORE_NAME/: the clone was the mounted folder itself.
+    if { [ "$EPHEM_MODE" != dev-multi ] && [ -d "$EPHEM_ROOT/custom-addons" ] && [ ! -d "$parent/$CORE_NAME" ]; } \
+       || addons_is_legacy "$parent"; then
+        echo -e "  ${YELLOW}!${NC} The ePHEM clone is still the mounted folder itself (the layout before $CORE_NAME/)."
+        echo "     It moves one folder down, into $pname/$CORE_NAME/, the config's addons_path"
+        echo "     follows, and the container is recreated so it sees the new place."
+        echo "     Nothing is deleted; databases and filestores are untouched."
+        read -r -p "  Move it now? [Y/n]: " M
+        if [[ "${M:-Y}" =~ ^[Nn]$ ]]; then
+            echo "  Left as it is (bash setup.sh does the same move)."
+            return 0
+        fi
+        addons_fix_legacy || return 1
+        echo ""
+    fi
+    if [ ! -d "$parent" ]; then
+        echo -e "  ${RED}✗${NC} $pname/ does not exist yet."
+        [ "$EPHEM_MODE" = dev-multi ] && \
+            echo "     Populate it:  bash scripts/dev-instances.sh up $EPHEM_INSTANCE:18_national_dev" || \
+            echo "     bash setup.sh creates it and clones ePHEM into $pname/$CORE_NAME."
+        return 1
+    fi
+    sources_table "$parent"
+    echo ""
+    [ -d "$parent/$CORE_NAME/.git" ] || \
+        echo -e "  ${YELLOW}!${NC} $pname/$CORE_NAME is not a git clone yet: bash setup.sh clones ePHEM into it."
+    addons_warn_duplicates "$parent" || echo ""
+    case "$EPHEM_MODE" in
+        server)
+            echo -e "  ${YELLOW}!${NC} This changes the live code for EVERY database on this server."
+            echo "     Take a backup first for anything beyond a routine pull."
+            ;;
+        dev-multi)
+            echo "  Only instance $EPHEM_INSTANCE uses this folder ($ODOO_URL, database $ODOO_DB)."
+            ;;
+    esac
+    echo ""
+    echo "  1) Pull every source"
+    echo "  2) One source: pull, fetch & switch branch, local changes"
+    echo "  3) Add a source: clone another repository next to $CORE_NAME"
+    echo "  4) Remove a source"
+    echo "  5) Rename a source"
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-5"
+    case "$CHOICE" in
+        1) addons_pull_all "$parent" ;;
+        2) pick_source "$parent" || return 0; addons_source_menu "$parent" "$PICKED_SOURCE" ;;
+        3) addons_add_source "$parent" ;;
+        4) addons_remove_source "$parent" ;;
+        5) addons_rename_source "$parent" ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
+    esac
+    [ "$ADDONS_CHANGED" -eq 1 ] && addons_apply_prompt
+    return 0
+}
+
+# git pull --ff-only in every source that is a clone.
+addons_pull_all() {  # addons_pull_all PARENT
+    local parent="$1" s dir before after remote
+    # One agent load for every github.com remote reached with the own key.
+    while IFS= read -r s; do
+        [ -n "$s" ] && [ -d "$parent/$s/.git" ] || continue
+        remote=$(git -C "$parent/$s" remote get-url origin 2>/dev/null || echo "")
+        if remote_uses_own_key "$remote"; then ensure_github_ssh || true; break; fi
+    done < <(addons_sources "$parent")
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        dir="$parent/$s"
+        [ -d "$dir/.git" ] || { echo "  · $s: not a git clone, skipped"; continue; }
+        before=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")
+        echo -e "  ${CYAN}→${NC} $s: git pull --ff-only   ($(src_branch "$dir"))"
+        if git -C "$dir" pull --ff-only; then
+            after=$(git -C "$dir" rev-parse HEAD 2>/dev/null || echo "")
+            if [ "$before" != "$after" ]; then
+                echo -e "  ${GREEN}✓${NC} $s updated"; ADDONS_CHANGED=1
+            else
+                echo -e "  ${GREEN}✓${NC} $s already up to date"
+            fi
+        else
+            echo -e "  ${RED}✗${NC} $s: pull failed (diverged, local changes in the way, or no access): resolve manually."
+        fi
+    done < <(addons_sources "$parent")
+}
+
+# One source: pull, fetch & switch branch, git status.
+addons_source_menu() {  # addons_source_menu PARENT NAME
+    local dir="$1/$2" name="$ADDONS_NAME/$2"
+    echo -e "${CYAN}${BOLD}Source: $name${NC}"
     echo ""
     if [ ! -d "$dir/.git" ]; then
-        echo -e "  ${RED}✗${NC} $name/ is not a git clone."
-        [ "$EPHEM_MODE" = dev-multi ] && \
-            echo "     Populate it:  bash scripts/dev-instances.sh up $EPHEM_INSTANCE:18_national_dev"
+        echo -e "  ${RED}✗${NC} $name is not a git clone: nothing to pull or switch."
         return 1
     fi
     local cur dirty=0
@@ -982,18 +1195,19 @@ menu_addons() {
             echo -e "  ${GREEN}✓${NC} repaired fetch config (was set to fetch every branch)"
         fi
     fi
-    # SSH first: a passphrase-protected key with no agent would make every git
-    # command below ask for it, and the bounded check under timeout fail.
+    # A github.com remote reached with the own key may need a passphrase-
+    # protected key loaded once; a deploy-key alias or HTTPS never prompts.
     local remote ssh_ok=1
     remote=$(git -C "$dir" remote get-url origin 2>/dev/null || echo "")
-    case "$remote" in git@*|ssh://*) ensure_github_ssh || ssh_ok=0 ;; esac
+    echo "  Origin:         $remote"
+    if remote_uses_own_key "$remote"; then ensure_github_ssh || ssh_ok=0; fi
     # Bounded check: never lets a slow network look like a hang, and never
     # prompts (BatchMode): a prompt under timeout cannot be answered anyway.
     echo -n "  Checking origin... "
     if [ "$ssh_ok" -eq 0 ]; then
         echo "skipped (no SSH access without a prompt)"
     elif [ -n "$cur" ] && [ "$cur" != "?" ] && \
-         GIT_SSH_COMMAND="ssh -o BatchMode=yes" timeout 15 git -C "$dir" fetch --quiet origin "$cur" </dev/null 2>/dev/null; then
+         GIT_SSH_COMMAND="ssh -o BatchMode=yes" GIT_TERMINAL_PROMPT=0 timeout 15 git -C "$dir" fetch --quiet origin "$cur" </dev/null 2>/dev/null; then
         local behind ahead
         behind=$(git -C "$dir" rev-list HEAD..origin/"$cur" --count 2>/dev/null || echo "?")
         ahead=$(git -C "$dir" rev-list origin/"$cur"..HEAD --count 2>/dev/null || echo "?")
@@ -1001,16 +1215,6 @@ menu_addons() {
     else
         echo "unreachable or slow, skipped"
     fi
-    echo ""
-    case "$EPHEM_MODE" in
-        server)
-            echo -e "  ${YELLOW}!${NC} This changes the live code for EVERY database on this server."
-            echo "     Take a backup first for anything beyond a routine pull."
-            ;;
-        dev-multi)
-            echo "  Only instance $EPHEM_INSTANCE uses this folder ($ODOO_URL, database $ODOO_DB)."
-            ;;
-    esac
     echo ""
     echo "  1) Pull latest on '$cur'"
     echo "  2) Fetch & switch to a different branch"
@@ -1024,6 +1228,7 @@ menu_addons() {
                 echo -e "  ${RED}✗${NC} Pull failed (diverged, local changes in the way, or no access): resolve manually."
                 return 1
             }
+            ADDONS_CHANGED=1
             ;;
         2)
             read -r -p "  Branch name on origin: " BR
@@ -1076,6 +1281,7 @@ menu_addons() {
                 fi
             fi
             echo -e "  ${GREEN}✓${NC} $name now on '$BR'"
+            ADDONS_CHANGED=1
             ;;
         3)
             local_mode || { invalid_choice; return 0; }
@@ -1087,27 +1293,167 @@ menu_addons() {
         b) return 0 ;;
         *) invalid_choice; return 0 ;;
     esac
+    return 0
+}
+
+# Clone another repository next to $CORE_NAME and put it on the addons path.
+# Access: a deploy key made here for that one repository (server default:
+# the key opens only that repo, read-only), the operator's own SSH key
+# (developer default), or none for a public repository. A local path works
+# too (no access question).
+addons_add_source() {  # addons_add_source PARENT
+    local parent="$1" pname="$ADDONS_NAME" URL NAME BR METHOD dflt hint url key alias target n K
+    echo -e "${CYAN}${BOLD}Add a source${NC}"
     echo ""
-    if [ "$EPHEM_MODE" = server ]; then
-        read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
-        if [[ ! "${U:-Y}" =~ ^[Nn]$ ]]; then
-            bash scripts/update-modules.sh --auto
-        else
-            echo "  Remember: the new code is NOT active until modules are updated"
-            echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
-        fi
+    echo "  A source is a git repository whose top level holds Odoo modules"
+    echo "  (<module>/__manifest__.py). It is cloned into $pname/<name>/ and put on"
+    echo "  this Odoo's addons path after $CORE_NAME, so on a name clash $CORE_NAME wins."
+    echo ""
+    read -r -p "  Repository (owner/repo, git@host:owner/repo.git, https://…; Enter cancels): " URL
+    [ -z "${URL:-}" ] && { echo "  Cancelled."; return 0; }
+    if ! git_url_parse "$URL"; then
+        echo -e "  ${RED}✗${NC} Not a repository address I can read. Examples:"
+        echo "       borse/ePHEM-extra     git@github.com:borse/ePHEM-extra.git     https://github.com/OCA/web"
+        return 1
+    fi
+    dflt=$(basename "$GIT_PATH"); dflt="${dflt%.git}"
+    read -r -p "  Folder name [$dflt]: " NAME
+    NAME="${NAME:-$dflt}"
+    valid_source_name "$NAME" || { echo -e "  ${RED}✗${NC} Folder names: letters, digits, dot, dash and underscore, no leading dot."; return 1; }
+    [ "$NAME" = "$CORE_NAME" ] && { echo -e "  ${RED}✗${NC} $CORE_NAME is the ePHEM clone itself: bash setup.sh installs it."; return 1; }
+    target="$parent/$NAME"
+    if [ -e "$target" ]; then
+        echo -e "  ${RED}✗${NC} $pname/$NAME already exists. Remove or rename it first (options 4 and 5)."
+        return 1
+    fi
+    dflt=""
+    [ -d "$parent/$CORE_NAME/.git" ] && dflt=$(git -C "$parent/$CORE_NAME" branch --show-current 2>/dev/null || echo "")
+    if [ -n "$dflt" ]; then hint=" [$dflt, the branch $CORE_NAME is on]"; else hint=" (Enter = the repository's default branch)"; fi
+    read -r -p "  Branch$hint: " BR
+    BR="${BR:-$dflt}"
+
+    if [ -z "$GIT_HOST" ]; then
+        url="$GIT_PATH"     # a local path: git clone reads it directly
     else
-        echo "  Apply the new code to $ODOO_SVC now?"
-        echo "    1) Restart and follow the log"
-        echo "    2) Update modules, then restart and follow the log"
-        echo "    3) Later"
-        ask_choice "1-3" "b"
-        case "$CHOICE" in
-            1) menu_restart_logs_local ;;
-            2) menu_modules_local ;;
-            *) echo "  Remember: new Python code needs a restart, new views and data a module update (menu 4 and 5)." ;;
+        echo ""
+        echo "  How does this machine reach $GIT_HOST/$GIT_PATH?"
+        echo "    1) A deploy key made here for this repository: read-only, opens only this"
+        echo "       repository. You add it to the repository (or send it to the ePHEM team"
+        echo "       for an ePHEM repository), then come back."
+        echo "    2) Your own SSH key (the one 'ssh -T git@$GIT_HOST' uses)"
+        echo "    3) No key: the repository is public (HTTPS)"
+        if [ "$EPHEM_MODE" = server ]; then dflt=1; else dflt=2; fi
+        read -r -p "  Choose [1-3] (default: $dflt): " METHOD
+        METHOD="${METHOD:-$dflt}"
+        case "$METHOD" in
+            1)
+                ensure_deploy_key "$NAME" "$GIT_HOST"
+                key=$(deploy_key_for "$NAME"); alias=$(deploy_alias_for "$NAME")
+                url=$(git_url_ssh "$alias" "$GIT_PATH")
+                echo -n "  Testing the deploy key ($alias)... "
+                if repo_reachable "$url"; then
+                    echo "access granted"
+                else
+                    echo "not granted yet"
+                    print_deploy_key_notice "$NAME" "$key.pub" "$GIT_PATH"
+                    echo "  Once the key has been added, come back here (Addons → Add a source) with"
+                    echo "  the same repository and folder name: the key and its ssh alias '$alias'"
+                    echo "  are kept and reused. Nothing was cloned."
+                    return 0
+                fi
+                ;;
+            2)
+                url=$(git_url_ssh "$GIT_HOST" "$GIT_PATH")
+                if remote_uses_own_key "$url"; then ensure_github_ssh || true; fi
+                ;;
+            3) url=$(git_url_https "$GIT_HOST" "$GIT_PATH") ;;
+            *) invalid_choice; return 1 ;;
         esac
     fi
+    echo ""
+    local -a opts=(--single-branch --progress)
+    [ -n "$BR" ] && opts+=(--branch "$BR")
+    [ "$EPHEM_MODE" = server ] && opts+=(--depth 1)
+    echo -e "  ${CYAN}→${NC} git clone ${opts[*]} $url $pname/$NAME"
+    if ! GIT_TERMINAL_PROMPT=0 git clone "${opts[@]}" "$url" "$target"; then
+        rm -rf "$target"
+        echo -e "  ${RED}✗${NC} Clone failed: see the git output above (wrong address or branch, or no access)."
+        return 1
+    fi
+    n=$(src_module_count "$target")
+    if [ "$n" -eq 0 ]; then
+        echo -e "  ${YELLOW}!${NC} No Odoo module at the top level of this repository (<module>/__manifest__.py),"
+        echo "     so it is NOT on the addons path. Modules must sit directly inside the folder."
+        read -r -p "  Keep the folder anyway? [y/N]: " K
+        [[ "${K:-N}" =~ ^[Yy]$ ]] || { rm -rf "$target"; echo "  Removed."; return 0; }
+    else
+        echo -e "  ${GREEN}✓${NC} $pname/$NAME: $n module(s) on $(src_branch "$target")"
+    fi
+    addons_warn_duplicates "$parent" || true
+    addons_conf_refresh
+    ADDONS_CHANGED=1
+    [ "$n" -gt 0 ] && echo "  Its modules are installable after the restart (Apps → Update Apps List, or the modules menu)."
+    return 0
+}
+
+addons_remove_source() {  # addons_remove_source PARENT
+    local parent="$1" s dir C
+    echo -e "${CYAN}${BOLD}Remove a source${NC}   ($CORE_NAME cannot be removed here)"
+    echo ""
+    pick_source "$parent" nocore || return 0
+    s="$PICKED_SOURCE"; dir="$parent/$s"
+    echo -e "  ${RED}Deletes $ADDONS_NAME/$s from disk${NC}: $(src_module_count "$dir") module(s), $(src_dirty_count "$dir") file(s) with uncommitted changes."
+    echo "  A database that has its modules installed keeps them marked installed and"
+    echo "  will complain until they are uninstalled or the folder comes back."
+    read -r -p "  Type the folder name to delete it, anything else cancels: " C
+    [ "${C:-}" = "$s" ] || { echo "  Cancelled."; return 0; }
+    rm -rf "$dir"
+    echo -e "  ${GREEN}✓${NC} $ADDONS_NAME/$s removed"
+    addons_conf_refresh
+    ADDONS_CHANGED=1
+}
+
+addons_rename_source() {  # addons_rename_source PARENT
+    local parent="$1" s NEW n
+    echo -e "${CYAN}${BOLD}Rename a source${NC}"
+    echo ""
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        echo "  $CORE_NAME (the ePHEM clone) has the same name in every instance folder;"
+        echo "  renaming it renames it in all of them (one setting, EPHEM_CORE_NAME in .env)."
+        echo ""
+    fi
+    pick_source "$parent" || return 0
+    s="$PICKED_SOURCE"
+    read -r -p "  New name for $ADDONS_NAME/$s: " NEW
+    [ -z "${NEW:-}" ] && { echo "  Cancelled."; return 0; }
+    valid_source_name "$NEW" || { echo -e "  ${RED}✗${NC} Folder names: letters, digits, dot, dash and underscore, no leading dot."; return 1; }
+    [ "$NEW" = "$s" ] && { echo "  Same name, nothing to do."; return 0; }
+    [ -e "$parent/$NEW" ] && { echo -e "  ${RED}✗${NC} $ADDONS_NAME/$NEW already exists."; return 1; }
+    mv "$parent/$s" "$parent/$NEW" || return 1
+    echo -e "  ${GREEN}✓${NC} $ADDONS_NAME/$s → $ADDONS_NAME/$NEW"
+    if [ "$s" = "$CORE_NAME" ]; then
+        if [ "$EPHEM_MODE" = dev-multi ]; then
+            for n in "${INSTANCES[@]}"; do
+                [ "$n" = "$EPHEM_INSTANCE" ] && continue
+                if [ -d "$EPHEM_ROOT/odca$n/$s" ] && [ ! -e "$EPHEM_ROOT/odca$n/$NEW" ]; then
+                    mv "$EPHEM_ROOT/odca$n/$s" "$EPHEM_ROOT/odca$n/$NEW" && \
+                        echo -e "  ${GREEN}✓${NC} odca$n/$s → odca$n/$NEW"
+                fi
+            done
+        fi
+        set_env_key EPHEM_CORE_NAME "$NEW"
+        CORE_NAME="$NEW"; CORE_DIR="$parent/$NEW"
+        echo -e "  ${GREEN}✓${NC} EPHEM_CORE_NAME=$NEW recorded in .env"
+        if [ "$EPHEM_MODE" = dev-multi ]; then
+            for n in "${INSTANCES[@]}"; do
+                [ "$n" = "$EPHEM_INSTANCE" ] && continue
+                odoo_conf_set_addons_path "$EPHEM_ROOT/odoo-$n.conf" "$EPHEM_ROOT/odca$n" 2>/dev/null || true
+            done
+            echo "  addons_path rewritten in every odoo-N.conf; restart the other instances when convenient."
+        fi
+    fi
+    addons_conf_refresh
+    ADDONS_CHANGED=1
 }
 
 # ── 9) Database manager lock ──────────────────
@@ -1845,7 +2191,8 @@ menu_advanced() {
 # Developer menus (demo, dev, dev-multi)
 # ══════════════════════════════════════════════
 
-# One line per instance: state, port, branch, uncommitted work, last commit.
+# One line per instance: state, port, branch of the ePHEM clone (+N = other
+# sources in the folder), uncommitted work, last commit.
 instances_table() {
     local n st dirty
     printf "  %-5s %-14s %-6s %-34s %-10s %s\n" "NAME" "STATE" "PORT" "BRANCH" "CHANGES" "LAST COMMIT"
@@ -1853,7 +2200,7 @@ instances_table() {
         st=$(svc_detail "odoo_$n")
         dirty=$(inst_dirty_count "$n")
         if [ "$dirty" -gt 0 ]; then dirty="$dirty file(s)"; else dirty="clean"; fi
-        printf "  %-5s %-14s %-6s %-34s %-10s %s\n" "$n" "$st" "$(inst_port "$n")" "$(inst_branch "$n")" "$dirty" "$(inst_last_commit "$n")"
+        printf "  %-5s %-14s %-6s %-34s %-10s %s\n" "$n" "$st" "$(inst_port "$n")" "$(inst_branch_label "$n")" "$dirty" "$(inst_last_commit "$n")"
     done
 }
 
@@ -1861,6 +2208,28 @@ image_summary() {  # "abc123def456, built 2026-09-01" or "(not pulled yet)"
     docker image inspect -f '{{.Id}} created {{.Created}}' "$(stack_image)" 2>/dev/null \
         | sed 's/^sha256:\([0-9a-f]\{12\}\)[0-9a-f]* created \(..........\).*/\1, built \2/' \
         || echo "(not pulled yet)"
+}
+
+# Single modes: the ePHEM clone, or the folder itself while it is still the
+# old layout, so the header reads right before the move.
+single_core_dir() {
+    if [ -d "$CORE_DIR" ]; then echo "$CORE_DIR"
+    elif [ -d "$ADDONS_DIR" ]; then echo "$ADDONS_DIR"
+    else echo "$EPHEM_ROOT/custom-addons"; fi
+}
+# "addons/ePHEM-core", or where the clone still is before the move.
+single_core_label() {
+    if [ -d "$CORE_DIR" ]; then echo "$ADDONS_NAME/$CORE_NAME"
+    elif [ -d "$ADDONS_DIR" ]; then echo "$ADDONS_NAME (old layout)"
+    else echo "custom-addons (old layout)"; fi
+}
+inst_core_label() {  # inst_core_label N
+    if [ -d "$EPHEM_ROOT/odca$1/$CORE_NAME" ]; then echo "odca$1/$CORE_NAME"; else echo "odca$1 (old layout)"; fi
+}
+single_extra_sources() {
+    local n; n=$(addons_source_count "$ADDONS_DIR")
+    [ "${n:-0}" -gt 1 ] && echo " (+$((n - 1)) more source(s))"
+    return 0
 }
 
 # ── 1) Status (developer) ─────────────────────
@@ -1873,11 +2242,8 @@ menu_status_local() {
         echo "  Pinned: instance $EPHEM_INSTANCE  ($ADDONS_NAME, $ODOO_URL, database $ODOO_DB)"
     else
         echo "  Odoo:    $(svc_detail "$ODOO_SVC")   $ODOO_URL"
-        if [ -d "$ADDONS_DIR/.git" ]; then
-            echo "  Addons:  $ADDONS_NAME on $(git -C "$ADDONS_DIR" branch --show-current 2>/dev/null || echo '?')   ($(git -C "$ADDONS_DIR" log -1 --format='%h %ad' --date=short 2>/dev/null))"
-        else
-            echo "  Addons:  $ADDONS_NAME (not a git clone)"
-        fi
+        echo "  Addons:  $ADDONS_NAME/"
+        sources_table "$ADDONS_DIR"
     fi
     echo "  Postgres: $(svc_detail db)"
     echo ""
@@ -2103,8 +2469,8 @@ menu_stack_roster() {
     echo ""
     echo "  Give the complete new list. Keep the existing names in their current"
     echo "  order: the position in the list gives the ports. A new name gets an"
-    echo "  odcaN/ folder; add :branch to clone ePHEM into it (4:18_national_dev),"
-    echo "  otherwise it starts empty. A name left out keeps its database, data"
+    echo "  odcaN/ folder; add :branch to clone ePHEM into odcaN/$CORE_NAME"
+    echo "  (4:18_national_dev), otherwise it starts empty. A name left out keeps its database, data"
     echo "  volume and folder, it just stops being part of the stack."
     echo ""
     read -r -p "  New roster [${INSTANCES[*]}] (Enter = cancel): " NEW
@@ -2123,7 +2489,7 @@ menu_stack_roster() {
 # keeps the volumes; this drops all of them: every database and every
 # filestore of this checkout. Addons folders are host folders and stay.
 menu_stack_wipe() {
-    local addons="custom-addons/" dbs CONF
+    local addons="addons/" dbs CONF
     [ "$EPHEM_MODE" = dev-multi ] && addons="The odcaN/ folders"
     echo -e "${CYAN}${BOLD}Full reset${NC}"
     echo ""
@@ -2223,19 +2589,19 @@ menu_main_local() {
         echo -e "${BOLD}ePHEM developer menu${NC}   $(ephem_mode_label)"
         if [ "$EPHEM_MODE" = dev-multi ]; then
             what="instance $EPHEM_INSTANCE"
-            echo -e "  Instance ${BOLD}$EPHEM_INSTANCE${NC}: $ADDONS_NAME on $(inst_branch "$EPHEM_INSTANCE")   $ODOO_URL   ($st)"
+            echo -e "  Instance ${BOLD}$EPHEM_INSTANCE${NC}: $(inst_core_label "$EPHEM_INSTANCE") on $(inst_branch_label "$EPHEM_INSTANCE")   $ODOO_URL   ($st)"
         else
             what="Odoo"
-            echo -e "  $ADDONS_NAME on $(git -C "$ADDONS_DIR" branch --show-current 2>/dev/null || echo '?')   $ODOO_URL   ($st)"
+            echo -e "  $(single_core_label) on $(src_branch "$(single_core_dir)")$(single_extra_sources)   $ODOO_URL   ($st)"
         fi
         echo ""
         printf "  1) %s\n" "Status"
         [ "$EPHEM_MODE" = dev-multi ] && \
         printf "  2) %-44s (%s)\n" "Switch instance" "bash manage.sh <name> does the same"
         if [ "$EPHEM_MODE" = dev-multi ]; then
-        printf "  3) %-44s (%s)\n" "Addons: pull, switch branch, local changes" "asks which odcaN/ first"
+        printf "  3) %-44s (%s)\n" "Addons: pull, switch branch, add a repository" "asks which odcaN/ first"
         else
-        printf "  3) %s\n" "Addons ($ADDONS_NAME): pull, switch branch, local changes"
+        printf "  3) %s\n" "Addons ($ADDONS_NAME/): pull, switch branch, add a repository"
         fi
         printf "  4) %-44s (%s)\n" "Restart $what and follow the log" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
         printf "  5) %-44s (%s)\n" "Update or install modules" "scripts/dev-logs.sh ${EPHEM_INSTANCE:-} -u ..."
@@ -2278,7 +2644,7 @@ menu_main_server() {
         echo "  2) Manage domains — add / remove / certificates"
         echo "  3) SSL — set up HTTPS / show status"
         echo "  4) Update the ePHEM app image"
-        echo "  5) Custom addons — pull / switch branch"
+        echo "  5) Addons — pull / switch branch / add a repository"
         echo "  6) Update modules across databases"
         echo "  7) Back up now"
         echo "  8) Follow Odoo logs (Ctrl-C to stop)"

@@ -5,7 +5,9 @@
 #
 # Each instance gets:
 #   • its own host port            (8010, 8020, 8030, …)
-#   • its own custom-addons folder (odca<name>/)
+#   • its own addons folder        (odca<name>/, holding the ePHEM clone as
+#                                   odca<name>/ePHEM-core plus any repository
+#                                   added later from manage.sh → Addons)
 #   • its own odoo config          (odoo-<name>.conf)
 #   • its own database + filestore (DB "ephem_<name>", volume odoo-data-<name>)
 #
@@ -82,27 +84,48 @@ san() { printf '%s' "$1" | tr -c 'a-zA-Z0-9_-' '_'; }
 
 ensure_addons() {
     # $1 = instance name (sanitised), $2 = optional branch
-    local name="$1" branch="${2:-}" dir="odca$1"
-    if [ -d "$dir/.git" ]; then
-        echo -e "  ${GREEN}✓${NC} $dir (git: $(git -C "$dir" branch --show-current 2>/dev/null || echo '?'))"
+    # odcaN/ is the mounted parent; the ePHEM clone is odcaN/$CORE_NAME. A
+    # folder from before that layout (the clone itself) is moved down first;
+    # the container is recreated after `up` (its mount would still show the
+    # moved folder, see recreate_stale below).
+    local name="$1" branch="${2:-}" dir="odca$1" core="odca$1/$CORE_NAME" extra
+    addons_migrate_legacy "$dir" || true
+    mkdir -p "$dir"
+    if [ -d "$core/.git" ]; then
+        extra=$(( $(addons_source_count "$dir") - 1 ))
+        echo -e "  ${GREEN}✓${NC} $core (git: $(src_branch "$core"))$( [ "$extra" -gt 0 ] && echo " + $extra other source(s)")"
         return
     fi
-    mkdir -p "$dir"
     # If empty and a branch was requested, try to clone ePHEM into it.
-    if [ -z "$(ls -A "$dir" 2>/dev/null)" ] && [ -n "$branch" ]; then
-        echo "  Cloning ePHEM ($branch) into $dir …"
-        if git clone git@github.com:borse/ePHEM.git --branch "$branch" --single-branch "$dir" --progress; then
-            echo -e "  ${GREEN}✓${NC} $dir cloned ($branch)"
+    if [ -z "$(ls -A "$core" 2>/dev/null)" ] && [ -n "$branch" ]; then
+        echo "  Cloning ePHEM ($branch) into $core …"
+        rm -rf "$core"
+        if git clone "$(git_url_ssh github.com "$CORE_REPO")" --branch "$branch" --single-branch "$core" --progress; then
+            echo -e "  ${GREEN}✓${NC} $core cloned ($branch)"
         else
-            echo -e "  ${YELLOW}!${NC} Clone failed — leaving $dir empty. Populate it manually:"
-            echo "      git clone git@github.com:borse/ePHEM.git --branch <branch> $dir"
+            rm -rf "$core"
+            echo -e "  ${YELLOW}!${NC} Clone failed — leaving $core absent. Populate it manually:"
+            echo "      git clone $(git_url_ssh github.com "$CORE_REPO") --branch <branch> $core"
         fi
-    elif [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
-        echo -e "  ${YELLOW}!${NC} $dir is empty — the instance will start with no custom modules."
-        echo "      Put modules there, or re-run with a branch:  $name:18_national_dev"
+    elif [ -z "$(ls -A "$core" 2>/dev/null)" ]; then
+        echo -e "  ${YELLOW}!${NC} $core is missing — the instance will start with no ePHEM modules."
+        echo "      Put the clone there, or re-run with a branch:  $name:18_national_dev"
     else
-        echo -e "  ${GREEN}✓${NC} $dir (existing folder)"
+        echo -e "  ${GREEN}✓${NC} $core (existing folder, not a git clone)"
     fi
+}
+
+# After a legacy move the running container still shows the folder that was
+# moved (a bind mount follows the inode, not the path). Recreate it so
+# /mnt/extra-addons is the parent again and the new addons_path resolves.
+recreate_stale() {
+    local n
+    for n in "$@"; do
+        if odoo_mount_stale "odoo_$n" "odca$n"; then
+            echo -e "  ${CYAN}→${NC} recreating odoo_$n: its mount still shows the folder that was moved"
+            "${COMPOSE[@]}" up -d --force-recreate --no-deps "odoo_$n"
+        fi
+    done
 }
 
 write_conf() {
@@ -115,7 +138,9 @@ write_conf() {
 
 admin_passwd = $admin
 
-addons_path = /mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+; One entry per source folder inside odca$name/ (ePHEM-core first). Regenerated
+; by dev-instances.sh up and by manage.sh → Addons whenever a source changes.
+addons_path = $(addons_path_value "odca$name")
 
 proxy_mode = False
 
@@ -241,6 +266,9 @@ HEADER
 
     echo "Starting stack (shared Postgres + ${#names[@]} Odoo instances)…"
     "${COMPOSE[@]}" up -d --remove-orphans
+    # compose_files_init is what stack-lib's compose() and svc_state() use.
+    ephem_mode; compose_files_init
+    recreate_stale "${names[@]}"
 
     echo ""
     cmd_status
@@ -265,7 +293,7 @@ cmd_status() {
         echo "URLs:"
         while IFS= read -r name; do
             [ -z "$name" ] && continue
-            echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: odca$name/)"
+            echo "  • $name → http://localhost:$(( WEB_BASE + STEP * i ))   (db: ephem_$name, addons: odca$name/$CORE_NAME/)"
             [ -n "$(lan_ip)" ] && echo "      on the LAN: http://$(lan_ip):$(( WEB_BASE + STEP * i ))   (DEV_BIND_HOST in .env)"
             i=$(( i + 1 ))
         done < "$INSTANCES_FILE"

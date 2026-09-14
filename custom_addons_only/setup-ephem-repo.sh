@@ -6,6 +6,13 @@
 # ePHEM custom addons repository. Works on any
 # server with Odoo installed (no Docker required).
 #
+# Layout: the path you give is a PARENT folder. ePHEM is cloned into
+# <path>/ePHEM-core, and any other repository you want on the addons path
+# is cloned next to it (one folder each). At the end the script prints the
+# addons_path line for odoo.conf, listing every such folder. A folder that
+# is itself the ePHEM clone (the layout before ePHEM-core/) is moved one
+# level down; nothing is deleted.
+#
 # Usage:
 #   bash setup-ephem-repo.sh
 # ──────────────────────────────────────────────
@@ -22,6 +29,7 @@ NC='\033[0m'
 DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
 SSH_CONFIG="$HOME/.ssh/config"
 REPO="git@github-ephem-addons:borse/ePHEM.git"
+CORE_NAME="ePHEM-core"
 
 echo ""
 echo "========================================="
@@ -29,20 +37,16 @@ echo "  ePHEM — Custom Addons Setup"
 echo "========================================="
 echo ""
 
-# ── Step 1: Ask for addons path ──────────────
+# ── Step 1: Ask for the addons parent folder ──
 # Check common locations and suggest a default
 DEFAULT_PATH=""
-if [ -d "/opt/odoo18/custom-addons" ]; then
-    DEFAULT_PATH="/opt/odoo18/custom-addons"
-elif [ -d "/opt/odoo/custom-addons" ]; then
-    DEFAULT_PATH="/opt/odoo/custom-addons"
-elif [ -d "/opt/odoo16/odca-national-master" ]; then
-    DEFAULT_PATH="/opt/odoo16/odca-national-master"
-elif [ -d "/opt/odoo16/custom-addons" ]; then
-    DEFAULT_PATH="/opt/odoo16/custom-addons"
-fi
+for d in /opt/odoo18/addons /opt/odoo18/custom-addons /opt/odoo/addons /opt/odoo/custom-addons \
+         /opt/odoo16/odca-national-master /opt/odoo16/custom-addons; do
+    [ -d "$d" ] && { DEFAULT_PATH="$d"; break; }
+done
 
-echo "Where should the ePHEM modules be installed?"
+echo "Where do your custom addons live? (a parent folder: ePHEM goes into"
+echo "<folder>/$CORE_NAME, other repositories next to it)"
 echo ""
 if [ -n "$DEFAULT_PATH" ]; then
     echo -e "  Detected: ${CYAN}$DEFAULT_PATH${NC}"
@@ -51,8 +55,8 @@ if [ -n "$DEFAULT_PATH" ]; then
     ADDONS_PATH="${USER_PATH:-$DEFAULT_PATH}"
 else
     echo "  Common locations:"
-    echo "    /opt/odoo18/custom-addons"
-    echo "    /opt/odoo/custom-addons"
+    echo "    /opt/odoo18/addons"
+    echo "    /opt/odoo/addons"
     echo "    /opt/odoo16/odca-national-master"
     echo ""
     read -p "Enter the full path to your custom addons folder: " ADDONS_PATH
@@ -62,6 +66,8 @@ if [ -z "$ADDONS_PATH" ]; then
     echo -e "${RED}✗${NC} No path provided."
     exit 1
 fi
+ADDONS_PATH="${ADDONS_PATH%/}"
+CORE_PATH="$ADDONS_PATH/$CORE_NAME"
 
 echo ""
 
@@ -85,7 +91,8 @@ esac
 
 echo ""
 echo "─────────────────────────────────────────"
-echo -e "${BOLD}Path:${NC}   $ADDONS_PATH"
+echo -e "${BOLD}Folder:${NC} $ADDONS_PATH"
+echo -e "${BOLD}ePHEM:${NC}  $CORE_PATH"
 echo -e "${BOLD}Branch:${NC} $BRANCH"
 echo "─────────────────────────────────────────"
 echo ""
@@ -175,9 +182,20 @@ fi
 # ── Step 6: Clone or update the repo ─────────
 echo ""
 
-if [ -d "$ADDONS_PATH/.git" ]; then
+# The layout before ePHEM-core/: the given folder IS the clone. Move it one
+# level down so other repositories can sit next to it. Nothing is deleted.
+if [ -d "$ADDONS_PATH/.git" ] && [ ! -d "$CORE_PATH" ]; then
+    echo "$ADDONS_PATH is the ePHEM clone itself: moving it into $CORE_PATH…"
+    TMP_PATH="$ADDONS_PATH.migrating.$$"
+    mv "$ADDONS_PATH" "$TMP_PATH"
+    mkdir -p "$ADDONS_PATH"
+    mv "$TMP_PATH" "$CORE_PATH"
+    echo -e "${GREEN}✓${NC} Moved. Update addons_path in odoo.conf (printed at the end) and restart Odoo."
+fi
+
+if [ -d "$CORE_PATH/.git" ]; then
     echo "Updating existing ePHEM addons..."
-    cd "$ADDONS_PATH"
+    cd "$CORE_PATH"
 
     # Make sure we're on the right branch
     CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
@@ -194,24 +212,24 @@ if [ -d "$ADDONS_PATH/.git" ]; then
 else
     echo "Cloning ePHEM addons (this may take a few minutes)..."
 
-    # Back up existing folder if it has files
-    if [ -d "$ADDONS_PATH" ] && [ "$(ls -A "$ADDONS_PATH" 2>/dev/null)" ]; then
-        BACKUP_PATH="${ADDONS_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+    # Back up an existing ePHEM-core folder if it has files but is no clone
+    if [ -d "$CORE_PATH" ] && [ "$(ls -A "$CORE_PATH" 2>/dev/null)" ]; then
+        BACKUP_PATH="${CORE_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
         echo -e "${YELLOW}!${NC} Existing folder backed up to: $BACKUP_PATH"
-        mv "$ADDONS_PATH" "$BACKUP_PATH"
-    elif [ -d "$ADDONS_PATH" ]; then
-        rm -rf "$ADDONS_PATH"
+        mv "$CORE_PATH" "$BACKUP_PATH"
+    elif [ -d "$CORE_PATH" ]; then
+        rm -rf "$CORE_PATH"
     fi
 
-    # Create parent directory if needed
-    mkdir -p "$(dirname "$ADDONS_PATH")"
+    # Create the parent folder if needed
+    mkdir -p "$ADDONS_PATH"
 
     GIT_SSH_COMMAND="ssh -o ConnectTimeout=30" \
     git clone "$REPO" \
         --depth 1 \
         --branch "$BRANCH" \
         --single-branch \
-        "$ADDONS_PATH" \
+        "$CORE_PATH" \
         --progress
 
     echo ""
@@ -242,24 +260,43 @@ fi
 git config --global --add safe.directory "$ADDONS_PATH" 2>/dev/null || true
 
 # ── Summary ──────────────────────────────────
+# Every subfolder of the parent that holds Odoo modules is an addons path
+# entry: ePHEM-core first, then the others (repositories cloned next to it).
+ADDONS_LINE="$CORE_PATH"
+for d in "$ADDONS_PATH"/*/; do
+    d="${d%/}"
+    [ "$d" = "$CORE_PATH" ] && continue
+    for m in "$d"/*/__manifest__.py; do
+        [ -f "$m" ] && { ADDONS_LINE="$ADDONS_LINE,$d"; break; }
+    done
+done
+
 echo ""
 echo "========================================="
 echo -e "${GREEN}✓ ePHEM addons are ready!${NC}"
 echo ""
-echo "  Path:   $ADDONS_PATH"
+echo "  Folder: $ADDONS_PATH"
+echo "  ePHEM:  $CORE_PATH"
 echo "  Branch: $BRANCH"
 
 # Count modules
-MODULE_COUNT=$(find "$ADDONS_PATH" -maxdepth 1 -name "__manifest__.py" -o -name "__openerp__.py" 2>/dev/null | wc -l)
+MODULE_COUNT=$(find "$CORE_PATH" -mindepth 2 -maxdepth 2 \( -name "__manifest__.py" -o -name "__openerp__.py" \) 2>/dev/null | wc -l)
 if [ "$MODULE_COUNT" -gt 0 ]; then
     echo "  Modules: $MODULE_COUNT"
 fi
 
 echo ""
+echo "Put this in odoo.conf (each folder with modules, ePHEM first, then Odoo's own):"
+echo ""
+echo "  addons_path = $ADDONS_LINE,/path/to/odoo/addons"
+echo ""
 echo "Next steps:"
 echo "  1. Restart Odoo to load the new modules"
 echo "  2. Go to Apps → Update Apps List"
 echo "  3. Install the ePHEM modules"
+echo ""
+echo "More repositories: clone each one next to $CORE_NAME (git clone <repo> $ADDONS_PATH/<name>),"
+echo "then run this script again to get the updated addons_path line."
 echo ""
 echo "To update later, run this script again:"
 echo "  bash setup-ephem-repo.sh"

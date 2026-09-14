@@ -57,7 +57,9 @@ services:
       PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - odoo-data:/var/lib/odoo
-      - ./custom-addons:/mnt/extra-addons:ro
+      # addons/ is a parent folder: addons/ePHEM-core (the ePHEM clone) plus any
+      # repository added later from manage.sh. odoo.conf lists each subfolder.
+      - ./addons:/mnt/extra-addons:ro
       - ./odoo.conf:/etc/odoo/odoo.conf
     networks:
       - ephem-internal

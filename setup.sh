@@ -20,6 +20,13 @@ EPHEM_ROOT="$(cd "$(dirname "$0")" && pwd)"
 source "$EPHEM_ROOT/scripts/stack-lib.sh"
 ephem_mode    # what this checkout is now (from .env, else from the files)
 
+# Single modes mount addons/ and the ePHEM clone lives inside it as
+# addons/$CORE_NAME (ePHEM-core). Repositories added later from manage.sh →
+# Addons sit next to it. dev-multi uses odcaN/ the same way.
+ADDONS_PARENT="$EPHEM_ROOT/addons"
+CORE_TARGET="$ADDONS_PARENT/$CORE_NAME"
+MIGRATED_SINGLE=false      # the old custom-addons/ layout was moved this run
+
 get_server_ip() {
     # Try each source in turn, checking OUTPUT (not exit code): on macOS
     # `hostname -I` fails but the awk pipeline still exits 0, so an exit-code
@@ -115,6 +122,50 @@ github_ssh_help() {
     echo "            ssh -T git@github.com     # expect: Hi <you>! You've successfully authenticated"
     echo "            bash setup.sh"
     echo ""
+}
+
+# Every git source inside PARENT (addons/): fetch, say how far behind each
+# is, offer ONE pull for all of them. Sets ADDONS_UPDATED=true when anything
+# was pulled (the module update warning at the end depends on it).
+check_addons_updates() {  # check_addons_updates PARENT
+    local parent="$1" s dir cur behind
+    local -a behind_dirs=()
+    ADDONS_UPDATED=false
+    while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        dir="$parent/$s"
+        if [ ! -d "$dir/.git" ]; then
+            echo -e "${GREEN}✓${NC} addons/$s (a folder, not a git clone: nothing to fetch)"
+            continue
+        fi
+        cur=$(git -C "$dir" branch --show-current 2>/dev/null) || cur=""
+        if [ -z "$cur" ] || ! git -C "$dir" fetch origin 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} addons/$s: could not reach origin — skipping the update check (no internet or SSH issue)"
+            continue
+        fi
+        behind=$(git -C "$dir" rev-list HEAD..origin/"$cur" --count 2>/dev/null) || behind=0
+        if [ "${behind:-0}" -gt 0 ] 2>/dev/null; then
+            echo -e "${YELLOW}!${NC} addons/$s is $behind commit(s) behind on '$cur'"
+            behind_dirs+=("$dir")
+        else
+            echo -e "${GREEN}✓${NC} addons/$s is up to date ('$cur')"
+        fi
+    done < <(addons_sources "$parent")
+    [ "${#behind_dirs[@]}" -eq 0 ] && return 0
+    echo ""
+    read -p "  Pull updates now? [y/N]: " PULL_ADDONS
+    if [[ "${PULL_ADDONS:-N}" =~ ^[Yy]$ ]]; then
+        for dir in "${behind_dirs[@]}"; do
+            if git -C "$dir" pull --ff-only; then
+                echo -e "${GREEN}✓${NC} addons/$(basename "$dir") updated"
+                ADDONS_UPDATED=true
+            else
+                echo -e "${RED}✗${NC} addons/$(basename "$dir"): pull failed (diverged or local changes): resolve it in manage.sh → Addons"
+            fi
+        done
+    else
+        echo "  Skipped — addons not updated"
+    fi
 }
 
 # Poll until the Docker daemon answers, or time out. $1 = number of 3s tries.
@@ -297,56 +348,58 @@ odca_names() { local n out=""; for n in $1; do out="$out odca$n"; done; printf '
 prepare_multi_addons() {
     # $1 = branch, remaining args = every instance name.
     #
-    # A folder with no clone yet gets one: the first such folder by a single
-    # git clone, the rest by copying that folder (.git included) and
-    # switching the copy, so the branch is downloaded once. A folder that
-    # already holds a clone is never touched here: it may be on its own
-    # branch on purpose, and switching is manage.sh → Addons, per instance.
+    # odcaN/ is the mounted parent; the ePHEM clone goes to odcaN/$CORE_NAME.
+    # An instance with no clone yet gets one: the first by a single git
+    # clone, the rest by copying that clone (.git included) and switching
+    # the copy, so the branch is downloaded once. A clone that is already
+    # there is never touched here: it may be on its own branch on purpose,
+    # and switching is manage.sh → Addons, per instance.
     local branch="$1"; shift
-    local repo="git@github.com:borse/ePHEM.git"
-    local source_dir="" name dir cur
+    local repo; repo=$(git_url_ssh github.com "$CORE_REPO")
+    local source_core="" name dir core cur
 
     echo ""
-    echo -e "${CYAN}${BOLD}Preparing custom-addons per instance (branch: $branch)${NC}"
+    echo -e "${CYAN}${BOLD}Preparing $CORE_NAME per instance (branch: $branch)${NC}"
     echo ""
 
     for raw in "$@"; do
         name=$(san_name "$raw")
-        dir="odca$name"
+        dir="odca$name"; core="$dir/$CORE_NAME"
 
-        if [ -d "$dir/.git" ]; then
-            [ -z "$source_dir" ] && source_dir="$dir"
-            cur=$(git -C "$dir" branch --show-current 2>/dev/null) || cur=""
-            echo -e "  ${GREEN}·${NC} $dir kept as it is (branch: ${cur:-(detached)})"
+        if [ -d "$core/.git" ]; then
+            [ -z "$source_core" ] && source_core="$core"
+            cur=$(git -C "$core" branch --show-current 2>/dev/null) || cur=""
+            echo -e "  ${GREEN}·${NC} $core kept as it is (branch: ${cur:-(detached)})"
             continue
         fi
 
         # No clone here. A folder with files but no .git is someone's work,
         # not ours to replace.
-        if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-            echo -e "  ${YELLOW}!${NC} $dir has files but is not a git clone — left as it is."
+        if [ -n "$(ls -A "$core" 2>/dev/null)" ]; then
+            echo -e "  ${YELLOW}!${NC} $core has files but is not a git clone — left as it is."
             continue
         fi
-        if [ -z "$source_dir" ]; then
-            echo -e "  ${CYAN}⬇${NC} Cloning ePHEM ($branch) into $dir (one download for all instances)…"
-            rm -rf "$dir"
-            if ! git clone "$repo" --branch "$branch" --single-branch "$dir" --progress; then
+        mkdir -p "$dir"
+        if [ -z "$source_core" ]; then
+            echo -e "  ${CYAN}⬇${NC} Cloning ePHEM ($branch) into $core (one download for all instances)…"
+            rm -rf "$core"
+            if ! git clone "$repo" --branch "$branch" --single-branch "$core" --progress; then
                 echo -e "  ${RED}✗${NC} Clone failed — does branch '$branch' exist, and is your SSH key authorized?"
-                rm -rf "$dir"
+                rm -rf "$core"
                 return 1
             fi
-            source_dir="$dir"
+            source_core="$core"
         else
-            echo -e "  ${CYAN}⧉${NC} Copying $source_dir → $dir (no re-download)…"
-            rm -rf "$dir"
-            cp -a "$source_dir" "$dir"
-            cur=$(git -C "$dir" branch --show-current 2>/dev/null) || cur=""
-            if [ "$cur" != "$branch" ] && ! multi_switch_branch "$dir" "$branch"; then
-                echo -e "  ${YELLOW}!${NC} $dir copied, but could not switch it to '$branch' — left on '${cur:-(detached)}'."
+            echo -e "  ${CYAN}⧉${NC} Copying $source_core → $core (no re-download)…"
+            rm -rf "$core"
+            cp -a "$source_core" "$core"
+            cur=$(git -C "$core" branch --show-current 2>/dev/null) || cur=""
+            if [ "$cur" != "$branch" ] && ! multi_switch_branch "$core" "$branch"; then
+                echo -e "  ${YELLOW}!${NC} $core copied, but could not switch it to '$branch' — left on '${cur:-(detached)}'."
                 continue
             fi
         fi
-        echo -e "  ${GREEN}✓${NC} $dir ready (branch: $branch)"
+        echo -e "  ${GREEN}✓${NC} $core ready (branch: $branch)"
     done
 }
 
@@ -458,8 +511,9 @@ if [ "$MODE" = "developer" ]; then
     echo -e "${CYAN}${BOLD}Developer mode${NC}"
     echo ""
     echo "This mode:"
-    echo "  • Clones ePHEM addons using YOUR personal GitHub SSH key"
-    echo "  • Mounts custom-addons as read-write (live editing)"
+    echo "  • Clones ePHEM into addons/$CORE_NAME using YOUR personal GitHub SSH key"
+    echo "  • Mounts addons/ read-write (live editing); other repositories can be"
+    echo "    added next to $CORE_NAME later from manage.sh → Addons"
     echo "  • Uses debug settings in odoo.conf (workers=0, log_level=debug)"
     echo ""
     echo "Prerequisite: your SSH key must be added to your GitHub account"
@@ -478,7 +532,7 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo -e "${CYAN}${BOLD}Multi-instance mode${NC}"
         echo ""
-        echo "  Single-instance steps (override file, odoo.conf, custom-addons/, "
+        echo "  Single-instance steps (override file, odoo.conf, addons/, "
         echo "  single 'docker compose up -d') will be SKIPPED — they would fight"
         echo "  the multi-instance stack. Delegating to scripts/dev-instances.sh."
         echo ""
@@ -571,27 +625,34 @@ if [ "$MODE" = "developer" ]; then
         fi
 
         # ── Addons folders ──────────────────────────────────────────────────
+        # odcaN/ is the mounted folder and the ePHEM clone is odcaN/$CORE_NAME.
+        # A folder from before that layout (odcaN/ was the clone itself) is
+        # moved down first; the stack refresh below recreates its container.
         # First run: every odcaN/ is empty and all of them get the clone.
-        # Re-run: a folder that already holds a checkout is left exactly as it
-        # is (pull and branch switching are manage.sh → Addons, per instance);
-        # only a folder with no clone yet gets one.
+        # Re-run: a clone that is already there is left exactly as it is
+        # (pull and branch switching are manage.sh → Addons, per instance);
+        # only an instance with no clone yet gets one.
+        echo ""
+        for _n in $INSTANCE_NAMES; do
+            _n=$(san_name "$_n")
+            addons_migrate_legacy "odca$_n" || true
+        done
         MISSING=""
         for _n in $INSTANCE_NAMES; do
             _n=$(san_name "$_n")
-            [ -d "odca$_n/.git" ] || MISSING="$MISSING $_n"
+            [ -d "odca$_n/$CORE_NAME/.git" ] || MISSING="$MISSING $_n"
         done
         MISSING="${MISSING# }"
         if [ -z "$MISSING" ]; then
-            echo ""
-            echo -e "  ${GREEN}✓${NC} Every instance already has ePHEM checked out; the folders are left as they are."
-            echo "     Pull or switch a branch per instance:  bash manage.sh → Addons"
+            echo -e "  ${GREEN}✓${NC} Every instance already has ePHEM checked out (odcaN/$CORE_NAME); the folders are left as they are."
+            echo "     Pull, switch a branch or add a repository per instance:  bash manage.sh → Addons"
         else
             echo ""
             echo "  Which branch do you want to work on?"
             if [ "$(printf '%s\n' $MISSING | wc -l)" -eq "$(printf '%s\n' $INSTANCE_NAMES | wc -l)" ]; then
-                echo "  It is downloaded once into odca${MISSING%% *} and copied to the other instances."
+                echo "  It is downloaded once into odca${MISSING%% *}/$CORE_NAME and copied to the other instances."
             else
-                echo "  It goes to $(odca_names "$MISSING"), copied from an existing folder (no re-download)."
+                echo "  It goes to $(odca_names "$MISSING"), copied from an existing clone (no re-download)."
             fi
             echo ""
             echo "    1) 18_national_dev    — Odoo 18 development (recommended)"
@@ -612,7 +673,7 @@ if [ "$MODE" = "developer" ]; then
             # ── Clone once, copy to the rest ────────────────────────────────
             # shellcheck disable=SC2086  # word-splitting on INSTANCE_NAMES is intentional
             if ! prepare_multi_addons "$BRANCH" $INSTANCE_NAMES; then
-                echo -e "${RED}✗${NC} Could not prepare custom-addons — see the error above. Aborting."
+                echo -e "${RED}✗${NC} Could not prepare $CORE_NAME — see the error above. Aborting."
                 exit 1
             fi
         fi
@@ -722,7 +783,7 @@ if [ "$MODE" = "developer" ]; then
         _pi=0
         for _n in $INSTANCE_NAMES; do
             _port=$(( 8010 + 10 * _pi ))
-            echo "    • odca$_n  →  http://localhost:$_port   (db: ephem_$_n, addons: odca$_n/)"
+            echo "    • odca$_n  →  http://localhost:$_port   (db: ephem_$_n, ePHEM code: odca$_n/$CORE_NAME/)"
             _pi=$(( _pi + 1 ))
         done
         echo ""
@@ -733,8 +794,9 @@ if [ "$MODE" = "developer" ]; then
         echo "    Stop (keep data):     bash scripts/dev-instances.sh down"
         echo ""
         echo -e "  ${CYAN}Everything from here on is bash manage.sh:${NC} it asks which instance,"
-        echo "  then pulls or switches that folder alone, restarts, updates modules, and"
-        echo "  changes the roster. Re-running this script never touches an existing folder."
+        echo "  then pulls or switches that instance's sources alone, adds another"
+        echo "  repository next to $CORE_NAME, restarts, updates modules, and changes the"
+        echo "  roster. Re-running this script never touches an existing clone."
 
         # ── PyCharm handoff — copy/paste-ready run-config guidance ──────────
         # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches
@@ -760,6 +822,7 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo -e "  ${BOLD}2) Open your addons folder${NC} (File → Open), for example:"
         echo "       $ADDONS_DISPLAY"
+        echo "       (the ePHEM clone is $CORE_NAME/ inside it; repositories added later sit next to it)"
         echo ""
         echo -e "  ${BOLD}3) Add one Shell Script run configuration per instance${NC}"
         echo "       Run → Edit Configurations → + → Shell Script → 'Script path'"
@@ -800,34 +863,14 @@ if [ "$MODE" = "developer" ]; then
         exit 1
     fi
 
-    if [ -d "custom-addons/.git" ]; then
-        echo -e "${GREEN}✓${NC} custom-addons/ already cloned"
-        echo "  Checking for updates..."
-        cd custom-addons
-        if ! git fetch origin 2>/dev/null; then
-            echo -e "${YELLOW}!${NC} Could not reach remote — skipping update check (no internet or SSH issue)"
-            ADDONS_BEHIND=0
-        else
-            ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
-        fi
-        cd ..
+    # Installs from before the addons/$CORE_NAME layout: custom-addons/ becomes
+    # addons/ and the clone moves into it. The container is recreated below.
+    if addons_adopt_single_legacy; then MIGRATED_SINGLE=true; fi
 
-        if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
-            echo -e "${YELLOW}!${NC} custom-addons/ is $ADDONS_BEHIND commit(s) behind"
-            echo ""
-            read -p "  Pull updates now? [y/N]: " PULL_ADDONS
-            if [[ "${PULL_ADDONS:-N}" =~ ^[Yy]$ ]]; then
-                cd custom-addons && git pull && cd ..
-                echo -e "${GREEN}✓${NC} custom-addons/ updated ($ADDONS_BEHIND commit(s))"
-                ADDONS_UPDATED=true
-            else
-                echo "  Skipped — addons not updated"
-                ADDONS_UPDATED=false
-            fi
-        else
-            echo -e "${GREEN}✓${NC} custom-addons/ is up to date"
-            ADDONS_UPDATED=false
-        fi
+    if [ -d "$CORE_TARGET/.git" ]; then
+        echo -e "${GREEN}✓${NC} addons/$CORE_NAME already cloned"
+        echo "  Checking for updates..."
+        check_addons_updates "$ADDONS_PARENT"
     else
         echo ""
         echo "Which branch do you want to work on?"
@@ -846,17 +889,18 @@ if [ "$MODE" = "developer" ]; then
         esac
 
         echo ""
-        echo "Cloning ePHEM addons (branch: $BRANCH)..."
-        rm -rf custom-addons
-        if git clone git@github.com:borse/ePHEM.git \
+        echo "Cloning ePHEM addons (branch: $BRANCH) into addons/$CORE_NAME..."
+        mkdir -p "$ADDONS_PARENT"
+        rm -rf "$CORE_TARGET"
+        if git clone "$(git_url_ssh github.com "$CORE_REPO")" \
                --branch "$BRANCH" \
                --single-branch \
-               custom-addons \
+               "$CORE_TARGET" \
                --progress; then
-            echo -e "${GREEN}✓${NC} custom-addons/ cloned (branch: $BRANCH)"
+            echo -e "${GREEN}✓${NC} addons/$CORE_NAME cloned (branch: $BRANCH)"
         else
             echo -e "${RED}✗${NC} Clone failed. Cleaning up..."
-            rm -rf custom-addons
+            rm -rf "$CORE_TARGET"
             echo ""
             echo "  Things to check:"
             echo "    • Is your SSH key added to GitHub? ssh -T git@github.com"
@@ -879,7 +923,9 @@ services:
       ODOO_PY_COLORS: "1"
     volumes:
       - odoo-data:/var/lib/odoo
-      - ./custom-addons:/mnt/extra-addons:rw
+      # addons/ holds ePHEM-core plus any repository added from manage.sh;
+      # odoo.conf lists each subfolder in its addons_path.
+      - ./addons:/mnt/extra-addons:rw
       - ./odoo.conf:/etc/odoo/odoo.conf
     # Every interface by default (DEV_BIND_HOST in .env), so a phone or a
     # colleague on the same LAN can open the instance. Docker-published ports
@@ -1017,38 +1063,20 @@ elif [ ! -f "nginx/default.conf" ] && [ "$MODE" = "server" ]; then
 fi
 
 # ── Custom addons (server/demo — deploy key flow) ──
+# addons/ is the mounted folder; the ePHEM clone is addons/$CORE_NAME. Other
+# repositories are added next to it later (manage.sh → Addons → Add a
+# source, each with its own deploy key). Installs from before that layout
+# (custom-addons/ was the clone) are moved; the container is recreated below.
 if [ "$MODE" != "developer" ]; then
-    if [ -d "custom-addons/.git" ]; then
-        echo -e "${GREEN}✓${NC} custom-addons/ has modules (Git repo)"
+    if addons_adopt_single_legacy; then MIGRATED_SINGLE=true; fi
+    if [ -d "$CORE_TARGET/.git" ]; then
+        echo -e "${GREEN}✓${NC} addons/$CORE_NAME has the ePHEM modules (Git repo)"
         echo "  Checking for updates..."
-        cd custom-addons
-        if ! git fetch origin 2>/dev/null; then
-            echo -e "${YELLOW}!${NC} Could not reach remote — skipping update check (no internet or SSH issue)"
-            ADDONS_BEHIND=0
-        else
-            ADDONS_BEHIND=$(git rev-list HEAD..origin/$(git branch --show-current) --count 2>/dev/null || echo "0")
-        fi
-        cd ..
-
-        if [ "$ADDONS_BEHIND" -gt 0 ] 2>/dev/null; then
-            echo -e "${YELLOW}!${NC} custom-addons/ is $ADDONS_BEHIND commit(s) behind"
-            echo ""
-            read -p "  Pull updates now? [y/N]: " PULL_ADDONS
-            if [[ "${PULL_ADDONS:-N}" =~ ^[Yy]$ ]]; then
-                cd custom-addons && git pull && cd ..
-                echo -e "${GREEN}✓${NC} custom-addons/ updated ($ADDONS_BEHIND commit(s))"
-                ADDONS_UPDATED=true
-            else
-                echo "  Skipped — addons not updated"
-                ADDONS_UPDATED=false
-            fi
-        else
-            echo -e "${GREEN}✓${NC} custom-addons/ is up to date"
-            ADDONS_UPDATED=false
-        fi
+        check_addons_updates "$ADDONS_PARENT"
     else
-        echo -e "${YELLOW}!${NC} Downloading ePHEM modules..."
-        rm -rf custom-addons
+        echo -e "${YELLOW}!${NC} Downloading ePHEM modules into addons/$CORE_NAME..."
+        mkdir -p "$ADDONS_PARENT"
+        rm -rf "$CORE_TARGET"
 
         DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
         ADDONS_CLONED=false
@@ -1062,28 +1090,28 @@ if [ "$MODE" != "developer" ]; then
                 echo "  Cloning ePHEM modules..."
                 echo ""
                 if GIT_SSH_COMMAND="ssh -o ConnectTimeout=30" \
-                   git clone git@github-ephem-addons:borse/ePHEM.git \
+                   git clone "$(git_url_ssh github-ephem-addons "$CORE_REPO")" \
                        --depth 1 \
                        --branch 18_national_dev \
                        --single-branch \
-                       custom-addons \
+                       "$CORE_TARGET" \
                        --progress; then
                     echo ""
                     echo -e "${GREEN}✓${NC} ePHEM modules downloaded"
                     ADDONS_CLONED=true
                 else
                     echo -e "${RED}✗${NC} Clone failed. Cleaning up partial clone..."
-                    rm -rf custom-addons
-                    mkdir -p custom-addons
+                    rm -rf "$CORE_TARGET"
+                    mkdir -p "$CORE_TARGET"
                 fi
             else
                 echo -e "${YELLOW}!${NC} Deploy key exists but access not yet granted"
-                mkdir -p custom-addons
+                mkdir -p "$CORE_TARGET"
             fi
         fi
 
         if [ "$ADDONS_CLONED" = false ]; then
-            mkdir -p custom-addons
+            mkdir -p "$CORE_TARGET"
             NEEDS_ADDONS_ACCESS=true
 
             if [ ! -f "$DEPLOY_KEY" ]; then
@@ -1130,6 +1158,10 @@ done
 echo -e "${GREEN}✓${NC} Scripts are executable"
 
 # ── Generate odoo.conf ────────────────────────
+# addons/ must exist before odoo.conf lists what is inside it (and before
+# compose mounts it: docker would otherwise create it as root).
+mkdir -p "$ADDONS_PARENT"
+ADDONS_PATH_LINE=$(addons_path_value "$ADDONS_PARENT")
 if [ -f ".env" ]; then
     if sed --version 2>/dev/null | grep -q GNU; then
         sed -i 's/\r$//' .env
@@ -1171,7 +1203,9 @@ if [ -f ".env" ]; then
 
 admin_passwd = $ADMIN_PASS
 
-addons_path = /mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+; One entry per source folder inside addons/ ($CORE_NAME first). Regenerated by
+; setup.sh and by manage.sh → Addons whenever a source is added, removed or renamed.
+addons_path = $ADDONS_PATH_LINE
 
 proxy_mode = False
 
@@ -1198,7 +1232,9 @@ ODOOEOF
 
 admin_passwd = $ADMIN_PASS
 
-addons_path = /mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons
+; One entry per source folder inside addons/ ($CORE_NAME first). Regenerated by
+; setup.sh and by manage.sh → Addons whenever a source is added, removed or renamed.
+addons_path = $ADDONS_PATH_LINE
 
 proxy_mode = True
 
@@ -1361,6 +1397,13 @@ if ! bash scripts/harden-db-role.sh; then
 fi
 
 docker compose up -d
+# After the move from custom-addons/ the old container's bind mount still
+# shows the folder that was moved (a mount follows the inode, not the path);
+# recreate it so /mnt/extra-addons is addons/ and the new addons_path resolves.
+if [ "$MIGRATED_SINGLE" = true ] && odoo_mount_stale odoo "$ADDONS_PARENT"; then
+    echo "Recreating the Odoo container so it sees addons/$CORE_NAME…"
+    docker compose up -d --force-recreate --no-deps odoo
+fi
 docker compose restart odoo
 
 echo "Checking database connection..."
@@ -1443,11 +1486,11 @@ if [ "$MODE" = "developer" ]; then
     # script via a \\wsl.localhost path; on macOS/Linux it's the POSIX path.
     if is_wsl; then
         SCRIPT_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
-        ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/custom-addons" | tr '/' '\\')"
+        ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/addons" | tr '/' '\\')"
         PYCHARM_HOST="Windows"
     else
         SCRIPT_DISPLAY="$PWD/scripts/dev-logs.sh"
-        ADDONS_DISPLAY="$PWD/custom-addons"
+        ADDONS_DISPLAY="$PWD/addons"
         PYCHARM_HOST="this machine"
     fi
 
@@ -1460,7 +1503,7 @@ if [ "$MODE" = "developer" ]; then
     echo ""
     echo "  One-time PyCharm setup:"
     echo "    1. Install PyCharm on ${PYCHARM_HOST} (Community Edition is free)."
-    echo "    2. File → Open → this folder:"
+    echo "    2. File → Open → this folder (the ePHEM clone is $CORE_NAME/ inside it):"
     printf '         %b%s%b\n' "$BOLD" "$ADDONS_DISPLAY" "$NC"
     echo "    3. Run → Edit Configurations → + → Shell Script:"
     echo "         • Name:            Odoo: restart + logs"
@@ -1481,7 +1524,7 @@ if [ "$MODE" = "developer" ]; then
     echo "         bash scripts/dev-logs.sh -u eoc_signals -d yourdb"
     echo ""
     echo -e "${CYAN}${BOLD}Day-to-day menu${NC}"
-    echo "  bash manage.sh    (status, addons pull/switch, restart + logs, module updates, doctor, databases)"
+    echo "  bash manage.sh    (status, addons: pull/switch/add a repository, restart + logs, module updates, doctor, databases)"
     echo ""
     echo -e "${CYAN}${BOLD}Need several Odoo servers at once?${NC}"
     echo "  Re-run:  bash setup.sh → 3 (Developer) → y (already set up) → 8 (Multi-instance)"

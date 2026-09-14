@@ -29,7 +29,7 @@ The ePHEM custom modules are hosted in a private GitHub repository. This script:
 
 1. Generates an SSH key on your server (one time)
 2. You send the key to the ePHEM team — they grant read-only access
-3. The script clones the modules into your Odoo addons folder
+3. The script clones the modules into `<your addons folder>/ePHEM-core`
 4. Run the same script again anytime to update to the latest version
 
 ```
@@ -37,13 +37,17 @@ The ePHEM custom modules are hosted in a private GitHub repository. This script:
 │  Your Server                                             │
 │                                                          │
 │  ┌────────────────────┐     ┌─────────────────────────┐  │
-│  │  Odoo (existing)   │────▶│  custom-addons/         │  │
-│  │                    │     │  (ePHEM modules cloned   │  │
-│  │                    │     │   by this script)        │  │
+│  │  Odoo (existing)   │────▶│  addons/                │  │
+│  │                    │     │  ├── ePHEM-core/        │  │
+│  │                    │     │  │   (cloned by this    │  │
+│  │                    │     │  │    script)           │  │
+│  │                    │     │  └── <other repos>/     │  │
 │  └────────────────────┘     └─────────────────────────┘  │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
+
+The folder you give is a **parent**: ePHEM lives in `ePHEM-core/` inside it, and any other repository you want on the addons path is cloned next to it, one folder each. The script prints the `addons_path` line for `odoo.conf` at the end, listing every such folder. A folder that is itself the ePHEM clone (the layout before `ePHEM-core/`) is moved one level down on the next run; nothing is deleted.
 
 ---
 
@@ -83,12 +87,13 @@ bash setup-ephem-repo.sh
 
 The script will ask you two questions:
 
-**1. Where to install the modules:**
+**1. Where your custom addons live (the parent folder):**
 
 ```
-Where should the ePHEM modules be installed?
+Where do your custom addons live? (a parent folder: ePHEM goes into
+<folder>/ePHEM-core, other repositories next to it)
 
-  Detected: /opt/odoo18/custom-addons
+  Detected: /opt/odoo18/addons
 
 Enter path (press Enter to use detected path):
 ```
@@ -167,7 +172,31 @@ Or if your service has a different name:
 sudo systemctl restart odoo18-national-master
 ```
 
-Then open Odoo in your browser, go to **Apps → Update Apps List**, and install the ePHEM modules.
+Make sure `odoo.conf` has the `addons_path` line the script printed (the `ePHEM-core` folder, plus any repository cloned next to it), then open Odoo in your browser, go to **Apps → Update Apps List**, and install the ePHEM modules.
+
+---
+
+## Adding Other Repositories
+
+Clone each one next to `ePHEM-core`, then run the script again: it prints the updated `addons_path` line.
+
+```bash
+git clone git@github.com:owner/repo.git /opt/odoo18/addons/repo
+bash setup-ephem-repo.sh          # → addons_path = .../ePHEM-core,.../repo,...
+sudo systemctl restart odoo
+```
+
+A private repository needs its own read-only deploy key on GitHub (a deploy key opens exactly one repository): generate one with `ssh-keygen -t ed25519 -f ~/.ssh/ephem_addons_repo -N ""`, add it under the repository's **Settings → Deploy keys**, and give it an ssh alias in `~/.ssh/config`:
+
+```
+Host ephem-addons-repo
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/ephem_addons_repo
+    IdentitiesOnly yes
+```
+
+then clone with `git clone git@ephem-addons-repo:owner/repo.git /opt/odoo18/addons/repo`.
 
 ---
 
@@ -251,11 +280,11 @@ bash setup-ephem-repo.sh /your/custom/addons/path
 The script auto-detects the Odoo user and sets ownership. If it didn't work:
 
 ```bash
-sudo chown -R odoo:odoo /opt/odoo18/custom-addons
+sudo chown -R odoo:odoo /opt/odoo18/addons
 ```
 
 ```bash
-sudo chmod -R 755 /opt/odoo18/custom-addons
+sudo chmod -R 755 /opt/odoo18/addons
 ```
 
 Replace `odoo` with your Odoo system user (`odoo16`, `odoo18`, etc.).

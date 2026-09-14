@@ -8,6 +8,9 @@
 #   ./scripts/update-modules.sh --auto       (update all modules on all databases)
 #   ./scripts/update-modules.sh --auto --db training-server
 #
+# The modules come from every source folder of the Odoo acted on (the
+# addons/ parent: ePHEM-core plus whatever manage.sh → Addons added).
+#
 # Multi-instance developer mode (EPHEM_MODE=dev-multi in .env): acts on ONE
 # instance, its odcaN/ code and, by default, its own database ephem_N. The
 # instance is --instance N, else the one manage.sh pinned last (EPHEM_INSTANCE
@@ -174,20 +177,24 @@ MODULES=(
   "web_hierarchy"
 )
 
-# ── Auto-include every eoc_* / ephem_* module in the addons folder ──────
+# ── Auto-include every eoc_* / ephem_* module in the addons folders ─────
 # The curated list above fixes the update order for the core chain; any
-# module matching these prefixes that is not already listed is appended.
-# New modules added to the repo are picked up automatically — no need to
+# module matching these prefixes that is not already listed is appended,
+# from every source folder (ePHEM-core and whatever was added next to it).
+# New modules added to a repo are picked up automatically — no need to
 # edit this script. Safe against every database: Odoo's -u simply skips
 # module names that are not installed on that database.
-for _dir in "$ADDONS_DIR"/eoc_*/ "$ADDONS_DIR"/ephem_*/ "$ADDONS_DIR"/cmp_*/; do
-    [ -f "$_dir/__manifest__.py" ] || continue
-    _mod=$(basename "$_dir")
-    _known=false
-    for _m in "${MODULES[@]}"; do [ "$_m" = "$_mod" ] && { _known=true; break; }; done
-    [ "$_known" = false ] && MODULES+=("$_mod")
-done
-unset _dir _mod _known _m
+while IFS= read -r _src; do
+    [ -n "$_src" ] || continue
+    for _dir in "$_src"/eoc_*/ "$_src"/ephem_*/ "$_src"/cmp_*/; do
+        [ -f "$_dir/__manifest__.py" ] || continue
+        _mod=$(basename "$_dir")
+        _known=false
+        for _m in "${MODULES[@]}"; do [ "$_m" = "$_mod" ] && { _known=true; break; }; done
+        [ "$_known" = false ] && MODULES+=("$_mod")
+    done
+done < <(addons_module_dirs "$ADDONS_DIR")
+unset _src _dir _mod _known _m
 
 # ── Get all databases ────────────────────────
 get_databases() { list_dbs; }
@@ -275,8 +282,10 @@ echo ""
 echo -e "Log file: ${CYAN}$LOG_FILE${NC}"
 echo -e "Mode:     $(ephem_mode_label)"
 if [ "$EPHEM_MODE" = dev-multi ]; then
-    echo -e "Instance: ${BOLD}$EPHEM_INSTANCE${NC}  (code: $ADDONS_NAME, service: $ODOO_SVC)"
+    echo -e "Instance: ${BOLD}$EPHEM_INSTANCE${NC}  (code: $ADDONS_NAME/, service: $ODOO_SVC)"
 fi
+echo -e "Sources:  $(addons_sources "$ADDONS_DIR" | tr '\n' ' ' | sed 's/ *$//' | grep . || echo "(none: $ADDONS_NAME/ is empty)")"
+addons_warn_duplicates "$ADDONS_DIR" || true
 echo ""
 
 # ── Get database list ────────────────────────
