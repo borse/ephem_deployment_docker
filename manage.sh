@@ -1518,16 +1518,68 @@ menu_db_manager() {
         read -r -p "  Enable it temporarily? [y/N]: " E
         [[ "${E:-N}" =~ ^[Yy]$ ]] || { echo "  Left disabled."; return 0; }
         set_env_key ODOO_LIST_DB True
-        sed -i 's/^list_db = .*/list_db = True/' "$ODOO_CONF"
+        odoo_conf_set_key "$ODOO_CONF" list_db True
         echo -e "  ${YELLOW}!${NC} Enabled. Come back and DISABLE it as soon as you are done."
     else
         read -r -p "  Disable it now (recommended)? [Y/n]: " D
         [[ "${D:-Y}" =~ ^[Nn]$ ]] && { echo "  Left enabled."; return 0; }
         set_env_key ODOO_LIST_DB False
-        sed -i 's/^list_db = .*/list_db = False/' "$ODOO_CONF"
+        odoo_conf_set_key "$ODOO_CONF" list_db False
         echo -e "  ${GREEN}✓${NC} Disabled."
     fi
-    $(compose_cmd_text) restart $ODOO_SVC >/dev/null 2>&1 && echo "  Odoo restarted."
+    compose restart "$ODOO_SVC" >/dev/null 2>&1 && echo "  Odoo restarted."
+}
+
+# ── Database routing (dbfilter) ───────────────
+# Odoo reads odoo.conf, never .env: ODOO_DBFILTER in .env only becomes the
+# dbfilter line when setup.sh regenerates the file. This item writes both
+# and restarts Odoo, so a routing change applies right away and survives
+# the next setup run.
+menu_dbfilter() {
+    local ENV_VAL CONF_VAL NEW C
+    ENV_VAL=$(env_get ODOO_DBFILTER)
+    CONF_VAL=$(odoo_conf_get_key "$ODOO_CONF" dbfilter)
+    echo -e "${CYAN}${BOLD}Database routing${NC} (dbfilter: which database answers which domain)"
+    echo ""
+    echo "  In .env (ODOO_DBFILTER):  ${ENV_VAL:-(empty)}"
+    echo "  In odoo.conf (in force):  ${CONF_VAL:-(none: every database is offered)}"
+    if [ "${ENV_VAL:-}" != "${CONF_VAL:-}" ]; then
+        echo -e "  ${YELLOW}!${NC} They differ. Odoo uses odoo.conf; .env is what the next setup.sh writes."
+    fi
+    echo ""
+    echo "  Odoo picks the database by matching this pattern against the first"
+    echo "  label of the requested domain (%d). Exactly one match = that tenant;"
+    echo "  none or several = the database selector page instead of a login."
+    echo ""
+    echo "  1) ^%d\$      one tenant per domain: training.example.org → database 'training'"
+    echo "                (recommended; a database that is a prefix of another, temp"
+    echo "                and template-18, is why the ^ and \$ matter)"
+    echo "  2) (none)     no routing: every domain offers every database"
+    echo "                (fine for a single-database server, confusing beyond that)"
+    echo "  3) other      type a pattern (%d = first label, %h = whole host)"
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-3"
+    case "$CHOICE" in
+        1) NEW='^%d$' ;;
+        2) NEW="" ;;
+        3) read -r -p "  Pattern: " NEW ;;
+        b) return 0 ;;
+        *) invalid_choice; return 0 ;;
+    esac
+    if [ -n "$NEW" ] && ! printf '%s' "$NEW" | grep -Eq '^[][A-Za-z0-9^$%.*+?_|()-]+$'; then
+        echo -e "  ${RED}✗${NC} A pattern is letters, digits and the characters ^ \$ % . * + ? _ | ( ) [ ] -"
+        return 1
+    fi
+    echo ""
+    echo "  .env:      ODOO_DBFILTER=$NEW"
+    if [ -n "$NEW" ]; then echo "  odoo.conf: dbfilter = $NEW"; else echo "  odoo.conf: (dbfilter line removed)"; fi
+    read -r -p "  Apply and restart Odoo? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    set_env_key ODOO_DBFILTER "$NEW"
+    odoo_conf_set_key "$ODOO_CONF" dbfilter "$NEW" || { echo -e "  ${RED}✗${NC} $ODOO_CONF not found: run bash setup.sh."; return 1; }
+    echo -e "  ${GREEN}✓${NC} Written to .env and, in place, to $(basename "$ODOO_CONF")"
+    svc_restart "$ODOO_SVC" && wait_for_odoo
 }
 
 # ── 11) Security check ────────────────────────
@@ -2215,14 +2267,16 @@ menu_advanced() {
     echo "  2) Databases — backup / restore / delete / duplicate"
     echo "  3) Web database manager — enable/disable"
     echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"
+    echo "  5) Database routing — which database answers which domain (dbfilter)"
     echo "  b) Back"
     echo "  x) Exit"
-    ask_choice "1-4"
+    ask_choice "1-5"
     case "$CHOICE" in
         1) menu_service ;;
         2) menu_db_admin ;;
         3) menu_db_manager ;;
         4) menu_rpc ;;
+        5) menu_dbfilter ;;
         b) return 0 ;;
         *) invalid_choice ;;
     esac

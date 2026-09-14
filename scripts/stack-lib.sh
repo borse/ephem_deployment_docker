@@ -428,15 +428,29 @@ addons_path_value() {  # addons_path_value PARENT
     echo "${out#,},$ODOO_STOCK_ADDONS"
 }
 
-# Rewrite the addons_path line of a generated odoo config IN PLACE: the file
-# is a single-file bind mount, a new inode would leave the container reading
-# the old one (see svc_start_error).
-odoo_conf_set_addons_path() {  # odoo_conf_set_addons_path CONF PARENT
-    local conf="$1" val content
+# Set one option of a generated odoo config IN PLACE: the file is a
+# single-file bind mount, so `sed -i` or an editor that writes a new file
+# would leave the running container reading the old inode until it is
+# recreated (see svc_start_error). Replaces the line when the key exists,
+# appends it otherwise; an empty VALUE removes the line.
+odoo_conf_set_key() {  # odoo_conf_set_key CONF KEY VALUE
+    local conf="$1" key="$2" val="${3:-}" content
     [ -f "$conf" ] || return 1
-    val=$(addons_path_value "$2")
-    content=$(awk -v v="$val" '/^addons_path *=/ { print "addons_path = " v; next } { print }' "$conf")
+    content=$(awk -v k="$key" -v v="$val" '
+        $0 ~ "^" k " *=" { if (v != "" && !done) print k " = " v; done = 1; next }
+        { print }
+        END { if (v != "" && !done) print k " = " v }' "$conf")
     printf '%s\n' "$content" > "$conf"
+}
+
+# The addons_path line, from what is on disk under PARENT.
+odoo_conf_set_addons_path() {  # odoo_conf_set_addons_path CONF PARENT
+    odoo_conf_set_key "$1" addons_path "$(addons_path_value "$2")"
+}
+
+# The value of one option in a generated odoo config ("" when absent).
+odoo_conf_get_key() {  # odoo_conf_get_key CONF KEY
+    sed -n "s/^$2 *= *//p" "$1" 2>/dev/null | head -1
 }
 
 # Move the legacy clone one level down: PARENT → PARENT/$CORE_NAME. Returns
