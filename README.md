@@ -763,6 +763,8 @@ git pull
 bash setup.sh
 ```
 
+Some updates need a step or two more on an existing server. Those are written up, newest first, in [UPDATING.md](UPDATING.md); the September 2026 entry is the move to the `addons/ePHEM-core/` layout.
+
 > `git pull` on this repo never overwrites `.env`, `nginx/active.conf`, `odoo.conf`, or `docker-compose.override.yml`.
 
 ### Update Odoo Base Image Manually

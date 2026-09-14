@@ -1,4 +1,102 @@
-# Updating an Existing Server (August 2026 hardening)
+# Updating an Existing Server (September 2026 addons layout)
+
+This update changes where the ePHEM code lives on the server. Apply it on
+each server: about five minutes, one short restart of Odoo, no data is
+touched.
+
+What it delivers:
+
+1. **A parent addons folder.** Odoo mounts `addons/`, and the ePHEM clone
+   lives inside it as `addons/ePHEM-core/`. Before this update the clone was
+   the mounted folder itself (`custom-addons/`).
+2. **More repositories without re-running setup.** `bash manage.sh` → 5)
+   Addons → 3) Add a source clones another repository next to `ePHEM-core`,
+   with its own deploy key, and puts it on the addons path. The same menu
+   pulls every source, switches a branch, removes or renames a source.
+3. **A safe move of existing installs.** `setup.sh` renames the folder, moves
+   the clone one level down, regenerates `odoo.conf` and recreates the Odoo
+   container so it sees the new place. The deploy key, the ssh alias and the
+   remote inside the clone are untouched.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy          # or wherever the repo is cloned
+
+# 1. Back up first, as before any change on production
+bash scripts/backup.sh
+
+# 2. Get the changes, then go STRAIGHT to setup. Do not run any
+#    docker compose command in between: the compose file now mounts
+#    ./addons, and an early "up -d" would hand Odoo an empty folder
+#    until setup fixes it.
+git pull
+bash setup.sh              # choose 1) Server deploy
+
+# 3. Answer the prompts conservatively:
+#      "Pull updates now?" for the addons   -> N, unless you want a code
+#                                              update in the same window
+#                                              (a pull needs step 5)
+#      "Check for Odoo image updates?"      -> N, unless intended
+#      the database manager prompt          -> as before
+
+# 4. Verify
+docker compose logs --tail=100 odoo | grep "addons paths"
+#    must list /mnt/extra-addons/ePHEM-core
+bash manage.sh             # 1) Status shows the Addons table with ePHEM-core
+#    then open the site in the browser
+
+# 5. ONLY if you pulled new addon commits in step 3
+bash scripts/update-modules.sh --auto
+```
+
+Setup prints what it moved:
+
+```
+  ✓ custom-addons/ renamed to addons/
+  ✓ addons/ was the ePHEM clone itself: moved into addons/ePHEM-core/ (nothing deleted)
+```
+
+The move itself needs no module update: the code did not change, only its
+folder. Expect roughly a minute of downtime while the container is
+recreated and Odoo loads.
+
+## Verify afterwards
+
+- `ls addons/` shows `ePHEM-core`, and `custom-addons/` is gone.
+- `grep addons_path odoo.conf` reads
+  `/mnt/extra-addons/ePHEM-core,/usr/lib/python3/dist-packages/odoo/addons`.
+- `docker ps` shows db, odoo (ephem-app), nginx and certbot all `Up`.
+- The site loads and the ePHEM apps are still installed.
+
+## If something looks wrong
+
+Check out the previous deploy commit, move the clone back, and re-run
+setup; the old scripts regenerate the old config and mount.
+
+```bash
+git checkout 3a41909 -- .
+mv addons/ePHEM-core custom-addons && rmdir addons
+bash setup.sh              # choose 1) Server deploy
+```
+
+## Adding a repository later
+
+```bash
+bash manage.sh             # 5) Addons -> 3) Add a source
+```
+
+It asks for the repository, the folder name, the branch (defaults to the
+one ePHEM-core is on) and how the server reaches it. On a server the default
+is a deploy key made for that one repository: the menu prints the key, you
+add it under the repository's Settings → Deploy keys (or send it to the
+ePHEM team for an ePHEM repository), then run the same menu item again with
+the same repository and folder name. The key is kept and reused. After the
+clone the menu rewrites the addons path and offers the module update.
+
+---
+
+# Previous update (August 2026 hardening)
 
 This update hardens every production server. Apply it on each server —
 about 10 minutes, no data is touched.
