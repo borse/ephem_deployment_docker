@@ -14,6 +14,8 @@ odoo-data/
 # whole directory: dumps, encrypted .age snapshots, migration dirs, logs —
 # all of it is health data or derived from it, none of it belongs in Git
 backups/
+# local basemap files (bash manage.sh: Local basemap), downloaded per server
+basemaps/
 .env
 addons/
 custom-addons/

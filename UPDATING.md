@@ -1,4 +1,61 @@
-# Updating an Existing Server (September 2026 addons layout)
+# Updating an Existing Server (September 2026 local basemap)
+
+This update lets a server draw its maps from its own copy of its area instead
+of OpenFreeMap. It is opt in: a server that never downloads a basemap keeps
+its maps exactly as they are. Applying the update takes a few minutes and one
+short restart of Odoo and nginx; no data is touched. Apply the September 2026
+addons layout update below first if this server has not had it.
+
+What it delivers:
+
+1. **A `basemaps/` folder** next to `addons/`, mounted read only into Odoo
+   (`/mnt/basemaps`) and nginx (`/srv/basemaps`). nginx serves it at
+   `/ephem/basemap/`, so map tiles never queue behind Odoo requests.
+2. **`bash manage.sh` → 11) Advanced → 6) Local basemap**, which downloads a
+   country, several countries or a WHO region from the Protomaps daily build
+   (OpenStreetMap data, no key, no account) and points a database at it, or
+   back to OpenFreeMap. It shows the size before downloading. For example:
+   Yemen 176 MB, Iraq 455 MB, Nigeria 1.3 GB at full street detail, about an
+   eighth of that with towns and main roads only.
+3. **Why a country would opt in:** no outside request limit however many
+   staff use the maps, and a real basemap in a training room with no internet.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+
+# 1. Back up first
+bash scripts/backup.sh
+
+# 2. Get the changes and let setup create basemaps/ and recreate the
+#    containers with the new mount (answer the prompts as last time)
+git pull
+bash setup.sh              # choose 1) Server deploy
+
+# 3. Only when this country wants a local basemap
+bash manage.sh             # 11) Advanced -> 6) Local basemap -> 1) Download
+#    type the country code (YE), or several (YE,SA,OM), or a WHO region,
+#    check the size it prints, confirm, then let it switch the database:
+#    it restarts Odoo
+```
+
+## Verify afterwards
+
+- `docker compose exec odoo ls /mnt/basemaps` and
+  `docker compose exec nginx ls /srv/basemaps` both list the file.
+- Open a map (a signal or incident form, Health Facilities): the credit at
+  the bottom names Protomaps instead of OpenFreeMap.
+- Back to OpenFreeMap at any time: the same menu, 2) Choose the basemap a
+  database uses, 0) none.
+
+A basemap is not in the backups (it downloads again in minutes). Refresh it
+every few months by downloading again and switching the database to the new
+file, then delete the old one from the same menu.
+
+---
+
+# Previous update (September 2026 addons layout)
 
 This update changes where the ePHEM code lives on the server. Apply it on
 each server: about five minutes, one short restart of Odoo, no data is

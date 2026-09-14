@@ -437,6 +437,18 @@ $(_render_rpc_block "$d")
         proxy_pass http://odoo-backend;
     }
 
+    # The local basemap, when this server downloaded one (bash manage.sh:
+    # Local basemap). The maps read the .pmtiles file in byte ranges, dozens
+    # per view, so nginx serves it from disk instead of passing each range to
+    # an Odoo worker. It is an OpenStreetMap extract, public data, so it needs
+    # no login. \`expires\` rather than add_header, which would drop the
+    # server level security headers in this location.
+    location ^~ /ephem/basemap/ {
+        alias /srv/basemaps/;
+        default_type application/octet-stream;
+        expires 1d;
+    }
+
     gzip on;
     gzip_types text/css text/less text/plain text/xml
                application/xml application/json application/javascript;

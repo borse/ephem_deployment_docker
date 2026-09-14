@@ -61,6 +61,9 @@ services:
       # repository added later from manage.sh. odoo.conf lists each subfolder.
       - ./addons:/mnt/extra-addons:ro
       - ./odoo.conf:/etc/odoo/odoo.conf
+      # Opt in local basemap files (bash manage.sh: Local basemap). Empty on a
+      # server that never downloaded one, and the maps then use OpenFreeMap.
+      - ./basemaps:/mnt/basemaps:ro
     networks:
       - ephem-internal
     # Runs as the non-root 'odoo' user baked into the image; needs no
@@ -87,6 +90,9 @@ services:
       - ./nginx/active.conf:/etc/nginx/conf.d/default.conf:ro
       - certbot-etc:/etc/letsencrypt:ro
       - certbot-www:/var/www/certbot:ro
+      # The same files, served at /ephem/basemap/ so map tiles never queue
+      # behind Odoo requests (nginx/default.conf).
+      - ./basemaps:/srv/basemaps:ro
     networks:
       - ephem-internal
     security_opt:

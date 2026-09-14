@@ -763,7 +763,7 @@ git pull
 bash setup.sh
 ```
 
-Some updates need a step or two more on an existing server. Those are written up, newest first, in [UPDATING.md](UPDATING.md); the September 2026 entry is the move to the `addons/ePHEM-core/` layout.
+Some updates need a step or two more on an existing server. Those are written up, newest first, in [UPDATING.md](UPDATING.md); the newest is the opt in local basemap (September 2026), and the one before it the move to the `addons/ePHEM-core/` layout.
 
 > `git pull` on this repo never overwrites `.env`, `nginx/active.conf`, `odoo.conf`, or `docker-compose.override.yml`.
 
@@ -1005,6 +1005,7 @@ recognised from its files, and the menu offers to record it.
 | Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
 | Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
 | Open / block the RPC endpoints (`/xmlrpc`, `/jsonrpc`), per domain or server-wide | `bash manage.sh` → 11 → 4 (sets `NGINX_RPC_OPEN` / `NGINX_RPC_ALLOW` in `.env`) |
+| Draw the maps from a basemap file on this server (a country or WHO region, works offline) | `bash manage.sh` → 11 → 6 (developer menu: 11) |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |

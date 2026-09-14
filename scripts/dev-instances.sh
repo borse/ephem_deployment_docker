@@ -178,6 +178,9 @@ cmd_up() {
 
     # Build the override file piece by piece.
     local services="" volumes="" i=0 names=()
+    # Mounted into every instance (local basemap files); created here so
+    # docker does not create it as root.
+    mkdir -p basemaps
     for spec in "${specs[@]}"; do
         local raw_name="${spec%%:*}" branch=""
         [[ "$spec" == *:* ]] && branch="${spec#*:}"
@@ -208,6 +211,7 @@ cmd_up() {
       - odoo-data-$name:/var/lib/odoo
       - ./odca$name:/mnt/extra-addons:rw
       - ./odoo-$name.conf:/etc/odoo/odoo.conf
+      - ./basemaps:/mnt/basemaps:ro
     networks:
       - ephem-internal
     # Every interface by default (DEV_BIND_HOST in .env), so a phone or a

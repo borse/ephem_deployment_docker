@@ -1161,6 +1161,8 @@ echo -e "${GREEN}✓${NC} Scripts are executable"
 # addons/ must exist before odoo.conf lists what is inside it (and before
 # compose mounts it: docker would otherwise create it as root).
 mkdir -p "$ADDONS_PARENT"
+# basemaps/ (opt in local basemap files, bash manage.sh) is mounted too.
+mkdir -p basemaps
 ADDONS_PATH_LINE=$(addons_path_value "$ADDONS_PARENT")
 if [ -f ".env" ]; then
     if sed --version 2>/dev/null | grep -q GNU; then

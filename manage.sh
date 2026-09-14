@@ -1582,6 +1582,280 @@ menu_dbfilter() {
     svc_restart "$ODOO_SVC" && wait_for_odoo
 }
 
+# ── Local basemap ─────────────────────────────
+# The maps draw from OpenFreeMap unless a database names a basemap file on this
+# server (the ephem.map.local_basemap system parameter). This item downloads
+# one for a country, several countries or a WHO region from the Protomaps daily
+# build (OpenStreetMap data, no key), and points a database at it or back.
+# With one, the maps depend on no outside tile host: no request limit however
+# many staff use them, and a basemap in a training room with no internet.
+# basemaps/ is mounted into Odoo and nginx (docker-compose.yml); nginx serves
+# it at /ephem/basemap/, and where no nginx runs Odoo does.
+BASEMAP_DIR="$SCRIPT_DIR/basemaps"
+BASEMAP_IMAGE="protomaps/go-pmtiles:v1.31.2"
+BASEMAP_BUILDS="https://build-metadata.protomaps.dev/builds.json"
+BASEMAP_PARAM="ephem.map.local_basemap"
+# Reads the country boundaries eoc_base ships and prints "box<TAB>slug" for an
+# area typed as country codes, a WHO region or a box; a message and exit 1
+# for anything else.
+BASEMAP_AREA_PY=$(cat <<'PY'
+import json, re, sys
+path, area = sys.argv[1], sys.argv[2].strip()
+num = r'\s*(-?\d+(?:\.\d+)?)\s*'
+box = re.fullmatch(','.join([num] * 4), area)
+if box:
+    w, s, e, n = map(float, box.groups())
+    if not (-180 <= w < e <= 180 and -90 <= s < n <= 90):
+        print('A box is min_lon,min_lat,max_lon,max_lat, each minimum below its maximum.')
+        sys.exit(1)
+    print('%.4f,%.4f,%.4f,%.4f\tbox' % (w, s, e, n))
+    sys.exit(0)
+codes = [c.strip().upper() for c in area.split(',') if c.strip()]
+if not codes or not all(re.fullmatch(r'[A-Z]{2,5}', c) for c in codes):
+    print('Type country codes (YE, or YE,SA), a WHO region (EMRO) or a box.')
+    sys.exit(1)
+points, found = [], set()
+def walk(coords):
+    if coords and isinstance(coords[0], (int, float)):
+        points.append(coords)
+    else:
+        for part in coords:
+            walk(part)
+with open(path) as handle:
+    features = json.load(handle)['features']
+for feature in features:
+    props = feature.get('properties') or {}
+    keys = {str(props.get(k) or '').upper() for k in ('ISO_2_CODE', 'ISO_3_CODE', 'WHO_REGION')}
+    hit = keys & set(codes)
+    if hit and feature.get('geometry'):
+        found |= hit
+        walk(feature['geometry']['coordinates'])
+missing = [c for c in codes if c not in found]
+if missing:
+    print('Not in the boundary file: ' + ', '.join(missing))
+    sys.exit(1)
+lons = [p[0] for p in points]
+lats = [p[1] for p in points]
+# A margin, so towns just across a border still show.
+w, e, s, n = min(lons) - 0.2, max(lons) + 0.2, min(lats) - 0.2, max(lats) + 0.2
+if e - w > 180:
+    print('This area crosses the 180th meridian, so its box would go round the world. Type a box for the part you need.')
+    sys.exit(1)
+print('%.4f,%.4f,%.4f,%.4f\t%s' % (max(w, -180), max(s, -85), min(e, 180), min(n, 85), '-'.join(c.lower() for c in codes)))
+PY
+)
+
+basemap_files() {  # the downloaded basemap files, newest first, one name per line
+    find "$BASEMAP_DIR" -maxdepth 1 -type f -name '*.pmtiles' ! -name '.*' -printf '%T@ %f\n' 2>/dev/null \
+        | sort -rn | cut -d' ' -f2-
+}
+
+basemap_valid_name() {  # the same rule Odoo applies before serving a file
+    printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.pmtiles$'
+}
+
+basemap_of_db() {  # basemap_of_db DB: the file the database uses, empty for OpenFreeMap
+    compose exec -T db psql -U "$DB_USER" -d "$1" -t -A -c \
+        "SELECT value FROM ir_config_parameter WHERE key = '$BASEMAP_PARAM';" \
+        </dev/null 2>/dev/null | tr -d '\r'
+}
+
+basemap_service_for() {  # the Odoo service that serves a database
+    if [ "$EPHEM_MODE" = dev-multi ] && [[ "$1" == ephem_* ]]; then
+        echo "odoo_${1#ephem_}"
+    else
+        echo "$ODOO_SVC"
+    fi
+}
+
+menu_basemap() {
+    local f d v any=0
+    mkdir -p "$BASEMAP_DIR" 2>/dev/null
+    echo -e "${CYAN}${BOLD}Local basemap${NC} (the maps draw from a file on this server instead of OpenFreeMap)"
+    echo ""
+    echo "  Downloaded (basemaps/):"
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        any=1
+        echo "    $f   $(du -h "$BASEMAP_DIR/$f" | cut -f1)"
+    done < <(basemap_files)
+    [ "$any" = 1 ] || echo "    (none)"
+    echo "  Used by:"
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        v=$(basemap_of_db "$d")
+        echo "    $d: ${v:-OpenFreeMap}"
+    done < <(list_dbs)
+    echo ""
+    echo "  1) Download a basemap: a country, several countries, or a WHO region"
+    echo "  2) Choose the basemap a database uses (or back to OpenFreeMap)"
+    echo "  3) Delete a downloaded basemap"
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-3"
+    case "$CHOICE" in
+        1) basemap_download ;;
+        2) basemap_use ;;
+        3) basemap_delete ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
+    esac
+}
+
+basemap_download() {
+    local geo area out box slug detail build url name part C
+    local -a zoom=()
+    command -v python3 >/dev/null 2>&1 || {
+        echo -e "  ${RED}✗${NC} python3 is needed to read the country boundaries: sudo apt install python3"; return 1; }
+    if [ ! -w "$BASEMAP_DIR" ]; then
+        echo -e "  ${RED}✗${NC} basemaps/ is not writable (docker created it as root?): sudo chown $(id -u):$(id -g) basemaps"
+        return 1
+    fi
+    # The ePHEM clone is a subfolder of the addons parent (ePHEM-core), or the
+    # folder itself on a server still on the older layout.
+    for geo in "$ADDONS_DIR"/*/eoc_base/static/src/lib/geojson/global_adm0.json \
+               "$ADDONS_DIR"/eoc_base/static/src/lib/geojson/global_adm0.json; do
+        [ -f "$geo" ] && break
+        geo=""
+    done
+    [ -n "$geo" ] || { echo -e "  ${RED}✗${NC} eoc_base's global_adm0.json is not under $ADDONS_DIR."; return 1; }
+    echo ""
+    echo "  Area to download:"
+    echo "    country codes   YE, or several: YE,SA,OM   (2 or 3 letters)"
+    echo "    a WHO region    AFRO  AMRO  EMRO  EURO  SEARO  WPRO"
+    echo "    a box           min_lon,min_lat,max_lon,max_lat   e.g. 41.8,12.1,54.6,19.1"
+    read -r -p "  Area (empty to cancel): " area
+    [ -n "${area:-}" ] || { echo "  Cancelled."; return 0; }
+    if ! out=$(python3 -c "$BASEMAP_AREA_PY" "$geo" "$area" 2>&1); then
+        echo -e "  ${RED}✗${NC} $out"
+        return 1
+    fi
+    box="${out%%$'\t'*}"
+    slug="${out#*$'\t'}"
+    echo -e "  ${CYAN}·${NC} Box: $box"
+    echo ""
+    echo "  Detail:"
+    echo "    1) Streets, full detail (zoom 15)"
+    echo "    2) Towns and main roads (zoom 12, about an eighth of the size)"
+    read -r -p "  Detail [1]: " detail
+    case "${detail:-1}" in
+        1) ;;
+        2) zoom=(--maxzoom=12); slug="$slug-z12" ;;
+        *) invalid_choice; return 0 ;;
+    esac
+    echo -e "  ${CYAN}→${NC} curl $BASEMAP_BUILDS"
+    build=$(curl -fsS -m 30 "$BASEMAP_BUILDS" 2>/dev/null | python3 -c \
+        'import json, sys; keys = sorted(b["key"] for b in json.load(sys.stdin) if str(b.get("key", "")).endswith(".pmtiles")); print(keys[-1] if keys else "")' \
+        2>/dev/null)
+    if [ -z "$build" ]; then
+        echo -e "  ${RED}✗${NC} Could not read the list of Protomaps builds: is this server online?"
+        return 1
+    fi
+    url="https://build.protomaps.com/$build"
+    name="$slug-${build%.pmtiles}.pmtiles"
+    part=".$name.part"
+    basemap_valid_name "$name" || { echo -e "  ${RED}✗${NC} '$name' is not a usable file name."; return 1; }
+    echo -e "  ${CYAN}→${NC} docker run --rm $BASEMAP_IMAGE extract $url $name --bbox=$box ${zoom[*]} --dry-run"
+    docker run --rm "$BASEMAP_IMAGE" extract "$url" "/tmp/$name" --bbox="$box" "${zoom[@]}" --dry-run \
+        </dev/null 2>&1 | tail -n 1 | sed 's/^/     /'
+    echo "  Free space for basemaps/: $(df -h "$BASEMAP_DIR" | awk 'NR == 2 {print $4}')"
+    read -r -p "  Download it as basemaps/$name? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    echo -e "  ${CYAN}→${NC} docker run --rm --user $(id -u):$(id -g) -v $BASEMAP_DIR:/data $BASEMAP_IMAGE extract $url /data/$part --bbox=$box ${zoom[*]}"
+    if ! run_interruptible docker run --rm --user "$(id -u):$(id -g)" -v "$BASEMAP_DIR:/data" \
+            "$BASEMAP_IMAGE" extract "$url" "/data/$part" --bbox="$box" "${zoom[@]}" </dev/null; then
+        rm -f "${BASEMAP_DIR:?}/$part"
+        echo -e "  ${RED}✗${NC} The download did not finish; nothing was kept."
+        return 1
+    fi
+    # Under its real name only once complete, so no map ever reads half a file.
+    mv "$BASEMAP_DIR/$part" "$BASEMAP_DIR/$name" && chmod 644 "$BASEMAP_DIR/$name"
+    echo -e "  ${GREEN}✓${NC} basemaps/$name   $(du -h "$BASEMAP_DIR/$name" | cut -f1)"
+    read -r -p "  Use it on a database now? [Y/n]: " C
+    [[ "${C:-Y}" =~ ^[Nn]$ ]] && return 0
+    basemap_use "$name"
+}
+
+basemap_use() {  # basemap_use [FILE]
+    local file="${1:-}" db svc f N C i=1 current sql
+    local -a files=()
+    pick_db "Database whose maps change" || return 0
+    db="$PICKED_DB"
+    db_exists "$db" || { echo -e "  ${RED}✗${NC} No database named '$db'."; return 1; }
+    if [ -z "$file" ]; then
+        while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(basemap_files)
+        echo "   0) none: back to OpenFreeMap"
+        for f in "${files[@]}"; do printf '  %2d) %s\n' "$i" "$f"; i=$((i + 1)); done
+        read -r -p "  Basemap for $db (number, empty to cancel): " N
+        [ -n "${N:-}" ] || { echo "  Cancelled."; return 0; }
+        if ! printf '%s' "$N" | grep -Eq '^[0-9]+$' || [ "$N" -gt "${#files[@]}" ]; then
+            invalid_choice; return 0
+        fi
+        if [ "$N" -eq 0 ]; then file="-"; else file="${files[$((N - 1))]}"; fi
+    fi
+    if [ "$file" != "-" ] && ! basemap_valid_name "$file"; then
+        echo -e "  ${RED}✗${NC} '$file' is not a basemap file name."; return 1
+    fi
+    current=$(basemap_of_db "$db")
+    echo "  $db: ${current:-OpenFreeMap} → $([ "$file" = "-" ] && echo OpenFreeMap || echo "$file")"
+    # Odoo caches system parameters in each worker: the restart is what makes
+    # every map pick the change up.
+    read -r -p "  Apply and restart Odoo? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    if [ "$file" = "-" ]; then
+        sql="DELETE FROM ir_config_parameter WHERE key = '$BASEMAP_PARAM';"
+    else
+        # $file passed basemap_valid_name: letters, digits, dot, dash and underscore only.
+        sql="INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date)
+             VALUES ('$BASEMAP_PARAM', '$file', 1, 1, now() at time zone 'UTC', now() at time zone 'UTC')
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, write_uid = 1, write_date = EXCLUDED.write_date;"
+    fi
+    echo -e "  ${CYAN}→${NC} psql -d $db: $([ "$file" = "-" ] && echo "delete $BASEMAP_PARAM" || echo "set $BASEMAP_PARAM = $file")"
+    if ! compose exec -T db psql -U "$DB_USER" -d "$db" -v ON_ERROR_STOP=1 -q -c "$sql" </dev/null >/dev/null; then
+        echo -e "  ${RED}✗${NC} Could not write $BASEMAP_PARAM in $db: is it an ePHEM database?"
+        return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Written"
+    svc=$(basemap_service_for "$db")
+    svc_restart "$svc" && ODOO_SVC="$svc" wait_for_odoo || return 1
+    [ "$file" = "-" ] && return 0
+    # A container created before basemaps/ was mounted does not see the file,
+    # and its maps quietly keep OpenFreeMap.
+    if ! compose exec -T "$svc" test -f "/mnt/basemaps/$file" </dev/null >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} $svc does not see basemaps/ yet (its container predates the mount), so its maps keep OpenFreeMap."
+        if [ "$EPHEM_MODE" = dev-multi ]; then
+            echo "     Recreate it from the roster: bash manage.sh → Stack → Recreate the whole stack."
+        else
+            echo "     Recreate the containers: bash setup.sh, or $(compose_cmd_text) up -d $svc nginx"
+        fi
+        return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} $svc serves basemaps/$file: reload the map pages to see it."
+}
+
+basemap_delete() {
+    local f N C d i=1 users=""
+    local -a files=()
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(basemap_files)
+    [ "${#files[@]}" -gt 0 ] || { echo "  No basemap is downloaded."; return 0; }
+    for f in "${files[@]}"; do printf '  %2d) %s   %s\n' "$i" "$f" "$(du -h "$BASEMAP_DIR/$f" | cut -f1)"; i=$((i + 1)); done
+    read -r -p "  Delete which (number, empty to cancel): " N
+    [ -n "${N:-}" ] || { echo "  Cancelled."; return 0; }
+    if ! printf '%s' "$N" | grep -Eq '^[0-9]+$' || [ "$N" -lt 1 ] || [ "$N" -gt "${#files[@]}" ]; then
+        invalid_choice; return 0
+    fi
+    f="${files[$((N - 1))]}"
+    while IFS= read -r d; do
+        [ -n "$d" ] && [ "$(basemap_of_db "$d")" = "$f" ] && users="$users $d"
+    done < <(list_dbs)
+    if [ -n "$users" ]; then
+        echo -e "  ${YELLOW}!${NC} Used by:$users. Their maps go back to OpenFreeMap until they are given another basemap."
+    fi
+    read -r -p "  Delete basemaps/$f? [y/N]: " C
+    [[ "${C:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
+    rm -f "${BASEMAP_DIR:?}/$f" && echo -e "  ${GREEN}✓${NC} Deleted basemaps/$f"
+}
+
 # ── 11) Security check ────────────────────────
 menu_security() {
     echo -e "${CYAN}${BOLD}Security check${NC}"
@@ -2268,15 +2542,17 @@ menu_advanced() {
     echo "  3) Web database manager — enable/disable"
     echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"
     echo "  5) Database routing — which database answers which domain (dbfilter)"
+    echo "  6) Local basemap: the maps draw from a file on this server"
     echo "  b) Back"
     echo "  x) Exit"
-    ask_choice "1-5"
+    ask_choice "1-6"
     case "$CHOICE" in
         1) menu_service ;;
         2) menu_db_admin ;;
         3) menu_db_manager ;;
         4) menu_rpc ;;
         5) menu_dbfilter ;;
+        6) menu_basemap ;;
         b) return 0 ;;
         *) invalid_choice ;;
     esac
@@ -2705,9 +2981,10 @@ menu_main_local() {
         printf "  8) %s\n" "Doctor: prerequisites, then scan the log for known errors"
         printf "  9) %s\n" "Databases: backup, restore, delete, duplicate, create"
         printf " 10) %-44s (%s)\n" "Back up everything now" "scripts/backup.sh"
+        printf " 11) %s\n" "Local basemap: the maps draw from a file here, offline too"
         printf "  x) %s\n" "Exit"
         echo ""
-        ask_choice "1-10" "x"
+        ask_choice "1-11" "x"
         case "$CHOICE" in
             1)  menu_status_local ;;
             2)  if [ "$EPHEM_MODE" = dev-multi ]; then menu_switch_instance; else invalid_choice; fi ;;
@@ -2719,8 +2996,9 @@ menu_main_local() {
             8)  menu_doctor_local ;;
             9)  menu_db_admin ;;
             10) bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
+            11) menu_basemap ;;
             b)  ;;
-            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-10, or x to exit." ;;
+            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
         esac
     done
 }
