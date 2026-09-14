@@ -57,6 +57,19 @@ Setup prints what it moved:
   ✓ addons/ was the ePHEM clone itself: moved into addons/ePHEM-core/ (nothing deleted)
 ```
 
+**If the site answers 502 Bad Gateway afterwards**, restart nginx:
+
+```bash
+docker compose restart nginx
+```
+
+nginx resolves Odoo's address once, when it starts. Recreating the Odoo
+container gives it a new address, and nginx keeps sending requests to the
+old one. Setup restarts nginx by itself when it has recreated the container
+(added the day after the first server was migrated), and so does the app
+image update in the menu; a server that pulled the scripts before that fix
+needs the one command above.
+
 The move itself needs no module update: the code did not change, only its
 folder. Expect roughly a minute of downtime while the container is
 recreated and Odoo loads.

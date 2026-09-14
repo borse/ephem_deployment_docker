@@ -1396,6 +1396,10 @@ if ! bash scripts/harden-db-role.sh; then
     echo "   Run it manually later:  bash scripts/harden-db-role.sh"
 fi
 
+# nginx resolves Odoo's address once at start: if `up` recreates the Odoo
+# container (changed mount, new image, hardening), nginx must restart too or
+# every page is a 502. Compared by container id below.
+ODOO_CID_BEFORE=$(odoo_cid odoo)
 docker compose up -d
 # After the move from custom-addons/ the old container's bind mount still
 # shows the folder that was moved (a mount follows the inode, not the path);
@@ -1405,6 +1409,7 @@ if [ "$MIGRATED_SINGLE" = true ] && odoo_mount_stale odoo "$ADDONS_PARENT"; then
     docker compose up -d --force-recreate --no-deps odoo
 fi
 docker compose restart odoo
+nginx_follow_odoo "$ODOO_CID_BEFORE" odoo
 
 echo "Checking database connection..."
 sleep 5

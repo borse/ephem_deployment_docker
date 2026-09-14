@@ -139,7 +139,39 @@ BACKUP_DIR="$SCRIPT_DIR/backups"
 # escape the filestore directory or close a quoted identifier.
 valid_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; }
 
-db_exists() {  # call valid_db_name first
+# A database that already exists may also carry a comma: an earlier version of
+# the Duplicate menu took "a,b,c" as ONE target name. Such a name is still safe
+# in every path and identifier the delete and snapshot code builds, so it can
+# be acted on; it can never be typed as a NEW name (valid_db_name above).
+existing_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._,-]*$'; }
+
+# Choose an existing database by its number in the list or by name.
+# Sets PICKED_DB; returns 1 when cancelled or not usable.
+PICKED_DB=""
+pick_db() {  # pick_db [PROMPT]
+    local i=1 d N
+    local -a dbs=()
+    while IFS= read -r d; do [ -n "$d" ] && dbs+=("$d"); done < <(list_dbs)
+    if [ "${#dbs[@]}" -eq 0 ]; then
+        echo "  (no databases, or the database container is not running)"
+    else
+        for d in "${dbs[@]}"; do printf '  %2d) %s\n' "$i" "$d"; i=$((i + 1)); done
+    fi
+    read -r -p "  ${1:-Database} (number or name, empty to cancel): " N
+    [ -z "${N:-}" ] && { echo "  Cancelled."; return 1; }
+    if printf '%s' "$N" | grep -Eq '^[0-9]+$' && [ "$N" -ge 1 ] && [ "$N" -le "${#dbs[@]}" ]; then
+        PICKED_DB="${dbs[$((N - 1))]}"
+    else
+        PICKED_DB="$N"
+    fi
+    if ! existing_db_name "$PICKED_DB"; then
+        echo -e "  ${RED}✗${NC} '$PICKED_DB' is not a name this menu can act on (letters, digits, . _ - and ,)."
+        return 1
+    fi
+    return 0
+}
+
+db_exists() {  # call valid_db_name or existing_db_name first
     [ "$(compose exec -T db psql -U "$DB_USER" -d postgres -t -A -c \
         "SELECT 1 FROM pg_database WHERE datname = '$1';" \
         </dev/null 2>/dev/null | tr -d '\r')" = "1" ]
@@ -853,8 +885,19 @@ menu_duplicate_db() {
     echo ""
     read -r -p "  Source database (empty to cancel): " SRC
     [ -z "${SRC:-}" ] && { echo "  Cancelled."; return 0; }
-    read -r -p "  New database name(s), space-separated: " -a TARGETS
+    existing_db_name "$SRC" || { echo -e "  ${RED}✗${NC} '$SRC' is not a valid database name."; return 1; }
+    read -r -p "  New database name(s), separated by SPACES: " -a TARGETS
     [ "${#TARGETS[@]}" -eq 0 ] && { echo "  Cancelled."; return 0; }
+    # Every target is checked before anything is created: a comma-separated
+    # list would otherwise become one database called "a,b,c".
+    local t
+    for t in "${TARGETS[@]}"; do
+        if ! valid_db_name "$t"; then
+            echo -e "  ${RED}✗${NC} '$t' is not a valid database name (letters, digits, . _ -)."
+            case "$t" in *,*) echo "     Separate several names with spaces, not commas:  eg2 eg3 eg4 eg5" ;; esac
+            return 1
+        fi
+    done
     bash scripts/duplicate-db.sh "$SRC" "${TARGETS[@]}"
 }
 
@@ -931,7 +974,9 @@ menu_update_app() {
     [[ ! "${B:-Y}" =~ ^[Nn]$ ]] && bash scripts/backup.sh
     echo ""
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
+    local before; before=$(odoo_cid)
     compose pull && compose up -d
+    nginx_follow_odoo "$before"      # a new image means a new container: nginx re-resolves
     echo ""
     echo "  If this release includes module changes, run menu item 6 next"
     echo "  (update modules across databases). To roll back: re-run this item"
@@ -1014,9 +1059,11 @@ addons_conf_refresh() {
 addons_recreate_if_stale() {
     [ "$(svc_state "$ODOO_SVC")" = absent ] && return 0
     if odoo_mount_stale "$ODOO_SVC" "$ADDONS_DIR" || [ "$(svc_state "$ODOO_SVC")" != running ]; then
+        local before; before=$(odoo_cid)
         echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d --force-recreate --no-deps $ODOO_SVC   (its mount still showed the moved folder)"
         compose up -d --force-recreate --no-deps "$ODOO_SVC" || return 1
         wait_for_odoo || true
+        nginx_follow_odoo "$before"
     fi
 }
 
@@ -1772,11 +1819,8 @@ menu_db_backup() {
     ask_choice "1-2"
     case "$CHOICE" in
         1)
-            read -r -p "  Database name (empty to cancel): " DB
-            [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
-            valid_db_name "$DB" || {
-                echo -e "  ${RED}✗${NC} '$DB' is not a valid database name (letters, digits, . _ -)."
-                return 1; }
+            pick_db "Database to snapshot" || return 0
+            local DB="$PICKED_DB"
             echo ""
             snapshot_create "$DB"
             ;;
@@ -1942,12 +1986,9 @@ menu_db_delete() {
     local A="$CHOICE"
     case "$A" in 1|2|3) ;; b) return 0 ;; *) invalid_choice; return 0 ;; esac
 
-    read -r -p "  Database name (empty to cancel): " DB
-    [ -z "${DB:-}" ] && { echo "  Cancelled."; return 0; }
-    if ! valid_db_name "$DB"; then
-        echo -e "  ${RED}✗${NC} '$DB' is not a valid database name (letters, digits, . _ -)."
-        return 1
-    fi
+    echo ""
+    pick_db "Database to delete" || return 0
+    local DB="$PICKED_DB"
 
     # Snapshot BEFORE the warnings: the operator should be looking at a
     # written, verified backup while deciding, not at a promise of one.

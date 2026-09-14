@@ -33,6 +33,24 @@ SOURCE_DB="$1"
 shift
 TARGET_DBS=("$@")
 
+# Names end up inside SQL identifiers and filestore paths, and a new name
+# must be one Odoo itself accepts. Checked before anything is touched: a
+# comma-separated list typed by mistake would otherwise become ONE database
+# called "a,b,c" (an existing one with a comma is still accepted as SOURCE).
+valid_db_name()    { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; }
+existing_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._,-]*$'; }
+if ! existing_db_name "$SOURCE_DB"; then
+    echo -e "${RED}✗${NC} '$SOURCE_DB' is not a valid database name."
+    exit 1
+fi
+for TARGET_DB in "${TARGET_DBS[@]}"; do
+    if ! valid_db_name "$TARGET_DB"; then
+        echo -e "${RED}✗${NC} '$TARGET_DB' is not a valid database name (letters, digits, . _ -)."
+        case "$TARGET_DB" in *,*) echo "  Separate several names with spaces, not commas:  eg2 eg3 eg4 eg5" ;; esac
+        exit 1
+    fi
+done
+
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Mode, compose files and filestore routing: scripts/stack-lib.sh

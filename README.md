@@ -1083,6 +1083,16 @@ Make sure `ODOO_DBFILTER=%d` is set in `.env` and database names match subdomain
 bash setup.sh
 ```
 
+### 502 Bad Gateway right after an update
+
+Odoo is running, nginx is not reaching it. nginx resolves the Odoo container's address once, when it starts, and a recreated Odoo container (new image, changed mount, hardening) has a new address. Restart nginx, about a second offline:
+
+```bash
+docker compose restart nginx
+```
+
+`setup.sh` and the app image update in `manage.sh` do this by themselves when they recreated the container; anything done by hand with `docker compose up -d` needs the command above.
+
 ### Custom modules not appearing
 
 ```bash

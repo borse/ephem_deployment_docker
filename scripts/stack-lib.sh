@@ -206,13 +206,37 @@ svc_start() {  # svc_start SERVICE
     fi
     err=$(svc_start_error "$1")
     if [ -n "$err" ]; then
+        local before; before=$(odoo_cid "$1")
         echo -e "  ${YELLOW}!${NC} The existing container cannot start: ${err:0:140}"
         echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d --force-recreate $1   (data volumes are kept)"
-        compose up -d --force-recreate "$1"
-        return
+        compose up -d --force-recreate "$1" || return 1
+        [ "$1" = "$ODOO_SVC" ] && nginx_follow_odoo "$before" "$1"
+        return 0
     fi
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) start $1"
     compose start "$1"
+}
+
+# ── nginx after a recreated Odoo ──────────────
+# nginx names Odoo in a static upstream block and resolves that name ONCE,
+# when it starts. A recreated Odoo container has a new address, so nginx
+# keeps sending requests to the old one and every page is a 502 until nginx
+# restarts (about a second offline). Take odoo_cid before anything that may
+# recreate the container and call nginx_follow_odoo after it; it does
+# nothing when the container is the same one, or when nginx is not running
+# (every developer mode).
+odoo_cid() { compose ps -aq "${1:-$ODOO_SVC}" 2>/dev/null | head -1; }
+
+nginx_follow_odoo() {  # nginx_follow_odoo PREVIOUS-CID [SERVICE]
+    local now; now=$(odoo_cid "${2:-$ODOO_SVC}")
+    { [ -n "$now" ] && [ "$now" != "${1:-}" ]; } || return 0
+    [ "$(svc_state nginx)" = running ] || return 0
+    echo -e "  ${CYAN}→${NC} $(compose_cmd_text) restart nginx   (Odoo was recreated, nginx must re-resolve its address)"
+    if compose restart nginx >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} nginx restarted"
+    else
+        echo -e "  ${YELLOW}!${NC} nginx restart failed: run  $(compose_cmd_text) restart nginx  or the site stays on 502"
+    fi
 }
 
 # Restart, and when the old container cannot come back, recreate it.
