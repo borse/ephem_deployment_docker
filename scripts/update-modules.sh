@@ -78,6 +78,18 @@ MODULES=(
   "eoc_actors"
   "eoc_signals"
   "eoc_incident_management"
+  # OCA's Document Management System, and the PHEOC Repository layer built on
+  # it. `eoc_documents` depends on dms, eoc_signals and eoc_incident_management,
+  # so it follows all three; `dms` leads because the layer is built on it.
+  #
+  # Their absence from this list would not be cosmetic. `--auto` upgrades what
+  # the list names and nothing else, so a Repository release would be written,
+  # committed, deployed — and silently not applied, because the modules were
+  # never told to reload. That is precisely what happened to eoc_ear_academy,
+  # whose course data sat undeployed through several revisions for the same
+  # reason, and the note against it further down this list records it.
+  "dms"
+  "eoc_documents"
   "eoc_mass_mailing_tailoring"
   "eoc_meetings"
   "eoc_linelist"
