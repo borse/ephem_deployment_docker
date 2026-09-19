@@ -11,6 +11,17 @@
 #   bash scripts/dev-logs.sh <name> -u mod1,mod2 …          # update modules, then restart + tail
 #   bash scripts/dev-logs.sh <name> -i new_module           # install module, then restart + tail
 #   bash scripts/dev-logs.sh <name> -u mod1 --dev=xml …     # any extra odoo args forwarded
+#   bash scripts/dev-logs.sh <name> -u mod1 --no-follow     # exit once Odoo answers again
+#
+# --no-follow (ours, not forwarded to odoo): instead of tailing forever, check
+# every 3 s that the server answers /web/login, print progress, and exit 0 as
+# soon as it does. Exits 1 if the container stops or keeps answering 500, 2 on
+# timeout (DEV_LOGS_WAIT_TIMEOUT seconds, default 300), printing the last log
+# lines either way. Meant for scripts and agents; the tail stays the default.
+#
+# The service is always started again after a one-shot, even when the
+# one-shot fails (a failing test) or the run is interrupted. The script
+# refuses to run while another one-shot is already using the same instance.
 #
 # Any args after the (optional) instance name are forwarded to a one-shot
 #   `odoo …`
@@ -40,7 +51,16 @@ if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
     NAME="$1"
     shift
 fi
-ODOO_ARGS=("$@")
+FOLLOW=1
+WAIT_TIMEOUT="${DEV_LOGS_WAIT_TIMEOUT:-300}"
+HTTP_PORT="${DEV_LOGS_HTTP_PORT:-8069}"   # inside the container
+ODOO_ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --no-follow) FOLLOW=0 ;;
+        *)           ODOO_ARGS+=("$a") ;;
+    esac
+done
 
 # ── Pick compose context + container ──────────────────────
 if [ -n "$NAME" ]; then
@@ -90,6 +110,80 @@ if [ ${#ODOO_ARGS[@]} -gt 0 ]; then
     done
 fi
 
+# ── Another one-shot on this instance? Don't fight it ─────
+# `compose run` names its container <project>-<service>-run-<id>. Two runs
+# against one database wait on each other's locks, and restarting the service
+# under someone else's update defeats the point of stopping it.
+busy=$(docker ps -q --filter "name=${service}-run-")
+if [ -n "$busy" ]; then
+    echo "✗ Another one-shot run is using $service right now:"
+    docker ps --filter "name=${service}-run-" --format '    {{.Names}}  (running {{.RunningFor}})'
+    echo "  Wait for it to finish, then run this again."
+    exit 3
+fi
+
+# ── Never leave the service stopped behind us ─────────────
+# Set while the one-shot runs; the EXIT trap starts the service again if the
+# script dies or is interrupted (INT/TERM become a normal exit so it fires).
+STOPPED_BY_US=0
+restore_service() {
+    if [ "$STOPPED_BY_US" -eq 1 ]; then
+        STOPPED_BY_US=0
+        echo "▶ Starting $service back up…"
+        "${COMPOSE[@]}" start "$service" >/dev/null 2>&1 || "${COMPOSE[@]}" up -d "$service"
+    fi
+}
+trap restore_service EXIT
+trap 'exit 130' INT TERM
+
+# ── --no-follow: wait until Odoo answers, then return ─────
+# /web/login is the check because it goes through the database registry, so a
+# 200 means people can log in, not just that the port is open. 303 is the
+# database selector of a stack without a dbfilter.
+wait_ready() {
+    local start=$SECONDS elapsed=0 last=-10 state code="" not_running=0 errors=0
+    echo "⏳ Waiting for $container to answer /web/login (every 3s, up to ${WAIT_TIMEOUT}s)…"
+    while :; do
+        elapsed=$((SECONDS - start))
+        state=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || echo missing)
+        if [ "$state" != running ]; then
+            not_running=$((not_running + 1))
+            if [ "$not_running" -ge 3 ]; then
+                echo "✗ $container is '$state' after ${elapsed}s. Last log lines:"
+                docker logs --tail=60 "$container" 2>&1 || true
+                return 1
+            fi
+        else
+            not_running=0
+            code=$(docker exec "$container" curl -s -o /dev/null -w '%{http_code}' \
+                     --max-time 20 "http://localhost:${HTTP_PORT}/web/login" 2>/dev/null || true)
+            case "$code" in
+                200|303)
+                    echo "✓ $container is up: /web/login answered $code after ${elapsed}s."
+                    return 0 ;;
+                500)
+                    errors=$((errors + 1))
+                    if [ "$errors" -ge 3 ]; then
+                        echo "✗ $container answers 500 on /web/login. Last log lines:"
+                        docker logs --tail=60 "$container" 2>&1 || true
+                        return 1
+                    fi ;;
+                *)  errors=0 ;;
+            esac
+        fi
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            echo "✗ $container not ready after ${elapsed}s (last HTTP ${code:-none}). Last log lines:"
+            docker logs --tail=60 "$container" 2>&1 || true
+            return 2
+        fi
+        if [ $((elapsed - last)) -ge 6 ]; then
+            echo "   … ${elapsed}s: container $state, HTTP ${code:-000}"
+            last=$elapsed
+        fi
+        sleep 3
+    done
+}
+
 # ── Make sure the service is up so stop/start works ───────
 if ! "${COMPOSE[@]}" ps --status=running --services 2>/dev/null | grep -qx "$service"; then
     echo "▶ Starting $service…"
@@ -114,18 +208,33 @@ if [ "$needs_oneshot" -eq 1 ]; then
     fi
 
     echo "⏸  Stopping $service so the one-shot run can take DB locks…"
+    STOPPED_BY_US=1
     "${COMPOSE[@]}" stop "$service" >/dev/null
 
     echo "▶ One-shot:  odoo ${ODOO_ARGS[*]}"
     # --no-deps: don't restart db; it should already be running.
     # --rm: don't leave a leftover container behind.
+    # A failing one-shot (a failing test, a broken module) must not leave the
+    # service stopped, so its exit code is kept and the service comes back first.
+    set +e
     "${COMPOSE[@]}" run --rm --no-deps "$service" odoo "${ODOO_ARGS[@]}"
+    rc=$?
+    set -e
 
-    echo "▶ Starting $service back up…"
-    "${COMPOSE[@]}" start "$service" >/dev/null 2>&1 || "${COMPOSE[@]}" up -d "$service"
+    restore_service
+    if [ "$rc" -ne 0 ]; then
+        echo "✗ One-shot exited with code $rc (see above). $service was started again; not following logs."
+        exit "$rc"
+    fi
 else
     echo "↻ Restarting $service…"
     "${COMPOSE[@]}" restart "$service"
+fi
+
+if [ "$FOLLOW" -eq 0 ]; then
+    rc=0
+    wait_ready || rc=$?
+    exit "$rc"
 fi
 
 echo "─── following logs ($container) — stop the run to detach; container keeps running ───"
