@@ -89,6 +89,33 @@ detect_platform() {
     esac
 }
 
+# Developer mode clones with the operator's OWN GitHub key and mounts the
+# clones read-write, so it must run as the operator. Under sudo both break:
+# ssh reads root's ~/.ssh (usually no key at all, hence a bare "no SSH access"
+# even when the user's own key is fine), and everything created lands root-owned
+# so the next non-sudo run cannot write to it.
+refuse_sudo_dev() {
+    [ "$(id -u)" -eq 0 ] || return 0
+    local me; me="${SUDO_USER:-}"
+    if [ -n "$me" ] && [ "$me" != "root" ]; then
+        echo -e "  ${RED}✗${NC} Don't run developer mode under ${BOLD}sudo${NC}."
+        echo ""
+        echo -e "     ssh would look for your key in ${BOLD}$HOME/.ssh${NC} (root's), not"
+        echo -e "     ${BOLD}$(eval echo "~$me")/.ssh${NC} — so GitHub access fails even when your key works."
+        echo "     Files it creates would also be root-owned and unwritable afterwards."
+        echo ""
+        echo "     Docker does not need sudo here (your user is in the 'docker' group"
+        echo "     if setup ran once). Re-run as yourself:"
+        echo ""
+        echo -e "         ${BOLD}bash setup.sh${NC}"
+        echo ""
+        exit 1
+    fi
+    echo -e "  ${YELLOW}!${NC} Running as root: the ePHEM clone will use root's SSH key ($HOME/.ssh)"
+    echo "     and every file created here will be root-owned."
+    return 0
+}
+
 # Beginner-friendly, step-by-step guidance shown when `ssh -T git@github.com`
 # does not authenticate. Used by both the single- and multi-instance dev flows.
 github_ssh_help() {
@@ -510,6 +537,7 @@ DEV_MODE=false
 if [ "$MODE" = "developer" ]; then
     echo -e "${CYAN}${BOLD}Developer mode${NC}"
     echo ""
+    refuse_sudo_dev
     echo "This mode:"
     echo "  • Clones ePHEM into addons/$CORE_NAME using YOUR personal GitHub SSH key"
     echo "  • Mounts addons/ read-write (live editing); other repositories can be"
@@ -591,7 +619,7 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         if [ -f .dev-instances ] && [ -s .dev-instances ]; then
             INSTANCE_NAMES=$(tr '\n' ' ' < .dev-instances | sed 's/ *$//')
-            echo "  Configured instances: ${BOLD}${INSTANCE_NAMES}${NC}"
+            echo -e "  Configured instances: ${BOLD}${INSTANCE_NAMES}${NC}"
             read -p "  Use these names? [Y/n]: " USE_EXISTING
             if [[ "${USE_EXISTING:-Y}" =~ ^[Nn]$ ]]; then
                 read -p "  Enter instance names (space-separated, default: 1 2 3): " INSTANCE_NAMES

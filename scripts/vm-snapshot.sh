@@ -93,7 +93,7 @@ fi
 if [ -z "$PGDUMP" ]; then
     say ""
     warn "No pg_dump of version $SRV_MAJOR or newer was found on this machine."
-    echo "     Installed: $(ls -1d /usr/lib/postgresql/*/bin/pg_dump 2>/dev/null | tr '\n' ' ')${NC}"
+    echo "     Installed: $(ls -1d /usr/lib/postgresql/*/bin/pg_dump 2>/dev/null | tr '\n' ' ')"
     echo "     Install a matching client, then run this again:"
     echo "       sudo apt install -y postgresql-client-$SRV_MAJOR"
     read -r -p "  Or type the full path to a pg_dump to use anyway (empty to abort): " PGDUMP

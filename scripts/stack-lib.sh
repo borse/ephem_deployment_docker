@@ -1077,8 +1077,20 @@ ensure_github_ssh() {
         GITHUB_SSH_STATE=no-access
         return 1
     fi
-    echo -e "  ${RED}✗${NC} No SSH access to GitHub (ssh -o BatchMode=yes -T git@github.com fails)."
-    echo "     README → Developer Mode → SSH key setup."
+    # Why it failed decides what to tell them: root under sudo looked in the
+    # wrong home, an existing key means GitHub refused that key, and only a
+    # missing key is the "set up a key" case the README covers.
+    if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        echo -e "  ${RED}✗${NC} No SSH access to GitHub — this is running as ${BOLD}root${NC} (sudo), so ssh"
+        echo "     read $HOME/.ssh, not $(eval echo "~$SUDO_USER")/.ssh. Re-run without sudo."
+    elif [ -n "$key" ]; then
+        echo -e "  ${RED}✗${NC} GitHub refused your SSH key ($key)."
+        echo "     Its .pub half must be on your GitHub account and that account a"
+        echo "     collaborator on borse/ePHEM.  Check with:  ssh -T git@github.com"
+    else
+        echo -e "  ${RED}✗${NC} No SSH key in $HOME/.ssh — ssh has nothing to offer GitHub."
+        echo "     README → Developer Mode → SSH key setup."
+    fi
     GITHUB_SSH_STATE=no-access
     return 1
 }
