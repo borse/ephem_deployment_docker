@@ -65,6 +65,23 @@ set_env_key() {  # set_env_key KEY VALUE: update or append KEY=VALUE in .env
 
 DB_USER="$(env_get POSTGRES_USER)"; DB_USER="${DB_USER:-odoo}"
 
+# ── Host paths ────────────────────────────────
+# True inside WSL (Docker is Docker Desktop on the Windows host).
+is_wsl() {
+    grep -qiE "microsoft|wsl" /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
+}
+
+# A path as the host GUI (PyCharm) must type it. Under WSL the IDE runs on
+# Windows and reaches WSL files over a \\wsl.localhost UNC path; elsewhere it
+# sees the same POSIX path these scripts use.
+host_path() {
+    if is_wsl; then
+        printf '\\\\wsl.localhost\\%s%s' "${WSL_DISTRO_NAME:-Ubuntu}" "$(printf '%s' "$1" | tr '/' '\\')"
+    else
+        printf '%s' "$1"
+    fi
+}
+
 # ── Mode ──────────────────────────────────────
 EPHEM_MODE="${EPHEM_MODE:-}"
 EPHEM_MODE_SOURCE=""          # env | detected

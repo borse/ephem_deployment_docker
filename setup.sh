@@ -63,11 +63,6 @@ get_lan_ip() {
     printf '%s\n' "$ip"
 }
 
-# True when running inside WSL (Docker is Docker Desktop on the Windows host).
-is_wsl() {
-    grep -qiE "microsoft|wsl" /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
-}
-
 # Cross-platform URL opener: macOS `open`, WSL `wslview`/`explorer.exe`,
 # Linux `xdg-open`. Returns non-zero if no opener is available.
 open_url() {
@@ -827,19 +822,12 @@ if [ "$MODE" = "developer" ]; then
         echo "  roster. Re-running this script never touches an existing clone."
 
         # ── PyCharm handoff — copy/paste-ready run-config guidance ──────────
-        # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches
-        # WSL files via a \\wsl.localhost UNC path; on macOS/Linux PyCharm sees
-        # the same POSIX paths this script already uses.
-        _addons_dir="$PWD/odca${INSTANCE_NAMES%% *}"
-        if is_wsl; then
-            SCRIPT_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
-            ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$_addons_dir" | tr '/' '\\')"
-            PYCHARM_HOST="Windows"
-        else
-            SCRIPT_DISPLAY="$PWD/scripts/dev-logs.sh"
-            ADDONS_DISPLAY="$_addons_dir"
-            PYCHARM_HOST="this machine"
-        fi
+        # Paths go through host_path: PyCharm runs on the host GUI, which under
+        # WSL is Windows and needs the \\wsl.localhost spelling.
+        SCRIPT_DISPLAY=$(host_path "$PWD/scripts/dev-logs.sh")
+        ADDONS_DISPLAY=$(host_path "$PWD/odca${INSTANCE_NAMES%% *}")
+        DEPLOY_DISPLAY=$(host_path "$PWD")
+        if is_wsl; then PYCHARM_HOST="Windows"; else PYCHARM_HOST="this machine"; fi
         echo ""
         echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo -e "${CYAN}${BOLD}  NEXT: drive each instance from PyCharm${NC}"
@@ -848,11 +836,33 @@ if [ "$MODE" = "developer" ]; then
         echo -e "  ${BOLD}1) Install PyCharm${NC} (Professional recommended) on ${PYCHARM_HOST}:"
         echo "       https://www.jetbrains.com/pycharm/download/"
         echo ""
-        echo -e "  ${BOLD}2) Open your addons folder${NC} (File → Open), for example:"
-        echo "       $ADDONS_DISPLAY"
+        echo -e "  ${BOLD}2) Open the deploy folder${NC} (File → Open):"
+        echo "       $DEPLOY_DISPLAY"
+        echo "       Every instance is visible at once that way. To work on one alone,"
+        echo "       open its addons folder instead, e.g. $ADDONS_DISPLAY"
         echo "       (the ePHEM clone is $CORE_NAME/ inside it; repositories added later sit next to it)"
         echo ""
-        echo -e "  ${BOLD}3) Add one Shell Script run configuration per instance${NC}"
+        echo -e "  ${BOLD}3) Register each instance's clone as its own Git root${NC}"
+        echo "       Every odcaN/$CORE_NAME is a separate clone with its own branch and"
+        echo "       history. PyCharm registers only the folder you opened, so the rest"
+        echo "       stay invisible to Git until you add them:"
+        echo ""
+        echo "       Settings (Ctrl+Alt+S) → Version Control → Directory Mappings → +"
+        echo "       one per line below, VCS = Git:"
+        echo ""
+        for _n in $INSTANCE_NAMES; do
+            printf '         %b%s%b\n' "$BOLD$GREEN" "$(host_path "$PWD/odca$_n/$CORE_NAME")" "$NC"
+        done
+        echo ""
+        echo "       An 'Unregistered VCS roots detected' banner does the same in one"
+        echo "       click. Note the path ends in $CORE_NAME — the clone sits one level"
+        echo "       below the folder the container mounts."
+        echo ""
+        echo "       The Git widget in the status bar then lists every clone. Switching"
+        echo "       a branch or committing in one instance leaves the others alone, and"
+        echo "       leaves this deploy repo alone too: odca*/ is in its .gitignore."
+        echo ""
+        echo -e "  ${BOLD}4) Add one Shell Script run configuration per instance${NC}"
         echo "       Run → Edit Configurations → + → Shell Script → 'Script path'"
         echo ""
         echo "       Use this SAME script path for every configuration:"
@@ -1517,17 +1527,11 @@ ENV_EMAIL=$(grep "^SSL_EMAIL=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
 SERVER_IP=$(get_server_ip)
 
 if [ "$MODE" = "developer" ]; then
-    # PyCharm runs on the host GUI. Under WSL that's Windows, which reaches the
-    # script via a \\wsl.localhost path; on macOS/Linux it's the POSIX path.
-    if is_wsl; then
-        SCRIPT_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/scripts/dev-logs.sh" | tr '/' '\\')"
-        ADDONS_DISPLAY="\\\\wsl.localhost\\${WSL_DISTRO_NAME:-Ubuntu}$(printf '%s' "$PWD/addons" | tr '/' '\\')"
-        PYCHARM_HOST="Windows"
-    else
-        SCRIPT_DISPLAY="$PWD/scripts/dev-logs.sh"
-        ADDONS_DISPLAY="$PWD/addons"
-        PYCHARM_HOST="this machine"
-    fi
+    # Paths go through host_path: PyCharm runs on the host GUI, which under WSL
+    # is Windows and needs the \\wsl.localhost spelling.
+    SCRIPT_DISPLAY=$(host_path "$PWD/scripts/dev-logs.sh")
+    ADDONS_DISPLAY=$(host_path "$PWD/addons")
+    if is_wsl; then PYCHARM_HOST="Windows"; else PYCHARM_HOST="this machine"; fi
 
     echo "ePHEM is ready for development:  http://localhost:8069"
     echo ""
@@ -1540,11 +1544,15 @@ if [ "$MODE" = "developer" ]; then
     echo "    1. Install PyCharm on ${PYCHARM_HOST} (Community Edition is free)."
     echo "    2. File → Open → this folder (the ePHEM clone is $CORE_NAME/ inside it):"
     printf '         %b%s%b\n' "$BOLD" "$ADDONS_DISPLAY" "$NC"
-    echo "    3. Run → Edit Configurations → + → Shell Script:"
+    echo "    3. Point Git at the clone, or PyCharm shows no branch for it:"
+    echo "         Settings (Ctrl+Alt+S) → Version Control → Directory Mappings → +"
+    printf '         %b%s%b   (VCS = Git)\n' "$BOLD$GREEN" "$(host_path "$PWD/addons/$CORE_NAME")" "$NC"
+    echo "         Commits there go to the ePHEM repository, never to this deploy one."
+    echo "    4. Run → Edit Configurations → + → Shell Script:"
     echo "         • Name:            Odoo: restart + logs"
     printf '         • Script path:     %b%s%b\n' "$BOLD$GREEN" "$SCRIPT_DISPLAY" "$NC"
     echo "         • Script options:  (leave empty = just restart + tail logs)"
-    echo "    4. Apply → OK, then click the green ▶."
+    echo "    5. Apply → OK, then click the green ▶."
     echo ""
     echo "  Put commands in 'Script options' to update/install modules before the restart."
     echo "  Single-instance needs your database name via -d (the DB you created in the browser):"

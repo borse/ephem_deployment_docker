@@ -2665,6 +2665,74 @@ menu_switch_instance() {
     echo -e "  ${GREEN}✓${NC} Instance $N: $ADDONS_NAME on $(inst_branch "$N"), $ODOO_URL, database $ODOO_DB (remembered in .env)"
 }
 
+# ── 12) PyCharm ───────────────────────────
+# The same handoff setup.sh prints once at the end, reachable any time and
+# with today's roster. The Git-root step is the one people miss: each
+# odcaN/$CORE_NAME is its own clone, and PyCharm registers only the folder
+# that was opened, so the others stay invisible to Git.
+menu_pycharm() {
+    echo -e "${CYAN}${BOLD}PyCharm${NC}"
+    echo ""
+    if is_wsl; then
+        echo "  PyCharm runs on Windows and reaches these files over \\\\wsl.localhost,"
+        echo "  so the paths below are the Windows spelling of the same folders."
+        echo ""
+    fi
+    echo -e "  ${BOLD}Open the project${NC}   (File → Open)"
+    echo "     $(host_path "$EPHEM_ROOT")"
+    echo ""
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        echo -e "  ${BOLD}Register each instance's clone as its own Git root${NC}"
+        echo "     Settings (Ctrl+Alt+S) → Version Control → Directory Mappings → +"
+        echo "     one per line below, VCS = Git:"
+        echo ""
+        local n
+        for n in "${INSTANCES[@]}"; do
+            printf '       %b%s%b\n' "$BOLD$GREEN" "$(host_path "$EPHEM_ROOT/odca$n/$CORE_NAME")" "$NC"
+        done
+        echo ""
+        echo "     An 'Unregistered VCS roots detected' banner does the same in one"
+        echo "     click. The path ends in $CORE_NAME — the clone sits one level below"
+        echo "     the folder the container mounts."
+        echo ""
+        echo "     The Git widget in the status bar then lists every clone. Switching"
+        echo "     a branch or committing in one instance leaves the others alone, and"
+        echo "     leaves this deploy repo alone too: odca*/ is in its .gitignore."
+        echo ""
+        echo "     Indexing all of them is heavy. To keep one instance fast, right-click"
+        echo "     the others → Mark Directory as → Excluded: still full Git roots, just"
+        echo "     not indexed."
+    else
+        echo -e "  ${BOLD}Register the ePHEM clone as a Git root${NC}"
+        echo "     $ADDONS_NAME/ is ignored by this deploy repo, so PyCharm shows no Git"
+        echo "     for it until the clone inside is mapped:"
+        echo ""
+        echo "     Settings (Ctrl+Alt+S) → Version Control → Directory Mappings → +"
+        echo ""
+        printf '       %b%s%b\n' "$BOLD$GREEN" "$(host_path "$ADDONS_DIR/$CORE_NAME")" "$NC"
+        echo ""
+        echo "     Commits there go to the ePHEM repository, never to this one."
+    fi
+    echo ""
+    echo -e "  ${BOLD}Restart + logs as a run configuration${NC}"
+    echo "     Run → Edit Configurations → + → Shell Script → 'Script path':"
+    echo ""
+    printf '       %b%s%b\n' "$BOLD$GREEN" "$(host_path "$EPHEM_ROOT/scripts/dev-logs.sh")" "$NC"
+    echo ""
+    if [ "$EPHEM_MODE" = dev-multi ]; then
+        echo "     'Script options' is what differs per instance — the first word is the"
+        echo "     instance, the rest is forwarded to Odoo:"
+        echo ""
+        for n in "${INSTANCES[@]}"; do
+            printf "       odca%-4s →  Script options:  ${BOLD}%s -u eoc_signals${NC}\n" "$n" "$n"
+        done
+    else
+        echo "     'Script options' is forwarded to Odoo, e.g. ${BOLD}-u eoc_signals${NC}, or empty"
+        echo "     for a plain restart + log tail."
+    fi
+    echo ""
+}
+
 # ── 4) Restart + follow the log ───────────────
 # scripts/dev-logs.sh is the same script PyCharm run configs use. Its tail
 # ends with Ctrl-C, which brings the menu back.
@@ -2982,9 +3050,10 @@ menu_main_local() {
         printf "  9) %s\n" "Databases: backup, restore, delete, duplicate, create"
         printf " 10) %-44s (%s)\n" "Back up everything now" "scripts/backup.sh"
         printf " 11) %s\n" "Local basemap: the maps draw from a file here, offline too"
+        printf " 12) %-44s (%s)\n" "PyCharm: paths, Git roots, run configurations" "copy/paste ready"
         printf "  x) %s\n" "Exit"
         echo ""
-        ask_choice "1-11" "x"
+        ask_choice "1-12" "x"
         case "$CHOICE" in
             1)  menu_status_local ;;
             2)  if [ "$EPHEM_MODE" = dev-multi ]; then menu_switch_instance; else invalid_choice; fi ;;
@@ -2997,8 +3066,9 @@ menu_main_local() {
             9)  menu_db_admin ;;
             10) bash scripts/backup.sh; echo ""; ls -lht backups/ 2>/dev/null | head -5 ;;
             11) menu_basemap ;;
+            12) menu_pycharm ;;
             b)  ;;
-            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
+            *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-12, or x to exit." ;;
         esac
     done
 }
