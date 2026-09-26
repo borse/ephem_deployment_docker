@@ -1,4 +1,59 @@
-# Updating an Existing Server (September 2026 local basemap)
+# Updating an Existing Server (September 2026 odoo.conf leaves Git)
+
+`odoo.conf` is generated on each server by `setup.sh` and edited there by
+`manage.sh`, but an old developer copy of it was committed to Git by mistake.
+Git still tracked it despite `.gitignore`, so any local edit (a database
+filter, a routing option) blocked `git pull`. The repository no longer tracks
+it. Nothing changes on the server itself: the file stays where it is, with its
+content, and Odoo keeps reading it.
+
+**Do the steps below BEFORE the first `git pull` that brings this change.**
+A plain pull would either refuse (the server edited its `odoo.conf`) or
+delete the file (it did not), and Odoo would start with no configuration on
+its next restart: the container mounts that single file.
+
+## Steps (run on each server, once)
+
+```bash
+cd ~/ephem-deploy
+
+# 1. Keep a copy of the server's configuration
+cp odoo.conf ~/odoo.conf.before-pull
+
+# 2. Stop tracking it on this server too. The file stays on disk.
+git rm --cached odoo.conf
+
+# 3. Only if git status lists other local edits (for example
+#    scripts/dev-logs.sh), put them aside so the pull can go through
+git status
+git stash push -m "server edits before pull" -- scripts/dev-logs.sh
+
+# 4. Pull. --ff-only refuses instead of creating a merge on the server.
+git config --global pull.ff only
+git pull
+
+# 5. Check
+ls -l odoo.conf        # still there, same size as the copy from step 1
+git status             # odoo.conf must no longer be listed
+```
+
+No restart is needed. If `git stash show -p` in step 3 holds something the
+new version of the file lacks, bring it back with `git stash pop`, otherwise
+`git stash drop`.
+
+**The admin password in the old copy.** The committed file carried a real
+`admin_passwd` value, and it stays readable in the Git history. Compare it
+with the server's own: `git show 44cd8e3:odoo.conf | grep admin_passwd`
+against `grep admin_passwd odoo.conf`. If they match, change the server's
+database master password (`admin_passwd` in `odoo.conf`, then restart Odoo).
+
+If `odoo.conf` ever needs restoring, copy it over the existing file
+(`cp ~/odoo.conf.before-pull odoo.conf`) so the running container sees the
+change; never move or replace the file.
+
+---
+
+# Previous update (September 2026 local basemap)
 
 This update lets a server draw its maps from its own copy of its area instead
 of OpenFreeMap. It is opt in: a server that never downloads a basemap keeps
