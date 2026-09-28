@@ -1,4 +1,107 @@
-# Updating an Existing Server (September 2026 odoo.conf leaves Git)
+# Updating an Existing Server (September 2026: EIOS and ePHEM AI, image 1.0.3)
+
+This release changes the EIOS connector and ePHEM AI. It needs app image
+1.0.3, which adds LibreOffice (headless) for document conversion, and an update
+of three modules. Allow about 15 minutes and one Odoo restart. No data is
+removed.
+
+Code: ePHEM-core commits `2006f5930` to `d7e9ebf87` (branch
+`18_national_dev_new_IAP_levels`). Image: `borrs/ephem:1.0.3`.
+
+What it delivers:
+
+1. **EIOS.** A **Fetch from EIOS** button (signals kanban and list) with a
+   progress window. One fetch runs at a time, whether started by a user or by
+   the schedule. New signals receive the pinning analyst, the countries, the
+   source name and the source country, then ePHEM AI completes them:
+   aetiology, onset date, states, health interfaces, title and narrative.
+   Articles that were discarded no longer make the fetch fail.
+2. **ePHEM AI, new signal.** PowerPoint and Excel files; old Office, RTF and
+   OpenDocument files through LibreOffice; several signals from one document;
+   a custom prompt; the expected number of signals (I don't know, one, or
+   several) with aetiologies and countries of interest.
+3. **Settings.** Signals settings: ePHEM AI on or off, and the language it
+   writes in. EIOS settings: ePHEM AI enrichment on or off.
+4. **My level.** Also lists the signals and incidents created or reported by
+   users of the same level and area.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+git pull
+
+# 1. Back up every database and filestore
+bash scripts/backup.sh
+
+# 2. App image 1.0.3 (adds LibreOffice)
+bash manage.sh        # 4) Update the ePHEM app image, version 1.0.3
+                      # By hand instead: EPHEM_IMAGE_TAG=1.0.3 in .env, then
+                      #   docker compose pull && docker compose up -d
+
+# 3. New ePHEM code
+bash manage.sh        # 5) Addons, ePHEM-core, 1) Pull latest
+                      # "Apply the new code now?": answer n, step 4 does it
+
+# 4. Update the modules on every database (Odoo restarts at the end)
+bash scripts/update-modules.sh
+                      # Modules: eoc_signals, eoc_ai, eoc_eios_connector
+                      # Databases: all
+```
+
+Answering **Y** in step 3 instead updates every module on every database and
+restarts Odoo. The result is the same; it takes longer.
+
+## After the update
+
+- `docker compose exec odoo soffice --headless --version` prints LibreOffice 24.2.
+- **Settings, ePHEM AI:** a default AI provider with an API key. Without one,
+  EIOS signals are created with EIOS data only and the connector log shows
+  "ePHEM AI not configured".
+- **Settings, EOC Signals:** ePHEM AI on, and ePHEM AI Language set (installed
+  languages only).
+- **Settings, EIOS Connector:** Enrich New Signals with ePHEM AI on (the default).
+- **Settings, Technical, Scheduled Actions:** EIOS API Fetch and EIOS Fetch Run
+  Worker are active.
+- **Signals, Fetch from EIOS:** the progress window opens and the fetch completes.
+
+Optional: **Settings, EIOS Connector, Refresh from EIOS** sets the source name
+and source country of older EIOS signals. It runs in the background; start it
+outside working hours.
+
+**Data leaving the server.** ePHEM AI sends the text of the documents, links
+and EIOS articles it reads to the configured AI provider. LibreOffice runs on
+the server with no network access and no macros.
+
+## Servers without Docker (Odoo installed on the VM)
+
+```bash
+# LibreOffice, headless
+sudo apt-get install -y --no-install-recommends \
+    libreoffice-writer-nogui libreoffice-impress-nogui libreoffice-calc-nogui
+
+# New code: pull the ePHEM-core clone listed in addons_path, then
+sudo systemctl stop odoo18
+sudo -u odoo /opt/odoo/venv/bin/python3 /opt/odoo/odoo18/odoo-bin \
+    -c /etc/odoo/odoo18.conf -d DATABASE \
+    -u eoc_signals,eoc_ai,eoc_eios_connector --stop-after-init
+sudo systemctl start odoo18
+```
+
+Repeat the update line for each database. Paths and the service name follow
+the VM deployment guide; adjust them if the server differs.
+
+## Rolling back
+
+Image: set `EPHEM_IMAGE_TAG=1.0.2` in `.env`, then
+`docker compose pull && docker compose up -d`. Without LibreOffice, old Office
+and OpenDocument files are refused with a message; everything else works.
+Code: restore the backup from step 1 together with the previous ePHEM-core
+commit.
+
+---
+
+# Previous update (September 2026 odoo.conf leaves Git)
 
 `odoo.conf` is generated on each server by `setup.sh` and edited there by
 `manage.sh`, but an old developer copy of it was committed to Git by mistake.
