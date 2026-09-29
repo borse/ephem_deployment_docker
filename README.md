@@ -7,6 +7,16 @@
 
 Deploy and develop ePHEM using Docker. The setup script handles everything — just run it and choose your use case.
 
+**Already have git and know your way around?**
+
+```bash
+git clone https://github.com/borse/ephem_deployment_docker.git ephem-deploy
+cd ephem-deploy
+bash setup.sh
+```
+
+The script asks what you're setting up and walks you through the rest. The rest of this README is reference. (Windows users: run this inside WSL, see [Windows — Run Inside WSL](#windows--run-inside-wsl).)
+
 ---
 
 ## Table of Contents
