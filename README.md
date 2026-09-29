@@ -92,7 +92,7 @@ Here's how each mode works:
 - **SSH access** (for remote servers) or a terminal (for local machines)
 - **A domain name** (for production servers with SSL) — pointed at the server's IP via a DNS A record
 
-> **No domain?** Fine for testing and local use. The script detects this and runs on `http://YOUR_IP:8069` or `http://localhost:8069`. You can add a domain later.
+> **No domain?** Fine for testing and local use. A server runs on `http://YOUR_IP` behind nginx, or on `http://YOUR_IP:8069` with the direct option (see [Mode 1](#mode-1--server-deploy)); demo and developer installs run on `http://localhost:8069`. You can add a domain later.
 
 ---
 
@@ -177,6 +177,24 @@ The script asks which mode you want (**Server / Demo / Developer**), then handle
 
 For deploying ePHEM on a production or staging server.
 
+After choosing **1**, setup asks how people will reach ePHEM:
+
+| Choice | Address | What runs |
+|---|---|---|
+| **1) Directly on port 8069** | `http://SERVER_IP:8069` | Odoo only. No nginx, no domain, no SSL |
+| **2) nginx on ports 80/443** | `https://your.domain` or `http://SERVER_IP` | nginx in front of Odoo: domains, HTTPS, RPC blocking |
+
+The choice is saved as `SERVER_ACCESS` in `.env` (`direct` or `nginx`). To change
+your mind later, run `bash setup.sh` again, choose **1**, then the other option.
+Nothing is lost when you switch: while Odoo is reached directly, nginx's config
+and certificates stay on disk, and choosing nginx again brings the domains and
+HTTPS back as they were. Databases are never touched.
+
+Direct access is plain HTTP, so passwords travel unencrypted. Use it on a closed
+network or VPN. Odoo then also answers `/xmlrpc` and `/jsonrpc` (nginx blocks
+them), and runs in threaded mode (`workers = 0`) so the live updates work on
+8069. The domain and SSL items in `bash manage.sh` need nginx and say so.
+
 ### Configure Your Settings
 
 When you run `bash setup.sh` and choose **1**, the script creates a `.env` file from the template and immediately stops to ask you to fill it in. Open it:
@@ -226,6 +244,7 @@ Open your browser:
 - **With SSL:** `https://ephem.health.gov.xx`
 - **With domain, no SSL yet:** `http://ephem.health.gov.xx`
 - **Without domain:** `http://YOUR_SERVER_IP` (shown by the setup script)
+- **Direct, no nginx:** `http://YOUR_SERVER_IP:8069`
 
 Fill in the database creation form:
 

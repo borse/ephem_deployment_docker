@@ -41,6 +41,18 @@ NC="${NC:-\033[0m}"
 
 dc() { docker compose -f "$EPHEM_ROOT/docker-compose.yml" "$@"; }
 
+# Domains, certificates and the nginx config mean nothing on a server where
+# Odoo is reached directly on 8069 (SERVER_ACCESS=direct in .env): nginx is
+# not running there, and starting it would take ports 80 and 443. A script
+# that works on nginx calls this first and stops when it fails.
+nginx_in_use() {
+    [ "$(grep '^SERVER_ACCESS=' "$EPHEM_ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs)" != direct ] && return 0
+    echo -e "\033[0;31m✗\033[0m This server runs without nginx: Odoo is reached directly on port 8069"
+    echo "  (SERVER_ACCESS=direct in .env). Domains and SSL need nginx. To switch:"
+    echo "    bash setup.sh   → 1) Server deploy → 2) nginx on ports 80/443"
+    return 1
+}
+
 # ── Certificates ──────────────────────────────
 #
 # Read what is on disk instead of parsing `certbot certificates`. That
