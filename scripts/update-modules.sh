@@ -185,6 +185,7 @@ MODULES=(
   "web_replace_url"
   "mail"
   "web_hierarchy"
+  "ephem_documents"
 )
 
 # ── Auto-include every eoc_* / ephem_* module in the addons folders ─────
