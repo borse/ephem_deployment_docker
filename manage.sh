@@ -742,7 +742,9 @@ menu_status() {
     df -h / | tail -1 | awk '{printf "  root: %s used of %s (%s)\n", $3, $2, $5}'
     echo ""
     echo -e "${BOLD}SSL certificate:${NC}"
-    if ssl_is_configured; then
+    if [ "$(server_access)" = direct ]; then
+        echo "  none: Odoo is reached directly on port 8069, no nginx (SERVER_ACCESS=direct)"
+    elif ssl_is_configured; then
         certs_refresh
         local lin
         for lin in $(cert_lineages); do
@@ -770,6 +772,7 @@ menu_status() {
 # Domains are routing only: nginx server block + certificate. Databases live
 # in the Databases menu — adding a domain never creates or touches one.
 menu_domains() {
+    nginx_in_use || return 0
     while true; do
         echo -e "${CYAN}${BOLD}Manage domains${NC}"
         echo ""
@@ -903,6 +906,7 @@ menu_duplicate_db() {
 
 # ── 4) SSL setup / status ─────────────────────
 menu_ssl() {
+    nginx_in_use || return 0
     echo -e "${CYAN}${BOLD}SSL (Let's Encrypt)${NC}"
     echo ""
     if ssl_is_configured; then
@@ -1870,7 +1874,11 @@ menu_security() {
         && echo -e "  ${GREEN}✓${NC} database manager disabled (ODOO_LIST_DB=False)" \
         || echo -e "  ${YELLOW}!${NC} database manager ENABLED — disable it via Advanced → 3"
     local RPC; RPC=$(rpc_allow 2>/dev/null)
-    if ! rpc_block_present; then
+    if [ "$(server_access)" = direct ]; then
+        # nginx is what blocks them; without it Odoo answers them itself.
+        echo -e "  ${YELLOW}!${NC} RPC endpoints (/xmlrpc, /jsonrpc) OPEN: Odoo is reached directly on 8069, no nginx to block them"
+        echo -e "  ${YELLOW}!${NC} plain HTTP, no SSL: passwords cross the network unencrypted (keep it on a closed network or VPN)"
+    elif ! rpc_block_present; then
         echo -e "  ${YELLOW}!${NC} nginx config has no RPC block (predates the hardening): apply one via Advanced → 4"
     elif [ -z "$RPC" ]; then
         echo -e "  ${GREEN}✓${NC} RPC endpoints blocked (/xmlrpc, /jsonrpc)"
@@ -1880,7 +1888,7 @@ menu_security() {
         echo -e "  ${GREEN}✓${NC} RPC endpoints open to $RPC only"
     fi
     local RPC_OPEN; RPC_OPEN=$(rpc_open_domains 2>/dev/null)
-    [ -n "$RPC_OPEN" ] && \
+    [ -n "$RPC_OPEN" ] && [ "$(server_access)" != direct ] && \
         echo -e "  ${YELLOW}!${NC} RPC OPEN to everyone on: $RPC_OPEN (per domain, block again via Advanced → 4)"
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
@@ -1900,6 +1908,7 @@ menu_security() {
 
 # ── 12) nginx upload size limit ───────────────
 menu_upload_limit() {
+    nginx_in_use || return 0
     echo -e "${CYAN}${BOLD}Upload size limit (nginx)${NC}"
     echo ""
     echo "  Uploads bigger than this limit get '413 Request Entity Too Large' —"
@@ -2366,6 +2375,7 @@ offer_odoo_restart() {
 #   NGINX_RPC_OPEN    domains whose RPC is open to everyone (per tenant)
 #   NGINX_RPC_ALLOW   the server-wide default for every other domain
 menu_rpc() {
+    nginx_in_use || return 0
     echo -e "${CYAN}${BOLD}RPC endpoints${NC} (/xmlrpc, /jsonrpc)"
     echo ""
     if [ ! -f nginx/active.conf ]; then
@@ -3083,6 +3093,8 @@ menu_main_server() {
             *)       STATE="${YELLOW}not created${NC}" ;;
         esac
         echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
+        [ "$(server_access)" = direct ] && \
+            echo "  Odoo on port 8069, no nginx: items 2, 3 and 10 need nginx (bash setup.sh to switch)"
         echo "  1) Status & health"
         echo "  2) Manage domains — add / remove / certificates"
         echo "  3) SSL — set up HTTPS / show status"

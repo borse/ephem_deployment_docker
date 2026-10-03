@@ -28,6 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 EPHEM_ROOT="$SCRIPT_DIR"
 # shellcheck source=scripts/nginx-lib.sh
 source "$SCRIPT_DIR/scripts/nginx-lib.sh"
+nginx_in_use || exit 1
 
 if [ $# -lt 1 ]; then
     echo ""

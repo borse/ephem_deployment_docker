@@ -144,6 +144,18 @@ ephem_mode_save() {  # ephem_mode_save MODE
     EPHEM_MODE="$m"; EPHEM_MODE_SOURCE=env
 }
 
+# Production only: how people reach Odoo (SERVER_ACCESS in .env, chosen in
+# setup.sh → Server deploy, switched by running setup.sh again):
+#   nginx   nginx on 80/443 in front of Odoo, domains and HTTPS (the default,
+#           and what every server installed before the choice existed runs)
+#   direct  Odoo itself on port 8069, plain HTTP, no nginx
+server_access() {
+    case "$(env_get SERVER_ACCESS)" in
+        direct) echo direct ;;
+        *)      echo nginx ;;
+    esac
+}
+
 # ── Compose ───────────────────────────────────
 COMPOSE_FILES=()
 
