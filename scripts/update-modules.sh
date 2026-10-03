@@ -120,7 +120,6 @@ MODULES=(
   "eoc_lims"
   "eoc_surveillance"
   "eoc_casualty_surveillance"
-  "eoc_rapid_signals"
   "eoc_training_mode"
   "eoc_demo_mode"
   "eoc_signals_academy"
