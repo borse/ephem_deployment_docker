@@ -50,9 +50,9 @@ STEP=10           # port gap between instances
 # Comma-free record of which instances the generated file describes.
 INSTANCES_FILE=".dev-instances"
 
-# Master password used by the local dev instances when .env doesn't set one.
-# These stacks only ever listen on localhost, so a memorable value beats a
-# random one you'd have to look up every time Odoo asks for it.
+# Master password of every local dev instance (read_admin_pass keeps .env in
+# step). These stacks only ever listen on localhost, so a memorable value
+# beats a random one you'd have to look up every time Odoo asks for it.
 DEV_ADMIN_PASSWORD="9090"
 
 
@@ -70,13 +70,15 @@ lan_ip() {
 }
 
 read_admin_pass() {
-    local p=""
-    [ -f .env ] && p=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs || true)
-    if [ -z "$p" ] || [ "$p" = "CHANGE_ME" ]; then
-        p="$DEV_ADMIN_PASSWORD"
-        echo -e "${YELLOW}!${NC} No usable ODOO_ADMIN_PASSWORD in .env — using the dev default: ${BOLD}$p${NC}" >&2
+    # Pinned, the same way setup.sh pins it, and written back to .env so every
+    # tool that reads ODOO_ADMIN_PASSWORD agrees. Trusting .env here let a
+    # value from an older setup.sh (which filled every CHANGE_ME with the
+    # random Postgres password) land in each regenerated odoo-<name>.conf.
+    if [ "$(env_get ODOO_ADMIN_PASSWORD)" != "$DEV_ADMIN_PASSWORD" ]; then
+        set_env_key ODOO_ADMIN_PASSWORD "$DEV_ADMIN_PASSWORD"
+        echo -e "${YELLOW}!${NC} ODOO_ADMIN_PASSWORD in .env pinned to the dev default: ${BOLD}$DEV_ADMIN_PASSWORD${NC}" >&2
     fi
-    printf '%s' "$p"
+    printf '%s' "$DEV_ADMIN_PASSWORD"
 }
 
 # sanitise a user-supplied name into something safe for service/volume names
