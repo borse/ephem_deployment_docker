@@ -125,7 +125,6 @@ MODULES=(
   "eoc_signals_academy"
   "eoc_incident_academy"
   "eoc_ear_academy"
-  "eoc_rrt"
   "ks_dashboard_ninja"
   "ks_website_dashboard_ninja"
   "ks_dn_advance"
