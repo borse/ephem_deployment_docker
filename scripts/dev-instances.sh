@@ -13,7 +13,8 @@
 #
 # It all runs in the SAME docker compose project, so the `db` container
 # (ephem-db) is shared — that's the "shared Postgres, separate databases"
-# model. nginx/certbot stay disabled (this is for local dev only).
+# model — and so is the office converter (ephem-office, docker-compose.yml).
+# nginx/certbot stay disabled (this is for local dev only).
 #
 # Usage:
 #   bash scripts/dev-instances.sh up [name[:branch] ...]   # default: 1 2 3
@@ -209,6 +210,7 @@ cmd_up() {
       USER: \${POSTGRES_USER:-odoo}
       PASSWORD: \${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       ODOO_PY_COLORS: \"1\"
+      EPHEM_OFFICE_URL: http://office:2003
     volumes:
       - odoo-data-$name:/var/lib/odoo
       - ./odca$name:/mnt/extra-addons:rw
@@ -216,6 +218,7 @@ cmd_up() {
       - ./basemaps:/mnt/basemaps:ro
     networks:
       - ephem-internal
+      - office-only
     # Every interface by default (DEV_BIND_HOST in .env), so a phone or a
     # colleague on the LAN can open the instance. Docker-published ports
     # bypass ufw: set DEV_BIND_HOST=127.0.0.1 to keep it on this machine.

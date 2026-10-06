@@ -55,6 +55,9 @@ services:
       PORT: 5432
       USER: ${POSTGRES_USER:-odoo}
       PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # ePHEM AI converts old Office files through the office service below,
+      # never with a LibreOffice of its own.
+      EPHEM_OFFICE_URL: http://office:2003
     volumes:
       - odoo-data:/var/lib/odoo
       # addons/ is a parent folder: addons/ePHEM-core (the ePHEM clone) plus any
@@ -66,6 +69,7 @@ services:
       - ./basemaps:/mnt/basemaps:ro
     networks:
       - ephem-internal
+      - office-only
     # Runs as the non-root 'odoo' user baked into the image; needs no
     # capabilities at all.
     security_opt:
@@ -75,6 +79,39 @@ services:
     expose:
       - "8069"
       - "8072"
+
+  # ── Office converter (LibreOffice) ─────────────
+  # ePHEM AI's reader for old Office, OpenDocument and RTF files: one
+  # LibreOffice per conversion behind a small HTTP service, in its own
+  # container because a document parser is where a crafted file (an email
+  # attachment, an upload) does its damage. Here it has no database
+  # credentials, no filestore, no addons, and its only network (office-only,
+  # internal) has no route out: it answers Odoo and reaches nothing else.
+  # Same release tag as the app image; EPHEM_OFFICE_TAG only for a release
+  # that has no office image of its own (before 1.0.5).
+  office:
+    image: borrs/ephem-office:${EPHEM_OFFICE_TAG:-${EPHEM_IMAGE_TAG:-latest}}
+    container_name: ephem-office
+    restart: unless-stopped
+    # Reaps a LibreOffice left behind when a conversion is killed.
+    init: true
+    read_only: true
+    volumes:
+      # The only writable path: profiles, inputs and outputs of conversions.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 1073741824
+    networks:
+      - office-only
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 256
+    mem_limit: 2g
+    logging: *default-logging
+    expose:
+      - "2003"
 
   # ── NGINX Reverse Proxy ────────────────────────
   nginx:
@@ -130,3 +167,7 @@ volumes:
 networks:
   ephem-internal:
     driver: bridge
+  # No gateway: containers on it reach each other and nothing else.
+  office-only:
+    driver: bridge
+    internal: true

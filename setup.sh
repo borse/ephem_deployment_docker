@@ -730,12 +730,12 @@ if [ "$MODE" = "developer" ]; then
         ensure_native_image_arch
         read -p "  Pull latest Odoo image first? [y/N]: " PULL_IMG
         if [[ "${PULL_IMG:-N}" =~ ^[Yy]$ ]]; then
-            echo "  Pulling borrs/ephem:latest (this may take a few minutes)..."
+            echo "  Pulling the ePHEM images, borrs/ephem and borrs/ephem-office (this may take a few minutes)..."
             if [ -f docker-compose.dev-multi.yml ]; then
                 docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml pull \
-                    || docker compose pull odoo || true
+                    || docker compose pull odoo office || true
             else
-                docker compose pull odoo || true
+                docker compose pull odoo office || true
             fi
         fi
 

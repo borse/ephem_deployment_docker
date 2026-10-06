@@ -736,6 +736,7 @@ menu_status() {
     if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none, or database not running)"; fi
     echo ""
     echo -e "${BOLD}App image:${NC}  borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest  (! unpinned — set EPHEM_IMAGE_TAG in .env on production)')"
+    echo -e "${BOLD}Office image:${NC} borrs/ephem-office:$(env_get EPHEM_OFFICE_TAG | grep . || env_get EPHEM_IMAGE_TAG | grep . || echo latest)"
     echo -e "${BOLD}Addons ($ADDONS_NAME/):${NC}"
     sources_table "$ADDONS_DIR"
     echo -e "${BOLD}Disk:${NC}"
@@ -969,6 +970,21 @@ menu_update_app() {
             echo "     Released versions: https://hub.docker.com/r/borrs/ephem/tags"
             echo "     Nothing changed."
             return 1
+        fi
+        # The office converter (borrs/ephem-office) is released under the same
+        # number since 1.0.5 and follows EPHEM_IMAGE_TAG. For a release
+        # without one, pin the office image to what runs today so the pull
+        # below cannot fail on it.
+        echo -n "  Checking that borrs/ephem-office:$NEWTAG exists too... "
+        if docker manifest inspect "borrs/ephem-office:$NEWTAG" >/dev/null 2>&1; then
+            echo "yes"
+            set_env_key EPHEM_OFFICE_TAG ""
+        else
+            echo "no"
+            local OFFICE_KEEP; OFFICE_KEEP=$(env_get EPHEM_OFFICE_TAG); OFFICE_KEEP="${OFFICE_KEEP:-${TAG:-latest}}"
+            set_env_key EPHEM_OFFICE_TAG "$OFFICE_KEEP"
+            echo -e "  ${YELLOW}!${NC} That release has no office converter image: keeping borrs/ephem-office:$OFFICE_KEEP"
+            echo "     (EPHEM_OFFICE_TAG in .env; clear it once you pin a release that has one)."
         fi
         set_env_key EPHEM_IMAGE_TAG "$NEWTAG"
         echo -e "  ${GREEN}✓${NC} EPHEM_IMAGE_TAG=$NEWTAG"
