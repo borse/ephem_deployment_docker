@@ -157,6 +157,10 @@ xmlrpc_port = 8069
 gevent_port = 8072
 
 log_level = debug
+; GeoIP: the Odoo image ships no GeoLite2 databases, so every request that asks
+; for the visitor's country logs a full traceback at DEBUG before falling back.
+; Harmless; keep odoo.http at INFO so it does not flood the debug log.
+log_handler = odoo.http:INFO
 ; 'assets' makes Odoo regenerate JS/SCSS/OWL-template bundles when those source
 ; files change, so frontend edits show on a plain reload instead of needing a
 ; restart or module update.
