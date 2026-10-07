@@ -798,11 +798,20 @@ Some updates need a step or two more on an existing server. Those are written up
 
 ### Update Odoo Base Image Manually
 
+ePHEM runs two images released under the same version number: the app image
+(`borrs/ephem`) and the office converter (`borrs/ephem-office`, LibreOffice for
+ePHEM AI's old Office files, on an internal network with no route out). One
+pull takes both; `up -d` recreates both containers.
+
 ```bash
 bash scripts/backup.sh
 docker compose pull
 docker compose up -d
 ```
+
+On a production server pin the version first (`EPHEM_IMAGE_TAG=1.0.5` in
+`.env`); `bash manage.sh` → 4) does the same and checks that the office image
+exists for that version.
 
 ### Update Odoo Modules Across All Databases
 
@@ -1151,7 +1160,7 @@ bash setup.sh
 ```bash
 cd ephem-deploy
 docker compose down -v
-docker rmi borrs/ephem:latest nginx:alpine postgres:16-alpine certbot/certbot
+docker rmi borrs/ephem:latest borrs/ephem-office:latest nginx:alpine postgres:16-alpine certbot/certbot
 cd ..
 rm -rf ephem-deploy
 ```

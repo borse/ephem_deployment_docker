@@ -1,4 +1,112 @@
-# Updating an Existing Server (September 2026: EIOS and ePHEM AI, image 1.0.3)
+# Updating an Existing Server (October 2026: two images, release 1.0.5)
+
+This release moves LibreOffice out of the app image into a second container,
+the office converter (`borrs/ephem-office`), which runs on an internal network
+with no route out. App image 1.0.5 keeps the patched wkhtmltopdf (PDF reports
+get their running headers, footers and page numbers back), pins every Python
+package by hash, and adds pypdfium2 (ePHEM AI crops the charts of PDF reports)
+and pypdf (uploads are compressed). The code update is large: every installed
+module is updated. Allow about 30 minutes and one Odoo restart. No data is
+removed; one migration repairs signal records, so take the backup first.
+
+Code: ePHEM-core commits `1b38bedac` to `6412479b1` (branch
+`18_national_dev_new_IAP_levels`). Images: `borrs/ephem:1.0.5` and
+`borrs/ephem-office:1.0.5`, released together under one number.
+
+What it delivers:
+
+1. **ePHEM AI.** The pictures and charts of the material (PDF pages, slides,
+   web pages) placed in the narrative with a caption; a progress panel while
+   it works; the ePHEM AI button on a signal reads links and files the same
+   way as the one on the kanban; old Office, RTF and OpenDocument files go
+   through the office converter.
+2. **Signals.** The discard paths that left a signal half discarded are
+   closed and the affected records repaired (update log line
+   `eoc_signals: outcome repair`); a decided signal keeps its type; the intake
+   stage is "Potential Signal"; FYI and RFI notification types with the
+   source links and files in the body; the duty officer's daily and the
+   coordinator's weekly reports.
+3. **Incidents.** The board grouped by activation level, faster M&E and Acute
+   dashboards, 7-1-7 fixes, responses placed by the escalating officer's level.
+4. **Health facilities.** HeRAMS baseline and daily status on one facility
+   form, referrals with the Field Desk and the referral wall, the rebuilt EMT
+   modules, Training Mode stories for them.
+5. **Team Performance** with a PDF report, **ePHEM Documents** (the shared
+   document repository), compressed uploads and attachments.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+git pull              # brings the office service into docker-compose.yml
+
+# 1. Back up every database and filestore
+bash scripts/backup.sh
+
+# 2. Images 1.0.5 (app + office converter)
+bash manage.sh        # 4) Update the ePHEM app image, version 1.0.5
+                      # It checks that the office image exists for that version.
+                      # By hand instead: EPHEM_IMAGE_TAG=1.0.5 in .env, then
+                      #   docker compose pull && docker compose up -d
+                      # (pulls both images, starts the ephem-office container)
+
+# 3. New ePHEM code
+bash manage.sh        # 5) Addons, ePHEM-core, 1) Pull latest
+                      # "Apply the new code now?": answer n, step 4 does it
+
+# 4. Update every module on every database (Odoo restarts at the end)
+bash scripts/update-modules.sh --auto
+```
+
+## After the update
+
+- `docker compose ps` lists `ephem-office` as healthy, with no published port.
+- `docker compose exec odoo wkhtmltopdf --version` prints
+  `0.12.6.1 (with patched qt)`: a printed report shows its header and footer.
+- `docker compose exec odoo python3 -c "import urllib.request; print(urllib.request.urlopen('http://office:2003/health', timeout=5).read())"`
+  prints `b'ok'`: Odoo reaches the converter.
+- `docker compose exec odoo soffice --version` now fails: LibreOffice is no
+  longer in the app container, by design.
+- The update log of `eoc_signals` carries one line `eoc_signals: outcome
+  repair, N kept Relevant (...)` naming the repaired signals. A line
+  `outcome repair left N signals ... for review` lists records the repair
+  did not touch: send that list to the maintainers.
+
+**Data leaving the server.** Unchanged: ePHEM AI sends the text and the
+pictures of the documents, links and EIOS articles it reads to the configured
+AI provider. LibreOffice now runs in its own container with no network at
+all, no database access and no files but the one being converted.
+
+## Servers without Docker (Odoo installed on the VM)
+
+```bash
+# New Python packages, in Odoo's environment
+sudo -u odoo /opt/odoo/venv/bin/pip install pypdfium2==5.14.0 pypdf==6.19.0
+
+# LibreOffice stays on the VM: without an office converter service, ePHEM AI
+# converts with it directly, under the same limits.
+
+# New code: pull the ePHEM-core clone listed in addons_path, then
+sudo systemctl stop odoo18
+sudo -u odoo /opt/odoo/venv/bin/python3 /opt/odoo/odoo18/odoo-bin \
+    -c /etc/odoo/odoo18.conf -d DATABASE -u all --stop-after-init
+sudo systemctl start odoo18
+```
+
+Repeat the update line for each database. Paths and the service name follow
+the VM deployment guide; adjust them if the server differs.
+
+## Rolling back
+
+Image: set `EPHEM_IMAGE_TAG=1.0.3` in `.env` and, because 1.0.3 has no office
+image of its own, `EPHEM_OFFICE_TAG=1.0.5` (manage.sh option 4 sets it by
+itself when the chosen release has none), then
+`docker compose pull && docker compose up -d`. Code: restore the backup from
+step 1 together with the previous ePHEM-core commit (`d7e9ebf87`).
+
+---
+
+# Previous update (September 2026: EIOS and ePHEM AI, image 1.0.3)
 
 This release changes the EIOS connector and ePHEM AI. It needs app image
 1.0.3, which adds LibreOffice (headless) for document conversion, and an update
