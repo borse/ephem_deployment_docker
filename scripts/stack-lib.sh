@@ -458,6 +458,32 @@ addons_module_dirs() {  # addons_module_dirs PARENT → one host path per line
     return 0
 }
 
+# The modules a routine update covers, one name per line, from every source
+# under PARENT. ePHEM-core (or the parent itself while it is the legacy
+# clone) contributes its eoc_*, ephem_* and cmp_* modules: its other folders
+# are not modules, and its OCA dependencies are listed by hand in
+# update-modules.sh where their order matters. Every other source (a
+# country's own repository, an OCA repository added from manage.sh →
+# Addons) contributes every module it holds, whatever its name. Safe to
+# hand to -u on any database: Odoo skips names that are not installed there.
+addons_update_modules() {  # addons_update_modules PARENT
+    local p="$1" src dir name
+    while IFS= read -r src; do
+        [ -n "$src" ] || continue
+        if [ "$src" = "$p" ] || [ "$(basename "$src")" = "$CORE_NAME" ]; then
+            set -- "$src"/eoc_*/ "$src"/ephem_*/ "$src"/cmp_*/
+        else
+            set -- "$src"/*/
+        fi
+        for dir in "$@"; do
+            [ -f "$dir/__manifest__.py" ] || continue
+            name=$(basename "$dir")
+            [[ "$name" =~ ^[A-Za-z0-9_]+$ ]] && echo "$name"
+        done
+    done < <(addons_module_dirs "$p")
+    return 0
+}
+
 # The value of the addons_path option inside the container. A parent with no
 # source yet (deploy key not granted) lists the mount itself, which exists.
 addons_path_value() {  # addons_path_value PARENT

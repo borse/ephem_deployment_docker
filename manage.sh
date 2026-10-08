@@ -2794,7 +2794,7 @@ menu_modules_local() {
     fi
     echo "  Database: $db"
     echo ""
-    echo "  1) Update every ePHEM module installed on $db (eoc_*, ephem_*, cmp_*)"
+    echo "  1) Update every module of $ADDONS_NAME/ installed on $db (ePHEM's eoc_*, ephem_*, cmp_*, and all of every other source)"
     echo "  2) Update specific modules"
     echo "  3) Install a module"
     echo "  b) Back"
@@ -2802,13 +2802,21 @@ menu_modules_local() {
     ask_choice "1-3"
     case "$CHOICE" in
         1)
+            # The modules on disk (stack-lib addons_update_modules: ePHEM's
+            # prefixed ones, everything of the other sources), kept to the
+            # ones this database has installed. Names are letters, digits and
+            # underscores only, so they go into the SQL as they are.
+            local names; names=$(addons_update_modules "$ADDONS_DIR" | sort -u | sed "s/.*/'&'/" | paste -sd, -)
+            if [ -z "$names" ]; then
+                echo -e "  ${RED}✗${NC} No module found under $ADDONS_NAME/."
+                return 1
+            fi
             MODS=$(compose exec -T db psql -U "$DB_USER" -d "$db" -t -A -c \
                 "SELECT string_agg(name, ',' ORDER BY name) FROM ir_module_module
-                  WHERE state = 'installed'
-                    AND (name LIKE 'eoc\_%' OR name LIKE 'ephem\_%' OR name LIKE 'cmp\_%');" \
+                  WHERE state = 'installed' AND name IN ($names);" \
                 </dev/null 2>/dev/null | tr -d '\r')
             if [ -z "$MODS" ]; then
-                echo -e "  ${RED}✗${NC} No ePHEM modules installed on '$db', or the database is not reachable."
+                echo -e "  ${RED}✗${NC} None of the modules of $ADDONS_NAME/ is installed on '$db', or the database is not reachable."
                 return 1
             fi
             n=$(printf '%s' "$MODS" | tr ',' '\n' | grep -c .)

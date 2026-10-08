@@ -188,24 +188,22 @@ MODULES=(
   "ephem_documents"
 )
 
-# ── Auto-include every eoc_* / ephem_* module in the addons folders ─────
-# The curated list above fixes the update order for the core chain; any
-# module matching these prefixes that is not already listed is appended,
-# from every source folder (ePHEM-core and whatever was added next to it).
-# New modules added to a repo are picked up automatically — no need to
-# edit this script. Safe against every database: Odoo's -u simply skips
-# module names that are not installed on that database.
-while IFS= read -r _src; do
-    [ -n "$_src" ] || continue
-    for _dir in "$_src"/eoc_*/ "$_src"/ephem_*/ "$_src"/cmp_*/; do
-        [ -f "$_dir/__manifest__.py" ] || continue
-        _mod=$(basename "$_dir")
-        _known=false
-        for _m in "${MODULES[@]}"; do [ "$_m" = "$_mod" ] && { _known=true; break; }; done
-        [ "$_known" = false ] && MODULES+=("$_mod")
-    done
-done < <(addons_module_dirs "$ADDONS_DIR")
-unset _src _dir _mod _known _m
+# ── Auto-include the rest ───────────────────────────────────────────
+# The curated list above fixes the update order for the core chain. Every
+# other module a routine update covers is appended once, as stack-lib's
+# addons_update_modules lists them: ePHEM-core's remaining eoc_*, ephem_*
+# and cmp_* modules, and EVERY module of every other source (a country's
+# own repository, an OCA repository), whatever its modules are named. New
+# modules are picked up automatically, no need to edit this script. Safe
+# against every database: Odoo's -u simply skips module names that are
+# not installed on that database.
+while IFS= read -r _mod; do
+    [ -n "$_mod" ] || continue
+    _known=false
+    for _m in "${MODULES[@]}"; do [ "$_m" = "$_mod" ] && { _known=true; break; }; done
+    [ "$_known" = false ] && MODULES+=("$_mod")
+done < <(addons_update_modules "$ADDONS_DIR")
+unset _mod _known _m
 
 # ── Get all databases ────────────────────────
 get_databases() { list_dbs; }
