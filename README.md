@@ -181,7 +181,7 @@ After choosing **1**, setup asks how people will reach ePHEM:
 
 | Choice | Address | What runs |
 |---|---|---|
-| **1) Directly on port 8069** | `http://SERVER_IP:8069` | Odoo only. No nginx, no domain, no SSL |
+| **1) Directly on a port** | `http://SERVER_IP:8069`, or the port you choose | Odoo only. No nginx, no domain, no SSL |
 | **2) nginx on ports 80/443** | `https://your.domain` or `http://SERVER_IP` | nginx in front of Odoo: domains, HTTPS, RPC blocking |
 
 The choice is saved as `SERVER_ACCESS` in `.env` (`direct` or `nginx`). To change
@@ -190,10 +190,17 @@ Nothing is lost when you switch: while Odoo is reached directly, nginx's config
 and certificates stay on disk, and choosing nginx again brings the domains and
 HTTPS back as they were. Databases are never touched.
 
+With direct access setup also asks for the port (8069 by default) and saves it
+as `DIRECT_PORT` in `.env`. To change it later, run `bash setup.sh` again, or
+set `DIRECT_PORT` in `.env` and run `docker compose up -d odoo`. The port
+inside the container stays 8069 whatever you choose: do not edit `xmlrpc_port`
+in `odoo.conf` for this, as the container's health check and the restart
+commands wait on 8069 inside the container and would never see Odoo come up.
+
 Direct access is plain HTTP, so passwords travel unencrypted. Use it on a closed
 network or VPN. Odoo then also answers `/xmlrpc` and `/jsonrpc` (nginx blocks
 them), and runs in threaded mode (`workers = 0`) so the live updates work on
-8069. The domain and SSL items in `bash manage.sh` need nginx and say so.
+that port. The domain and SSL items in `bash manage.sh` need nginx and say so.
 
 ### Configure Your Settings
 
@@ -244,7 +251,7 @@ Open your browser:
 - **With SSL:** `https://ephem.health.gov.xx`
 - **With domain, no SSL yet:** `http://ephem.health.gov.xx`
 - **Without domain:** `http://YOUR_SERVER_IP` (shown by the setup script)
-- **Direct, no nginx:** `http://YOUR_SERVER_IP:8069`
+- **Direct, no nginx:** `http://YOUR_SERVER_IP:8069` (or the port chosen at setup)
 
 Fill in the database creation form:
 

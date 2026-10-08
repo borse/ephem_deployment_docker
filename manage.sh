@@ -115,7 +115,9 @@ ask_choice() {  # ask_choice "1-4" ["b, x"]
 invalid_choice() { echo -e "  ${YELLOW}!${NC} Invalid choice."; }
 
 # Wait until Odoo actually accepts connections on 8069 inside the container:
-# the container is "running" seconds before the workers are ready.
+# the container is "running" seconds before the workers are ready. 8069 is
+# the container port, always; the port people use is DIRECT_PORT (.env) or
+# nginx. An xmlrpc_port changed in odoo.conf makes this wait run out.
 wait_for_odoo() {  # wait_for_odoo [SECONDS]
     local secs="${1:-90}" i=0
     printf "  Waiting for Odoo (%s) to accept requests" "$ODOO_SVC"
@@ -129,6 +131,13 @@ wait_for_odoo() {  # wait_for_odoo [SECONDS]
     done
     echo ""
     echo -e "  ${YELLOW}!${NC} Still not answering after ${secs}s: check its log."
+    local p; p=$(grep -E '^xmlrpc_port *=' "$ODOO_CONF" 2>/dev/null | head -1 | sed 's/.*= *//')
+    if [ -n "$p" ] && [ "$p" != 8069 ]; then
+        echo -e "  ${YELLOW}!${NC} $(basename "$ODOO_CONF") has xmlrpc_port = $p: Odoo is listening on $p inside the"
+        echo "     container, where everything expects 8069 (health check, this wait, the published"
+        echo "     port). Set it back to 8069; the port people use is DIRECT_PORT in .env"
+        echo "     (bash setup.sh asks for it), applied with: docker compose up -d $ODOO_SVC"
+    fi
     return 1
 }
 
@@ -744,7 +753,7 @@ menu_status() {
     echo ""
     echo -e "${BOLD}SSL certificate:${NC}"
     if [ "$(server_access)" = direct ]; then
-        echo "  none: Odoo is reached directly on port 8069, no nginx (SERVER_ACCESS=direct)"
+        echo "  none: Odoo is reached directly on port $(direct_port), no nginx (SERVER_ACCESS=direct)"
     elif ssl_is_configured; then
         certs_refresh
         local lin
@@ -1892,7 +1901,7 @@ menu_security() {
     local RPC; RPC=$(rpc_allow 2>/dev/null)
     if [ "$(server_access)" = direct ]; then
         # nginx is what blocks them; without it Odoo answers them itself.
-        echo -e "  ${YELLOW}!${NC} RPC endpoints (/xmlrpc, /jsonrpc) OPEN: Odoo is reached directly on 8069, no nginx to block them"
+        echo -e "  ${YELLOW}!${NC} RPC endpoints (/xmlrpc, /jsonrpc) OPEN: Odoo is reached directly on port $(direct_port), no nginx to block them"
         echo -e "  ${YELLOW}!${NC} plain HTTP, no SSL: passwords cross the network unencrypted (keep it on a closed network or VPN)"
     elif ! rpc_block_present; then
         echo -e "  ${YELLOW}!${NC} nginx config has no RPC block (predates the hardening): apply one via Advanced → 4"
@@ -3110,7 +3119,7 @@ menu_main_server() {
         esac
         echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
         [ "$(server_access)" = direct ] && \
-            echo "  Odoo on port 8069, no nginx: items 2, 3 and 10 need nginx (bash setup.sh to switch)"
+            echo "  Odoo on port $(direct_port), no nginx: items 2, 3 and 10 need nginx (bash setup.sh to switch or change the port)"
         echo "  1) Status & health"
         echo "  2) Manage domains — add / remove / certificates"
         echo "  3) SSL — set up HTTPS / show status"

@@ -148,12 +148,24 @@ ephem_mode_save() {  # ephem_mode_save MODE
 # setup.sh → Server deploy, switched by running setup.sh again):
 #   nginx   nginx on 80/443 in front of Odoo, domains and HTTPS (the default,
 #           and what every server installed before the choice existed runs)
-#   direct  Odoo itself on port 8069, plain HTTP, no nginx
+#   direct  Odoo itself on a port of the server (DIRECT_PORT, 8069 by
+#           default), plain HTTP, no nginx
 server_access() {
     case "$(env_get SERVER_ACCESS)" in
         direct) echo direct ;;
         *)      echo nginx ;;
     esac
+}
+
+# direct only: the port of the SERVER Odoo is published on (DIRECT_PORT in
+# .env, asked by setup.sh → Server deploy → direct; 8069 when unset). Inside
+# the container Odoo always listens on 8069: the image's health check,
+# wait_for_odoo and dev-logs.sh probe that port, so odoo.conf keeps
+# xmlrpc_port = 8069 and only the published side moves
+# ("DIRECT_PORT:8069" in docker-compose.override.yml).
+direct_port() {
+    local p; p=$(env_get DIRECT_PORT)
+    case "$p" in ''|*[!0-9]*) echo 8069 ;; *) echo "$p" ;; esac
 }
 
 # ── Compose ───────────────────────────────────
@@ -730,7 +742,7 @@ stack_use_single() {
     ODOO_CONF="$EPHEM_ROOT/odoo.conf"
     ODOO_DB=""; ODOO_VOL=odoo-data; ODOO_PORT=8069
     case "$EPHEM_MODE" in
-        server) ODOO_URL="" ;;
+        server) ODOO_URL=""; ODOO_PORT=$(direct_port) ;;
         *)      ODOO_URL="http://localhost:8069" ;;
     esac
 }
