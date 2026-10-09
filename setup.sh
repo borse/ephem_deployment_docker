@@ -1478,7 +1478,9 @@ elif [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" = direct ]; then
 services:
   odoo:
     ports:
-      - "${DIRECT_PORT:-8069}:8069"
+      # DIRECT_BIND_HOST in .env: 0.0.0.0 = every interface (the default),
+      # a single address (a VPN or LAN interface) or 127.0.0.1 to keep it local.
+      - "${DIRECT_BIND_HOST:-0.0.0.0}:${DIRECT_PORT:-8069}:8069"
 
   nginx:
     profiles:
