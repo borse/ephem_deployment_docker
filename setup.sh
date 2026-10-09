@@ -1564,6 +1564,17 @@ fi
 docker compose restart odoo
 nginx_follow_odoo "$ODOO_CID_BEFORE" odoo
 
+# nginx mode: bring the live config up to the current template and .env
+# (security headers, TLS settings, the catch-all server). An older
+# nginx/active.conf keeps serving until this runs. nginx_apply tests the new
+# file first and puts the old one back if nginx refuses it.
+if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" != "direct" ] && [ -f nginx/active.conf ]; then
+    echo "Applying the current nginx settings…"
+    if ! ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; rerender_active_conf ); then
+        echo -e "${YELLOW}!${NC} nginx kept its previous config. Retry from: bash manage.sh → Advanced → RPC endpoints (any change re-renders it)."
+    fi
+fi
+
 echo "Checking database connection..."
 sleep 5
 

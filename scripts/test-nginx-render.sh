@@ -154,6 +154,66 @@ out=$(nginx_apply) && bad "broken renamed config was accepted" \
 docker rm -f "$CT" >/dev/null 2>&1
 unset -f dc
 
+echo; echo "What a client sees of the rendered HTTPS config (real nginx, self-signed certificates)"
+printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' > "$T/.env"
+render_active_conf a.example.org b.example.org >/dev/null
+# A stand-in for Odoo on 127.0.0.1:8069 (the --add-host below): answers with a
+# session cookie and one the web client reads, so the cookie flags can be seen.
+cat > "$T/out/fake-odoo.conf" <<'FAKE'
+server {
+    listen 127.0.0.1:8069;
+    location / {
+        add_header Set-Cookie "session_id=abc; Path=/";
+        add_header Set-Cookie "cids=1; Path=/";
+        add_header X-Content-Type-Options nosniff;
+        return 200 "odoo";
+    }
+}
+FAKE
+TC="ephem-tls-test-$$"
+trap 'docker rm -f "$TC" >/dev/null 2>&1; rm -rf "$T"' EXIT
+if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
+       -v "$NGINX_ACTIVE:/etc/nginx/conf.d/default.conf:ro" \
+       -v "$T/out/fake-odoo.conf:/etc/nginx/conf.d/fake-odoo.conf:ro" \
+       -v "$T/le:/etc/letsencrypt:ro" nginx:alpine >/dev/null 2>&1; then
+    sleep 2
+    P="$(docker port "$TC" 443/tcp | head -1 | sed 's/.*://')"
+    A="--resolve a.example.org:$P:127.0.0.1"
+    hdrs="$(curl -sk -D - -o /dev/null $A "https://a.example.org:$P/web/login" 2>&1)"
+    for h in 'strict-transport-security' 'x-frame-options' 'x-content-type-options' 'referrer-policy' \
+             'content-security-policy: frame-ancestors' 'permissions-policy' 'x-permitted-cross-domain-policies'; do
+        printf '%s\n' "$hdrs" | grep -qi "^$h" && ok "header sent: $h" || bad "header missing: $h"
+    done
+    [ "$(printf '%s\n' "$hdrs" | grep -ci '^x-content-type-options')" -eq 1 ] \
+        && ok "x-content-type-options sent once (Odoo's own copy is dropped)" || bad "x-content-type-options sent $(printf '%s\n' "$hdrs" | grep -ci '^x-content-type-options') times"
+    printf '%s\n' "$hdrs" | grep -i '^server:' | grep -qE '^[Ss]erver: nginx\s*$' && ok "Server header carries no version" || bad "Server header: $(printf '%s\n' "$hdrs" | grep -i '^server:')"
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'secure' \
+        && printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'httponly' \
+        && ok "session_id cookie is Secure and HttpOnly" || bad "session_id cookie flags: $(printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id')"
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: cids' | grep -qi 'httponly' \
+        && bad "cids cookie was made HttpOnly (the web client reads it)" || ok "other cookies left alone (the web client reads them)"
+    # A Host that is not one of ours, on a connection made for a real domain.
+    # HTTP/2: nginx answers 421 itself. HTTP/1.1: the catch-all drops it (444).
+    # Either way Odoo never sees the forged name.
+    code="$(curl -sk -o /dev/null -w '%{http_code}' $A -H 'Host: evil.example.com' "https://a.example.org:$P/")"
+    [ "$code" = 421 ] && ok "forged Host header over HTTP/2: 421, not passed on" || bad "forged Host header over HTTP/2: HTTP $code, wanted 421"
+    code="$(curl -sk --http1.1 -o /dev/null -w '%{http_code}' $A -H 'Host: evil.example.com' "https://a.example.org:$P/")"
+    [ "$code" = 000 ] && ok "forged Host header over HTTP/1.1: connection dropped (444), not passed on" || bad "forged Host header over HTTP/1.1: HTTP $code, wanted no answer"
+    out="$(openssl s_client -connect "127.0.0.1:$P" -servername unknown.example.net </dev/null 2>&1)"
+    printf '%s\n' "$out" | grep -q 'BEGIN CERTIFICATE' && bad "unknown name was given a certificate" || ok "unknown server name: handshake refused, no certificate shown"
+    out="$(openssl s_client -connect "127.0.0.1:$P" -noservername </dev/null 2>&1)"
+    printf '%s\n' "$out" | grep -q 'BEGIN CERTIFICATE' && bad "a request by IP address was given a certificate" || ok "no server name (browsing by IP): handshake refused, no certificate shown"
+    out="$(openssl s_client -connect "127.0.0.1:$P" -servername a.example.org -tls1_2 -cipher 'ECDHE-RSA-AES256-GCM-SHA384' </dev/null 2>&1)"
+    printf '%s\n' "$out" | grep -q 'Cipher is ECDHE-RSA-AES256-GCM-SHA384' && ok "TLS 1.2 with ECDHE + AES-GCM: accepted" || bad "TLS 1.2 ECDHE-GCM was refused"
+    out="$(openssl s_client -connect "127.0.0.1:$P" -servername a.example.org -tls1_3 </dev/null 2>&1)"
+    printf '%s\n' "$out" | grep -q 'TLSv1.3' && ok "TLS 1.3: accepted" || bad "TLS 1.3 was refused"
+    out="$(openssl s_client -connect "127.0.0.1:$P" -servername a.example.org -tls1_2 -cipher 'AES256-SHA:AES256-GCM-SHA384@SECLEVEL=0' </dev/null 2>&1)"
+    printf '%s\n' "$out" | grep -q 'BEGIN CERTIFICATE' && bad "a CBC / non forward-secret suite was accepted" || ok "CBC and non forward-secret suites: refused"
+    docker rm -f "$TC" >/dev/null 2>&1
+else
+    bad "could not start the nginx container for the client checks"
+fi
+
 echo; echo "Template itself"
 out="$(nginx_t "$REPO/nginx/default.conf")" && ok "nginx/default.conf: nginx -t" || { bad "nginx/default.conf: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
 

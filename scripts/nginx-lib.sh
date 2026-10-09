@@ -384,15 +384,22 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/$lin/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$lin/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_tickets off;
+    # Protocols, ciphers and sessions are set once for every server above.
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header Permissions-Policy "geolocation=(self), camera=(self), microphone=(self), payment=(), usb=()" always;
+    add_header X-Permitted-Cross-Domain-Policies none always;
+    # Odoo sends this one itself; one copy only, the one above.
+    proxy_hide_header X-Content-Type-Options;
+
+    # The login session is never sent over plain HTTP and never readable by a
+    # script, whatever Odoo itself decides. Only this cookie: the web client
+    # reads the others (cids, tz, color_scheme).
+    proxy_cookie_flags session_id secure httponly;
 
     proxy_set_header X-Forwarded-Host  \$host;
     proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
@@ -400,6 +407,12 @@ server {
     proxy_set_header X-Real-IP         \$remote_addr;
 
     client_max_body_size $max;
+    # A client that stalls on the request headers, or stops sending a body,
+    # is dropped (slowloris). Odoo's own slow work is the proxy_* timeouts.
+    client_header_timeout 15s;
+    client_body_timeout 60s;
+    keepalive_timeout 30s;
+    reset_timedout_connection on;
     proxy_read_timeout 720s;
     proxy_connect_timeout 720s;
     proxy_send_timeout 720s;
@@ -422,8 +435,10 @@ server {
     # a hand edit here is lost on the next re-render.
 $(_render_rpc_block "$d")
 
-    # Slow down repeated login attempts (POST-only zone above)
-    location ~ ^/(web/login|web/session/authenticate) {
+    # Slow down repeated login attempts (POST-only zone above). Password
+    # reset and sign-up are the same kind of target (guessing, and mailing
+    # strangers); /web/login also covers /web/login/totp, the 2FA code.
+    location ~ ^/(web/login|web/session/authenticate|web/reset_password|web/signup) {
         limit_req zone=odoo_login burst=20 nodelay;
         proxy_redirect off;
         proxy_pass http://odoo-backend;
@@ -524,6 +539,20 @@ map \$http_upgrade \$connection_upgrade {
     ''      close;
 }
 
+# ── TLS, for every HTTPS server below ─────────
+# One place, in the http context, so the catch-all server and each domain
+# negotiate alike (a connection is set up before nginx knows which server
+# it is for). TLS 1.2 with forward secrecy and AEAD ciphers only; TLS 1.3
+# uses its own fixed suites. The client picks among them (Mozilla
+# "intermediate"), which is why prefer_server_ciphers is off.
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+ssl_prefer_server_ciphers off;
+ssl_ecdh_curve X25519:prime256v1:secp384r1;
+ssl_session_cache shared:SSL:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+
 # ── HTTP → HTTPS, and the ACME challenge ──────
 # default_server, so a domain being added answers the Let's Encrypt check
 # before it has an HTTPS block of its own.
@@ -539,6 +568,21 @@ server {
     location / {
         return 301 https://\$host\$request_uri;
     }
+}
+
+# ── Anything on 443 that is not one of our domains ──
+# Without this, the first domain below answers for every name and for the
+# bare IP address: it hands its certificate (and so the tenant's name) to
+# any scanner, and passes a forged Host header on to Odoo. A handshake for an
+# unknown name is refused outright; a request whose Host does not match
+# the name it connected with (the handshake already done for a real domain)
+# gets no answer at all.
+server {
+    listen 443 ssl default_server;
+    server_name _;
+    server_tokens off;
+    ssl_reject_handshake on;
+    return 444;
 }
 NGINXEOF
 
