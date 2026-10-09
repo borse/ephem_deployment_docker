@@ -84,13 +84,32 @@ timedatectl    # "NTP service: active" must appear
 - **Disable the database manager:** set `ODOO_LIST_DB=False` in `.env` and
   re-run `bash setup.sh` (server mode offers this automatically). Until
   then, `/web/database/manager` can create, drop and **download** databases
-  protected only by the master password.
+  protected only by the master password. `setup.sh` generates that password
+  at random on a new server and offers to replace a short one.
 - **Two-factor authentication** for every admin user: *Preferences →
   Account Security → Enable two-factor authentication*. Make it policy.
 - **Password policy:** install the `auth_password_policy` module and set a
   minimum length of 12+.
 - **Signup stays invitation-only:** *Settings → General Settings →
   Customer Account → "On invitation"*.
+
+## 5b. Docker on the host
+
+Docker itself is part of the attack surface, and `docker` group membership is
+root on the machine.
+
+- Put only administrators in the `docker` group.
+- Never mount `/var/run/docker.sock` into a container (nothing in this stack
+  does).
+- Enable `live-restore` and default `no-new-privileges` in
+  `/etc/docker/daemon.json`, then `sudo systemctl restart docker`:
+
+  ```json
+  { "live-restore": true, "no-new-privileges": true }
+  ```
+- Keep the host kernel and Docker patched (section 3). Containers share the
+  host kernel, so a kernel escape is the one thing no container setting
+  prevents.
 
 ## 6. Backups that survive the server
 
@@ -118,6 +137,17 @@ sudo ss -tlnp
 # The app's database role must not be a superuser (expect superuser=f)
 docker compose exec db psql -U odoo -d postgres -c \
   "SELECT rolname, rolsuper FROM pg_roles WHERE rolname = 'odoo';"
+
+# Nobody gets a certificate for a name that is not yours (expect a failed
+# handshake, no certificate printed), nor by IP address
+openssl s_client -connect YOUR.DOMAIN:443 -servername not-ours.example </dev/null 2>&1 | grep -c 'BEGIN CERTIFICATE'   # 0
+openssl s_client -connect YOUR.DOMAIN:443 -noservername </dev/null 2>&1 | grep -c 'BEGIN CERTIFICATE'                  # 0
+
+# The session cookie is Secure and HttpOnly (expect both words)
+curl -s -D - -o /dev/null https://YOUR.DOMAIN/web/login | grep -i '^set-cookie: session_id'
+
+# Everything this stack can verify about itself, in one place
+bash manage.sh        # 9) Security check
 
 # RPC endpoints blocked (expect 403, unless you opened them for this domain
 # or your address via manage.sh → 11 → 4), database manager throttled/disabled

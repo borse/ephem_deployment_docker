@@ -1,3 +1,108 @@
+# Updating an Existing Server (October 2026: network hardening)
+
+Code and configuration only: no new image, no data is touched, no module
+update. Allow about 10 minutes. Odoo is offline for about a minute while its
+container is recreated, and the database restarts once (short).
+
+What changes:
+
+1. **The office converter no longer shares a network with Odoo.** Odoo talks
+   to a small relay, the **office gate** (`ephem-office-gate`, the nginx image
+   you already have), and only the gate talks to the converter. A conversion
+   is one request Odoo opens; the converted file comes back on that same
+   connection. Before, a taken-over converter could reach Odoo's port
+   directly, past nginx and its throttles.
+2. **The containers are separated.** nginx shares a network with Odoo only
+   (`edge`), the database with Odoo only, certbot has its own (`acme`).
+3. **The database superuser can no longer log in over the network**
+   (`db-config/pg_hba.conf`), and it gets a password of its own
+   (`POSTGRES_ADMIN_PASSWORD`; before, it defaulted to the application's).
+4. **Secrets.** `.env` becomes owner-only, `backups/` closed to other users,
+   `odoo.conf` stores the Odoo master password as a hash, and `setup.sh`
+   offers to replace a short master password with a random one.
+5. **nginx.** A catch-all HTTPS server (connections by IP address or with an
+   unknown name get no certificate; a forged `Host` header never reaches
+   Odoo), TLS 1.2 limited to forward-secret AEAD ciphers, the session cookie
+   always `Secure` and `HttpOnly`, three more response headers, slow-client
+   timeouts, and the same login throttle on password reset and sign-up.
+6. **ePHEM AI** reads the converter's reply with a size cap (addon code, comes
+   with the next ePHEM-core pull).
+7. **GitHub's SSH host keys** are accepted only when they match GitHub's
+   published fingerprints.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+git pull                # new: office-gate/, db-config/, scripts/ssh-hostkeys-lib.sh
+
+# 1. Back up first (the database container restarts once)
+bash scripts/backup.sh
+
+# 2. Apply it. setup.sh generates the missing secrets, hashes the master
+#    password, tightens file permissions, recreates the containers on their new
+#    networks and re-renders nginx (tested first, rolled back if refused).
+bash setup.sh           # 1) Server deploy, then your usual access choice
+```
+
+When it asks to replace a short `ODOO_ADMIN_PASSWORD`, answer Y and write the
+new one down: it is printed once and kept in `.env`. Answering n keeps the old
+one and the check below keeps warning about it.
+
+## Verify afterwards
+
+```bash
+bash manage.sh          # 9) Security check: every line should show a tick
+docker compose ps       # ephem-office-gate and ephem-office healthy, neither with a published port
+```
+
+By hand, if you want to see it:
+
+```bash
+# Odoo reaches the converter through the gate (expect b'ok')
+docker compose exec odoo python3 -c "import urllib.request; print(urllib.request.urlopen('http://office-gate:2003/health', timeout=5).read())"
+# ...and the converter cannot find Odoo (expect: Name or service not known)
+docker compose exec office python3 -I -c "import socket; socket.gethostbyname('odoo')"
+# the database superuser is refused over the network (expect: pg_hba.conf rejects connection)
+docker compose exec odoo python3 -c "import os,psycopg2; psycopg2.connect(host='db', user='postgres', password=os.environ['PASSWORD'], dbname='postgres')"
+```
+
+Then upload an old `.doc`, `.ppt` or `.rtf` file to ePHEM AI: it converts as
+before.
+
+## Things to know
+
+- **A server installed before August 2026** (the app role is the cluster
+  superuser) still needs `scripts/migrate-db-cluster.sh`; `setup.sh` and the
+  security check say so. Everything above works without it, but the
+  superuser rule protects nothing there until the migration is done: on such
+  a cluster the application's own role is the superuser.
+- **Direct access servers** (`SERVER_ACCESS=direct`) pull the `nginx:alpine`
+  image once, for the gate. They can also set `DIRECT_BIND_HOST` in `.env` to
+  publish Odoo on one interface (a VPN or LAN address) instead of all of them.
+- **Several tenants on one server:** the converter now handles one conversion
+  at a time (`OFFICE_CONCURRENCY=1`), so two uploads never share its memory.
+  A second waits up to 60 seconds. Raise it in `.env` only if every user of
+  the server trusts the others.
+- **Browsing to `https://SERVER_IP`** (no name) now fails on purpose. Use the
+  domain; a monitor that checks by IP needs to send the domain as the server
+  name.
+
+## Rolling back
+
+```bash
+git log --oneline -8                      # find the commit before this update
+git checkout <that commit> -- docker-compose.yml
+docker compose up -d --remove-orphans     # removes the gate, puts Odoo back on one network
+```
+
+`.env` keeps its new secrets (they are valid for the old compose file too),
+and `odoo.conf` keeps its hashed master password, which Odoo accepts in any
+release. Run `bash setup.sh` afterwards to re-render nginx for the template
+you rolled back to.
+
+---
+
 # Updating an Existing Server (October 2026: two images, release 1.0.5)
 
 This release moves LibreOffice out of the app image into a second container,

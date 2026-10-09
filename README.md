@@ -1203,6 +1203,10 @@ ephem-deploy/
 │
 ├── db-init/
 │   └── 01-app-role.sh              ← Creates the unprivileged DB role on first start
+├── db-config/
+│   └── pg_hba.conf                 ← Database login rules: the superuser never logs in over the network
+├── office-gate/
+│   └── nginx.conf                  ← The relay between Odoo and the office converter (POST /convert and /health only)
 │
 ├── addons/                         ← the folder mounted into Odoo (read-only in server/demo, read-write in developer mode)
 │   ├── ePHEM-core/                 ← ePHEM modules (private repo, cloned by setup.sh)
@@ -1215,6 +1219,7 @@ ephem-deploy/
 │   ├── split-certs.sh              ← Split one shared certificate into one per domain
 │   ├── nginx-lib.sh                ← Shared nginx/certificate helpers used by the above
 │   ├── stack-lib.sh                ← Shared mode/instance helpers: EPHEM_MODE, compose files, filestore volumes
+│   ├── ssh-hostkeys-lib.sh         ← Trusts github.com's SSH host keys only when they match GitHub's published fingerprints
 │   ├── duplicate-db.sh             ← Copy a database (for training environments)
 │   ├── update-modules.sh           ← Update Odoo modules across databases after addon changes
 │   ├── dev-logs.sh                  ← Restart Odoo + follow colored logs (PyCharm run config)
@@ -1235,11 +1240,35 @@ ephem-deploy/
 
 **Built-in (server mode):**
 
-- PostgreSQL and Odoo are not exposed to the internet — only NGINX is
+- PostgreSQL and Odoo are not exposed to the internet, only NGINX is, and
+  the containers are kept apart on separate Docker networks, so one that is
+  taken over finds only what it needs:
+
+  ```
+  internet ─▶ nginx ──edge──▶ Odoo ──ephem-internal──▶ database
+                               │
+                               └─office-link─▶ office gate ─office-only─▶ office converter
+                                  (no route out)              (no route out)
+  ```
+
+  nginx shares a network with Odoo and nothing else; the database only with
+  Odoo; certbot has a network of its own; the office converter (LibreOffice,
+  the part that opens uploaded files) shares nothing with Odoo at all. Odoo
+  opens a connection to the gate for each conversion and the converted file
+  comes back on that same connection; the converter never opens one toward
+  Odoo, and has no network path to it.
 - The app's database role has no superuser rights — a compromised addon
   cannot read or drop other databases (automatic on new installs; on
   servers installed before August 2026, `setup.sh` detects it and points
-  to the one-time `scripts/migrate-db-cluster.sh` migration)
+  to the one-time `scripts/migrate-db-cluster.sh` migration). The cluster
+  superuser has a password of its own and cannot log in over the network at
+  all (`db-config/pg_hba.conf`)
+- Secrets: `.env` is readable by its owner only, `setup.sh` generates long
+  random passwords on request, and `odoo.conf` holds the Odoo master
+  password as a hash. `backups/` is closed to other users.
+- The HTTPS side answers only for your domains: a connection by IP address
+  or with an unknown name is refused before any certificate is shown, and a
+  forged `Host` header never reaches Odoo
 - `/xmlrpc` and `/jsonrpc` are blocked at NGINX — they are the main
   credential-stuffing target and the web client doesn't use them. When an
   integration or import has to call in, open them for that tenant only
@@ -1248,10 +1277,14 @@ ephem-deploy/
   `NGINX_RPC_ALLOW`), never in `nginx/active.conf`, which is regenerated
 - Login attempts are throttled (POST-only, so normal page loads are never
   limited), and the database manager page is rate-limited separately
-- All traffic encrypted with HTTPS (TLS 1.2+), security headers on every
-  response, SSL certificates renew automatically
-- Containers run on a private Docker network with dropped capabilities and
-  `no-new-privileges`
+- All traffic encrypted with HTTPS (TLS 1.2 and 1.3, forward secrecy and
+  AEAD ciphers only), security headers on every response, the login session
+  cookie is always `Secure` and `HttpOnly`, SSL certificates renew
+  automatically
+- Containers run with dropped capabilities and `no-new-privileges`; the
+  office converter and its gate also have a read only filesystem
+- `bash manage.sh` → 9) Security check shows every item above as it stands on
+  this server
 
 **Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode listens on every interface by default (`DEV_BIND_HOST=0.0.0.0` in `.env`) so phones and colleagues on the LAN can open it; set it to `127.0.0.1` for a local only setup.
 
