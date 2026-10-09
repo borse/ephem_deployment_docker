@@ -955,7 +955,7 @@ stack_leftovers() {
     else
         while IFS= read -r c; do
             case "$c" in
-                ""|ephem-app|ephem-db|ephem-nginx|ephem-certbot) continue ;;
+                ""|ephem-app|ephem-db|ephem-nginx|ephem-certbot|ephem-office|ephem-office-gate) continue ;;
             esac
             st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null) || st="?"
             echo "container $c ($st): from multi-instance mode (scripts/dev-instances.sh)."

@@ -250,6 +250,11 @@ services:
     profiles: [disabled]
   certbot:
     profiles: [disabled]
+  # The instances below reach the office converter directly (EPHEM_OFFICE_URL
+  # http://office:2003): the production gate between Odoo and the converter is
+  # not needed here.
+  office-gate:
+    profiles: [disabled]
 $services
 volumes:
 $volumes

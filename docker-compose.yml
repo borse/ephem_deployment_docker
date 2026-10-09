@@ -56,20 +56,23 @@ services:
       USER: ${POSTGRES_USER:-odoo}
       PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       # ePHEM AI converts old Office files through the office service below,
-      # never with a LibreOffice of its own.
-      EPHEM_OFFICE_URL: http://office:2003
+      # never with a LibreOffice of its own. Odoo talks to the converter only
+      # through office-gate, which is the one thing it shares a network with.
+      EPHEM_OFFICE_URL: http://office-gate:2003
     volumes:
       - odoo-data:/var/lib/odoo
       # addons/ is a parent folder: addons/ePHEM-core (the ePHEM clone) plus any
       # repository added later from manage.sh. odoo.conf lists each subfolder.
       - ./addons:/mnt/extra-addons:ro
-      - ./odoo.conf:/etc/odoo/odoo.conf
+      # Read only: Odoo has no reason to rewrite its own configuration.
+      - ./odoo.conf:/etc/odoo/odoo.conf:ro
       # Opt in local basemap files (bash manage.sh: Local basemap). Empty on a
       # server that never downloaded one, and the maps then use OpenFreeMap.
       - ./basemaps:/mnt/basemaps:ro
     networks:
-      - ephem-internal
-      - office-only
+      - ephem-internal   # the database
+      - edge             # nginx
+      - office-link      # office-gate (no route out, nothing else on it)
     # Runs as the non-root 'odoo' user baked into the image; needs no
     # capabilities at all.
     security_opt:
@@ -89,6 +92,14 @@ services:
   # internal) has no route out: it answers Odoo and reaches nothing else.
   # Same release tag as the app image; EPHEM_OFFICE_TAG only for a release
   # that has no office image of its own (before 1.0.5).
+  #
+  # Odoo does not share a network with it. A document parser that is taken
+  # over must not find the application next door: on a shared network it
+  # could talk to Odoo's port directly, past nginx and its throttles. So the
+  # office sits on office-only with office-gate, and Odoo reaches the gate on
+  # office-link. A conversion is one request that Odoo opens and the answer
+  # comes back on that same connection; the office never opens one of its own
+  # toward Odoo, and nothing in its network leads there.
   office:
     image: borrs/ephem-office:${EPHEM_OFFICE_TAG:-${EPHEM_IMAGE_TAG:-latest}}
     container_name: ephem-office
@@ -96,6 +107,11 @@ services:
     # Reaps a LibreOffice left behind when a conversion is killed.
     init: true
     read_only: true
+    environment:
+      # One conversion at a time: two at once would run as the same user in
+      # the same /tmp, and a crafted file could read the other one's document
+      # (another database's, on a multi-tenant server). The rest queue.
+      OFFICE_CONCURRENCY: ${OFFICE_CONCURRENCY:-1}
     volumes:
       # The only writable path: profiles, inputs and outputs of conversions.
       - type: tmpfs
@@ -109,7 +125,49 @@ services:
     cap_drop: [ALL]
     pids_limit: 256
     mem_limit: 2g
+    memswap_limit: 2g        # no swap: a document never reaches the disk
     logging: *default-logging
+    expose:
+      - "2003"
+
+  # ── Office gate (the only way to the converter) ─
+  # A small nginx between Odoo and the office: it passes POST /convert and
+  # GET /health and nothing else, caps the size and the number of requests in
+  # flight, and streams (no copy of a document is kept). It is also what keeps
+  # the two networks apart: Odoo is on office-link, the office on office-only,
+  # and this is the only container on both. Unprivileged, read only, no
+  # capabilities. Config: office-gate/nginx.conf.
+  office-gate:
+    image: nginx:alpine
+    container_name: ephem-office-gate
+    restart: unless-stopped
+    depends_on:
+      office:
+        condition: service_healthy
+    user: "101:101"
+    read_only: true
+    command: ["nginx", "-c", "/etc/ephem-office-gate/nginx.conf", "-g", "daemon off;"]
+    volumes:
+      - ./office-gate:/etc/ephem-office-gate:ro
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+    networks:
+      - office-link
+      - office-only
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 32
+    mem_limit: 128m
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2003/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     expose:
       - "2003"
 
@@ -130,8 +188,10 @@ services:
       # The same files, served at /ephem/basemap/ so map tiles never queue
       # behind Odoo requests (nginx/default.conf).
       - ./basemaps:/srv/basemaps:ro
+    # The container that faces the internet shares a network with Odoo and
+    # with nothing else: not with the database, not with the converter.
     networks:
-      - ephem-internal
+      - edge
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -151,8 +211,10 @@ services:
     volumes:
       - certbot-etc:/etc/letsencrypt
       - certbot-www:/var/www/certbot
+    # Reaches Let's Encrypt and nothing of ours (the challenge goes through
+    # the certbot-www volume, which nginx serves).
     networks:
-      - ephem-internal
+      - acme
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
@@ -165,9 +227,20 @@ volumes:
   certbot-www:
 
 networks:
+  # Odoo and the database (and, in the developer stack, every Odoo instance).
   ephem-internal:
     driver: bridge
-  # No gateway: containers on it reach each other and nothing else.
+  # nginx and Odoo: the only path from the internet to the application.
+  edge:
+    driver: bridge
+  # certbot alone: outbound to Let's Encrypt.
+  acme:
+    driver: bridge
+  # No gateway on the next two: containers on them reach each other and
+  # nothing else. Odoo + office-gate, then office-gate + the converter.
+  office-link:
+    driver: bridge
+    internal: true
   office-only:
     driver: bridge
     internal: true
