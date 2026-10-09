@@ -1929,6 +1929,69 @@ menu_security() {
         && echo -e "  ${GREEN}✓${NC} backup monitoring ping configured" \
         || echo -e "  ${YELLOW}!${NC} no backup monitoring — set BACKUP_PING_URL (README → Backups)"
     echo ""
+    echo -e "${BOLD}Secrets and files:${NC}"
+    local MODE_BITS PGP ADM MST KEYS
+    MODE_BITS=$(stat -c %a .env 2>/dev/null || stat -f %Lp .env 2>/dev/null)
+    case "$MODE_BITS" in
+        600|400) echo -e "  ${GREEN}✓${NC} .env readable by its owner only" ;;
+        *)       echo -e "  ${YELLOW}!${NC} .env is readable by other users on this machine (mode ${MODE_BITS:-?}): chmod 600 .env" ;;
+    esac
+    MODE_BITS=$(stat -c %a backups 2>/dev/null || stat -f %Lp backups 2>/dev/null)
+    case "${MODE_BITS:-700}" in
+        700|500) echo -e "  ${GREEN}✓${NC} backups/ closed to other users" ;;
+        *)       echo -e "  ${YELLOW}!${NC} backups/ is open to other users (mode $MODE_BITS): chmod 700 backups" ;;
+    esac
+    PGP=$(env_get POSTGRES_PASSWORD); ADM=$(env_get POSTGRES_ADMIN_PASSWORD); MST=$(env_get ODOO_ADMIN_PASSWORD)
+    if [ -z "$ADM" ] || [ "$ADM" = "$PGP" ]; then
+        echo -e "  ${YELLOW}!${NC} the database superuser shares the application's password: run bash setup.sh (it sets its own)"
+    else
+        echo -e "  ${GREEN}✓${NC} the database superuser has a password of its own"
+    fi
+    if [ "${#PGP}" -ge 16 ] && [ "${#MST}" -ge 12 ]; then
+        echo -e "  ${GREEN}✓${NC} database and Odoo master passwords are long (${#PGP} and ${#MST} characters)"
+    else
+        echo -e "  ${YELLOW}!${NC} a password is short (database ${#PGP}, Odoo master ${#MST}): bash setup.sh offers to replace it"
+    fi
+    if [ "$EPHEM_MODE" = server ]; then
+        if grep -Eq '^admin_passwd *= *\$pbkdf2-' odoo.conf 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} odoo.conf holds the master password as a hash"
+        else
+            echo -e "  ${YELLOW}!${NC} odoo.conf holds the master password in clear text: run bash setup.sh"
+        fi
+    fi
+    KEYS=$(grep -ls 'AGE-SECRET-KEY-' ./*-key.txt ./*.age.key 2>/dev/null | tr '\n' ' ')
+    [ -z "$KEYS" ] \
+        && echo -e "  ${GREEN}✓${NC} no backup decryption key on this server" \
+        || echo -e "  ${YELLOW}!${NC} a backup decryption key is on this server (${KEYS% }): move it to a vault, it opens every backup"
+    echo ""
+    echo -e "${BOLD}Isolation between the containers:${NC}"
+    if [ "$(svc_state db)" = running ]; then
+        local HBA
+        HBA=$(compose exec -T db psql -U postgres -d postgres -Atc \
+            "SELECT count(*) FROM pg_hba_file_rules WHERE type = 'host' AND 'postgres' = ANY(user_name) AND auth_method = 'reject'" \
+            </dev/null 2>/dev/null | tr -d '[:space:]')
+        if [ "${HBA:-0}" -ge 1 ] 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} the database superuser cannot log in over the network (pg_hba.conf)"
+        else
+            echo -e "  ${YELLOW}!${NC} the database accepts network logins of the superuser (or runs an older layout): docker compose up -d applies db-config/pg_hba.conf"
+        fi
+    fi
+    if [ "$EPHEM_MODE" != dev-multi ] && [ "$(svc_state office)" = running ]; then
+        if compose exec -T office python3 -I -c 'import socket; socket.gethostbyname("odoo")' </dev/null >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}!${NC} the office converter can reach Odoo directly (a compose file from before the gate): docker compose up -d"
+        else
+            echo -e "  ${GREEN}✓${NC} the office converter cannot reach Odoo, the database or nginx"
+        fi
+        [ "$(svc_state office-gate)" = running ] \
+            && echo -e "  ${GREEN}✓${NC} Odoo reaches the converter only through the office gate" \
+            || echo -e "  ${YELLOW}!${NC} the office gate is not running: ePHEM AI cannot read old Office files (docker compose up -d office-gate)"
+    fi
+    if [ "$(server_access)" != direct ] && grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
+        grep -q 'ssl_reject_handshake on' nginx/active.conf \
+            && echo -e "  ${GREEN}✓${NC} nginx answers no one who connects by IP address or with an unknown name" \
+            || echo -e "  ${YELLOW}!${NC} nginx has no catch-all HTTPS server (config from before the hardening): run bash setup.sh, or change any nginx setting here"
+    fi
+    echo ""
     echo "  Host-level checklist (SSH, firewall, OS updates): see HARDENING.md"
 }
 
