@@ -38,6 +38,10 @@
 
 EPHEM_ROOT="${EPHEM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
+# SSH host keys (known_host_add): github.com is trusted only by its published fingerprints.
+# shellcheck source=scripts/ssh-hostkeys-lib.sh
+source "$EPHEM_ROOT/scripts/ssh-hostkeys-lib.sh"
+
 # Only define colours the sourcing script has not defined already.
 RED="${RED:-\033[0;31m}"
 GREEN="${GREEN:-\033[0;32m}"
@@ -663,10 +667,8 @@ ensure_deploy_key() {  # ensure_deploy_key NAME HOST
         printf '\nHost %s\n    HostName %s\n    User git\n    IdentityFile %s\n    IdentitiesOnly yes\n' "$alias" "$2" "$key" >> "$cfg"
         chmod 600 "$cfg"
     fi
-    if ! grep -q "$2" "$HOME/.ssh/known_hosts" 2>/dev/null; then
-        ssh-keyscan "$2" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
-        chmod 644 "$HOME/.ssh/known_hosts" 2>/dev/null || true
-    fi
+    # Host keys: github.com only with GitHub's published fingerprints.
+    known_host_add "$2" || true
 }
 
 # The box operators copy into an email or into the repository settings.

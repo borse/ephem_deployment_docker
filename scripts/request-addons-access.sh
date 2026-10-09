@@ -82,10 +82,16 @@ else
 fi
 
 # ── Step 5: Trust GitHub host key ────────────
-if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-    chmod 644 ~/.ssh/known_hosts
-    echo -e "${GREEN}✓${NC} GitHub host key trusted"
+# Only keys with the fingerprints GitHub publishes (scripts/ssh-hostkeys-lib.sh).
+# shellcheck source=scripts/ssh-hostkeys-lib.sh
+source "$(cd "$(dirname "$0")" && pwd)/ssh-hostkeys-lib.sh"
+if ! ssh-keygen -F github.com -f ~/.ssh/known_hosts >/dev/null 2>&1; then
+    if known_host_add github.com; then
+        echo -e "${GREEN}✓${NC} GitHub host key trusted (matches GitHub's published fingerprints)"
+    else
+        echo -e "${RED}✗${NC} GitHub's host key could not be verified. Stopping: fix the network and run this again."
+        exit 1
+    fi
 fi
 
 # ── Step 6: Show the public key ──────────────

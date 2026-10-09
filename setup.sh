@@ -1174,6 +1174,16 @@ if [ "$MODE" != "developer" ]; then
         DEPLOY_KEY="$HOME/.ssh/ephem_addons_deploy"
         ADDONS_CLONED=false
 
+        # GitHub's SSH host keys, accepted only when they match GitHub's published
+        # fingerprints (scripts/ssh-hostkeys-lib.sh, loaded through stack-lib.sh).
+        # Before the key is tested or used, and on every pass: a run that stopped
+        # here once must not go on without it.
+        if ! known_host_add github.com; then
+            echo -e "${RED}✗${NC} GitHub's SSH host key could not be verified; not trusting it."
+            echo "     Check the network (and that nothing sits between this server and GitHub), then re-run: bash setup.sh"
+            exit 1
+        fi
+
         if [ -f "$DEPLOY_KEY" ]; then
             echo "  Testing deploy key access..."
             SSH_OUTPUT="$(ssh -T git@github-ephem-addons 2>&1 || true)"
@@ -1228,10 +1238,6 @@ SSHEOF
                     chmod 600 "$HOME/.ssh/config"
                 fi
 
-                if ! grep -q "github.com" ~/.ssh/known_hosts 2>/dev/null; then
-                    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-                    chmod 644 ~/.ssh/known_hosts
-                fi
                 echo -e "${GREEN}✓${NC} Deploy key generated"
             else
                 echo -e "${YELLOW}!${NC} Deploy key exists — waiting for ePHEM team to grant access"
