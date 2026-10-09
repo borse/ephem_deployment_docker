@@ -5,6 +5,11 @@ services:
     image: postgres:16-alpine
     container_name: ephem-db
     restart: unless-stopped
+    # pg_hba.conf from db-config/ (a folder mount, so an updated file is seen
+    # on the next restart): the cluster superuser can never log in over the
+    # network, whatever its password is. Maintenance runs through the unix
+    # socket inside the container (docker compose exec db psql -U postgres).
+    command: ["postgres", "-c", "hba_file=/etc/ephem-db/pg_hba.conf"]
     environment:
       # Cluster superuser — maintenance only, the app never connects as it.
       # The app uses the unprivileged role below, created by db-init/ on the
@@ -21,6 +26,9 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db-init:/docker-entrypoint-initdb.d:ro
+      - ./db-config:/etc/ephem-db:ro
+    # Only Odoo (and the dev instances) share this network: nginx and certbot,
+    # the containers that face the internet, cannot reach the database.
     networks:
       - ephem-internal
     security_opt:
