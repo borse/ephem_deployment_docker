@@ -244,7 +244,8 @@ snapshot_create() {  # snapshot_create DBNAME
         echo -e "  ${RED}✗${NC} The database container is not running — start it first ($(services_hint))."
         return 1
     fi
-    if ! mkdir -p "$DIR"; then
+    # 700: a snapshot holds a database dump and its filestore.
+    if ! mkdir -p -m 700 "$BACKUP_DIR" "$DIR"; then
         echo -e "  ${RED}✗${NC} Could not create $DIR"
         return 1
     fi

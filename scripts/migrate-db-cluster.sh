@@ -98,7 +98,8 @@ if [ "$CONFIRM" != "MIGRATE" ]; then
     exit 1
 fi
 
-mkdir -p "$MIGDIR"
+# Full dumps of every database: owner only.
+mkdir -p -m 700 "$MIGDIR"
 touch "$LOG"
 
 # ── 2. Dump every database, and record a table count to verify against ─

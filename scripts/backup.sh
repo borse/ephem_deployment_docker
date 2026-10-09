@@ -54,7 +54,13 @@ PING_URL="$(env_get BACKUP_PING_URL)"
 RETENTION_DAYS="$(env_get BACKUP_KEEP_DAYS)"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
 
+# Dumps and archives are health data: created readable by the owner only (the
+# plain staging folder, the dumps, the encrypted snapshot), and the default
+# backups/ folder is closed to everyone else. A BACKUP_DIR chosen with the
+# environment is somebody's own folder: its mode is left alone.
+umask 077
 mkdir -p "$BACKUP_DIR"
+[ "$BACKUP_DIR" = "$SCRIPT_DIR/backups" ] && chmod 700 "$BACKUP_DIR"
 echo "[$TIMESTAMP] Starting backup ($(ephem_mode_label)) into $BACKUP_DIR"
 
 if [ -n "$AGE_RECIPIENT" ]; then

@@ -74,6 +74,103 @@ open_url() {
     else return 1; fi
 }
 
+# ── Secrets ───────────────────────────────────
+# Random hex: no character that sed, psql, xargs or the odoo.conf parser could
+# mangle, so a generated password survives every hop from .env to the database.
+gen_secret() {  # gen_secret [BYTES]
+    openssl rand -hex "${1:-24}" 2>/dev/null \
+        || head -c "${1:-24}" /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
+env_val() { grep "^$1=" .env 2>/dev/null | cut -d'=' -f2- | xargs || true; }
+
+# Odoo's master password as the pbkdf2-sha512 hash Odoo verifies (passlib's
+# format), so odoo.conf, which the container user has to be able to read, does
+# not hold it in clear. The password goes in through the environment, never
+# the command line. Fails (and the caller keeps the plain value) without python3.
+hash_admin_password() {  # hash_admin_password PASSWORD
+    command -v python3 >/dev/null 2>&1 || return 1
+    ODOO_PW="$1" python3 -I - <<'PY'
+import base64, hashlib, os
+rounds = 600000
+salt = os.urandom(16)
+digest = hashlib.pbkdf2_hmac("sha512", os.environ["ODOO_PW"].encode(), salt, rounds)
+ab64 = lambda raw: base64.b64encode(raw).decode().rstrip("=").replace("+", ".")
+print("$pbkdf2-sha512$%d$%s$%s" % (rounds, ab64(salt), ab64(digest)))
+PY
+}
+
+# Does the role exist in the running db container? Over the unix socket inside
+# the container, which needs no password.
+pg_role_exists() {  # pg_role_exists AS_ROLE ROLE
+    [ "$(docker compose exec -T db psql -U "$1" -d postgres -Atc \
+        "SELECT 1 FROM pg_roles WHERE rolname = '${2//\'/}'" </dev/null 2>/dev/null | tr -d '[:space:]')" = 1 ]
+}
+
+# Give a role the password .env holds. The statement goes in on stdin: the
+# password is never on a command line (ps) and, quotes doubled, cannot end the
+# string it sits in.
+pg_set_password() {  # pg_set_password AS_ROLE ROLE PASSWORD
+    local as="$1" role="$2" pw="$3"
+    [[ "$role" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 1
+    pw="${pw//\'/\'\'}"
+    printf 'ALTER ROLE "%s" PASSWORD '"'"'%s'"'"';\n' "$role" "$pw" \
+        | docker compose exec -T db psql -U "$as" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1
+}
+
+# Server mode: .env still has CHANGE_ME. Offer to fill the three secrets with
+# random values (a person typing passwords into a production .env picks
+# shorter ones). Returns 1 when declined, and the manual instructions follow.
+offer_server_secrets() {
+    echo ""
+    echo -e "${YELLOW}!${NC} .env still has placeholder passwords."
+    read -p "  Generate strong random passwords for the database and Odoo now? [Y/n]: " GEN_SECRETS
+    [[ "${GEN_SECRETS:-Y}" =~ ^[Nn]$ ]] && return 1
+    local master; master=$(gen_secret 16)
+    set_env_key POSTGRES_PASSWORD "$(gen_secret)"
+    set_env_key POSTGRES_ADMIN_PASSWORD "$(gen_secret)"
+    set_env_key ODOO_ADMIN_PASSWORD "$master"
+    chmod 600 .env 2>/dev/null || true
+    echo -e "  ${GREEN}✓${NC} Passwords generated and saved in .env (readable by you only)"
+    echo ""
+    echo -e "  Odoo master password (needed once, to create the first database):"
+    echo -e "     ${BOLD}${GREEN}$master${NC}"
+    echo "  It is also in .env. The database passwords never need to be typed."
+    return 0
+}
+
+# Server mode: the secrets in .env must be separate and long enough to hold.
+server_secrets() {
+    local pg adm mst
+    if [ "$(env_val POSTGRES_USER)" = "postgres" ]; then
+        echo -e "${RED}✗${NC} POSTGRES_USER=postgres: the application would run as the database superuser."
+        echo "  Remove the line (the default, odoo, is an unprivileged role) and run setup again."
+        ERRORS=$((ERRORS + 1))
+    fi
+    pg=$(env_val POSTGRES_PASSWORD); adm=$(env_val POSTGRES_ADMIN_PASSWORD); mst=$(env_val ODOO_ADMIN_PASSWORD)
+    # The superuser has a password of its own. Sharing the application's would
+    # hand the superuser to anything that holds the application's credential.
+    if [ -z "$adm" ] || [ "$adm" = "$pg" ]; then
+        set_env_key POSTGRES_ADMIN_PASSWORD "$(gen_secret)"
+        echo -e "${GREEN}✓${NC} POSTGRES_ADMIN_PASSWORD set to its own random value (it used to be the application's password)"
+    fi
+    if [ -z "$mst" ]; then
+        mst=$(gen_secret 16)
+        set_env_key ODOO_ADMIN_PASSWORD "$mst"
+        echo -e "${GREEN}✓${NC} ODOO_ADMIN_PASSWORD was empty: generated ${BOLD}$mst${NC} (saved in .env)"
+    elif [ "${#mst}" -lt 12 ]; then
+        echo -e "${YELLOW}!${NC} ODOO_ADMIN_PASSWORD is only ${#mst} characters. It is the only protection of the database manager"
+        echo "   (create, drop and download every database) until that is switched off."
+        read -p "  Replace it with a strong random one now? [Y/n]: " ROTATE_MASTER
+        if [[ ! "${ROTATE_MASTER:-Y}" =~ ^[Nn]$ ]]; then
+            mst=$(gen_secret 16)
+            set_env_key ODOO_ADMIN_PASSWORD "$mst"
+            echo -e "  ${GREEN}✓${NC} New Odoo master password: ${BOLD}${GREEN}$mst${NC}  (saved in .env)"
+        fi
+    fi
+    [ "${#pg}" -ge 16 ] || echo -e "${YELLOW}!${NC} POSTGRES_PASSWORD is shorter than 16 characters; consider a longer one (openssl rand -hex 24)."
+}
+
 # Echoes the platform family: mac | windows | wsl | linux | unknown.
 detect_platform() {
     case "$(uname -s 2>/dev/null || echo unknown)" in
@@ -793,8 +890,7 @@ if [ "$MODE" = "developer" ]; then
         if [ "$DB_READY" -eq 1 ]; then
             ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- | xargs)
             if [ -n "$ENV_PASSWORD" ]; then
-                if docker compose exec -T db psql -U odoo -d postgres \
-                       -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" </dev/null >/dev/null 2>&1; then
+                if pg_set_password odoo odoo "$ENV_PASSWORD"; then
                     echo -e "${GREEN}✓${NC} Postgres 'odoo' password synced to current .env"
                 else
                     echo -e "${YELLOW}!${NC} Could not sync password automatically. If you still get"
@@ -1064,6 +1160,8 @@ if [ -f ".env" ]; then
                 sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
             fi
             echo -e "${GREEN}✓${NC} Passwords auto-set (fine for local use)"
+        elif offer_server_secrets; then
+            echo -e "${GREEN}✓${NC} Passwords have been set"
         else
             echo -e "${RED}✗${NC} .env still has CHANGE_ME passwords."
             echo ""
@@ -1120,6 +1218,8 @@ else
             sed -i '' "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
         fi
         echo -e "${GREEN}✓${NC} .env created with auto-generated passwords"
+    elif offer_server_secrets; then
+        echo -e "${GREEN}✓${NC} .env created with generated passwords"
     else
         echo ""
         echo -e "${YELLOW}  .env has been created from the template.${NC}"
@@ -1143,6 +1243,14 @@ else
         ERRORS=$((ERRORS + 1))
     fi
 fi
+
+# ── Server: separate, strong secrets; .env readable by its owner only ──
+if [ "$MODE" = "server" ] && [ -f .env ] && ! grep -q "CHANGE_ME" .env; then
+    server_secrets
+fi
+# The file holds the database passwords and the Odoo master password. Created
+# 0644 by the copy above and by every earlier version of this script.
+[ -f .env ] && chmod 600 .env 2>/dev/null || true
 
 # ── Nginx config ─────────────────────────────
 if [ ! -f "nginx/active.conf" ] && [ -f "nginx/default.conf" ]; then
@@ -1345,12 +1453,24 @@ workers = 0"
             PROXY_MODE=True
             WORKERS_LINES="workers = 4"
         fi
+        # The master password is written as a hash on a server: odoo.conf has to
+        # be readable by the container user, so it must not hold the password.
+        # The plain value stays in .env (mode 600), which the tools read.
+        ADMIN_CONF="$ADMIN_PASS"
+        if [ "$MODE" = "server" ]; then
+            if ADMIN_HASH=$(hash_admin_password "$ADMIN_PASS"); then
+                ADMIN_CONF="$ADMIN_HASH"
+            else
+                echo -e "${YELLOW}!${NC} python3 is not available to hash the Odoo master password: odoo.conf keeps it in clear text."
+            fi
+        fi
         cat > odoo.conf << ODOOEOF
 [options]
 ; Generated by setup.sh — do not edit manually.
 ; Change values in .env and re-run: bash setup.sh
 
-admin_passwd = $ADMIN_PASS
+; The Odoo master password, as a pbkdf2-sha512 hash on a server.
+admin_passwd = $ADMIN_CONF
 
 ; One entry per source folder inside addons/ ($CORE_NAME first). Regenerated by
 ; setup.sh and by manage.sh → Addons whenever a source is added, removed or renamed.
@@ -1385,7 +1505,9 @@ ODOOEOF
 fi
 
 mkdir -p backups
-echo -e "${GREEN}✓${NC} backups/ directory exists"
+# Dumps hold health data: nobody but the owner lists or reads them.
+chmod 700 backups 2>/dev/null || true
+echo -e "${GREEN}✓${NC} backups/ directory exists (owner only)"
 
 # ── Summary ───────────────────────────────────
 echo ""
@@ -1537,14 +1659,28 @@ done
 # currently-set password is wrong.
 ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- | xargs)
 if [ -n "$ENV_PASSWORD" ]; then
-    if docker compose exec -T db psql -U odoo -d postgres \
-           -c "ALTER USER odoo WITH PASSWORD '${ENV_PASSWORD}';" </dev/null >/dev/null 2>&1; then
+    if pg_set_password odoo odoo "$ENV_PASSWORD"; then
         echo -e "${GREEN}✓${NC} Postgres 'odoo' password synced to current .env"
     else
         echo -e "${YELLOW}!${NC} Could not sync password automatically."
     fi
 else
     echo -e "${YELLOW}!${NC} POSTGRES_PASSWORD is empty in .env — skipping password sync."
+fi
+
+# The cluster superuser keeps a password of its own (server mode). The database
+# refuses its network logins anyway (db-config/pg_hba.conf); this keeps the
+# password in the volume equal to .env after the secrets above changed. Only
+# where the role exists: a server from before August 2026 has none.
+if [ "$MODE" = "server" ]; then
+    ADMIN_PW=$(grep "^POSTGRES_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs || true)
+    if [ -n "$ADMIN_PW" ] && pg_role_exists postgres postgres; then
+        if pg_set_password postgres postgres "$ADMIN_PW"; then
+            echo -e "${GREEN}✓${NC} Postgres superuser password synced to POSTGRES_ADMIN_PASSWORD"
+        else
+            echo -e "${YELLOW}!${NC} Could not set the Postgres superuser password."
+        fi
+    fi
 fi
 
 # ── Least-privilege database role ────────────
