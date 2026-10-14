@@ -524,6 +524,24 @@ odoo_conf_get_key() {  # odoo_conf_get_key CONF KEY
     sed -n "s/^$2 *= *//p" "$1" 2>/dev/null | head -1
 }
 
+# Web workers for this machine, by Odoo's rule of thumb: (2 x CPUs) + 1,
+# fewer when memory is short (about 325 MB a worker, 2 GB kept for
+# Postgres, the office sidecar and the system), never under 2 and never
+# over 16 (Postgres allows 100 connections by default). Each worker
+# serves one request at a time, so a request waiting on a slow outside call
+# (an AI provider, a fetch) holds one for as long as it waits.
+suggest_workers() {
+    local cpus mem n byram
+    cpus=$(nproc 2>/dev/null || echo 2)
+    mem=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || echo 4096)
+    n=$((cpus * 2 + 1))
+    byram=$(((mem - 2048) / 325))
+    [ "$byram" -lt "$n" ] && n=$byram
+    [ "$n" -gt 16 ] && n=16
+    [ "$n" -lt 2 ] && n=2
+    echo "$n"
+}
+
 # Move the legacy clone one level down: PARENT → PARENT/$CORE_NAME. Returns
 # 0 when it moved, 1 when the layout was already right, 2 on failure (the
 # folder is put back). Prints what it did.

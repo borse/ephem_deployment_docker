@@ -2040,6 +2040,72 @@ nginx_setting_apply() {  # nginx_setting_apply KEY VALUE
     return 1
 }
 
+# ── Workers and scheduled jobs ────────────────
+# Odoo reads odoo.conf, never .env: like the dbfilter item, this writes both
+# (odoo.conf in place, it is a single-file mount) and restarts Odoo, so the
+# change applies now and survives the next setup run.
+menu_capacity() {
+    local W C SW
+    W=$(odoo_conf_get_key "$ODOO_CONF" workers)
+    C=$(odoo_conf_get_key "$ODOO_CONF" max_cron_threads)
+    SW=$(suggest_workers)
+    echo -e "${CYAN}${BOLD}Workers and scheduled jobs${NC}"
+    echo ""
+    echo "  In force (odoo.conf):  workers = ${W:-?}, max_cron_threads = ${C:-?}"
+    echo "  This machine:          $(nproc 2>/dev/null || echo '?') CPUs, $(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null || echo '?') MB memory"
+    if [ "$(server_access)" = direct ]; then
+        echo "  Suggested:             workers = 0 (direct access runs threaded), max_cron_threads = 2"
+    else
+        echo "  Suggested:             workers = $SW, max_cron_threads = 2"
+    fi
+    echo ""
+    echo "  A web worker serves one request at a time: when all of them are busy"
+    echo "  (slow reports, AI calls, big exports) every other click waits. A"
+    echo "  scheduled job thread runs one job at a time: with one, a long job holds"
+    echo "  back the mail queue, EIOS and the rest until it ends. Check the load"
+    echo "  first; it reads only, and says which of the two is short."
+    echo ""
+    echo "  1) Check the load now (scripts/load-check.sh, read only)"
+    echo "  2) Change the workers or the scheduled job threads (restarts Odoo)"
+    echo "  b) Back"
+    echo "  x) Exit"
+    ask_choice "1-2"
+    case "$CHOICE" in
+        1) bash "$SCRIPT_DIR/scripts/load-check.sh" ;;
+        2) capacity_change "$W" "$C" "$SW" ;;
+        b) return 0 ;;
+        *) invalid_choice ;;
+    esac
+}
+
+capacity_change() {  # capacity_change CURRENT_WORKERS CURRENT_CRON SUGGESTED_WORKERS
+    local NW NC
+    if [ "$(server_access)" = direct ]; then
+        echo "  Direct access runs threaded (workers = 0): the live updates need it."
+        NW=0
+    else
+        read -r -p "  Web workers [$3]: " NW
+        NW="${NW:-$3}"
+        if ! [[ "$NW" =~ ^[0-9]+$ ]] || [ "$NW" -lt 2 ] || [ "$NW" -gt 32 ]; then
+            echo -e "  ${RED}✗${NC} '$NW': give a whole number from 2 to 32."; return 1
+        fi
+    fi
+    read -r -p "  Scheduled job threads [2]: " NC
+    NC="${NC:-2}"
+    if ! [[ "$NC" =~ ^[0-9]+$ ]] || [ "$NC" -lt 1 ] || [ "$NC" -gt 8 ]; then
+        echo -e "  ${RED}✗${NC} '$NC': give a whole number from 1 to 8."; return 1
+    fi
+    if [ "$NW" = "${1:-}" ] && [ "$NC" = "${2:-}" ]; then
+        echo "  Nothing to change."; return 0
+    fi
+    [ "$(server_access)" = direct ] || set_env_key ODOO_WORKERS "$NW"
+    set_env_key ODOO_MAX_CRON_THREADS "$NC"
+    odoo_conf_set_key "$ODOO_CONF" workers "$NW"
+    odoo_conf_set_key "$ODOO_CONF" max_cron_threads "$NC"
+    echo -e "  ${GREEN}✓${NC} workers = $NW, max_cron_threads = $NC (odoo.conf and .env)"
+    svc_restart "$ODOO_SVC" && wait_for_odoo
+}
+
 # ── 13.1) Start / stop / restart services ─────
 menu_service() {
     echo -e "${CYAN}${BOLD}Services — start / stop / restart${NC}"
@@ -2642,9 +2708,10 @@ menu_advanced() {
     echo "  4) RPC endpoints (/xmlrpc, /jsonrpc): block / allow"
     echo "  5) Database routing — which database answers which domain (dbfilter)"
     echo "  6) Local basemap: the maps draw from a file on this server"
+    echo "  7) Workers and scheduled jobs: check the load, change them"
     echo "  b) Back"
     echo "  x) Exit"
-    ask_choice "1-6"
+    ask_choice "1-7"
     case "$CHOICE" in
         1) menu_service ;;
         2) menu_db_admin ;;
@@ -2652,6 +2719,7 @@ menu_advanced() {
         4) menu_rpc ;;
         5) menu_dbfilter ;;
         6) menu_basemap ;;
+        7) menu_capacity ;;
         b) return 0 ;;
         *) invalid_choice ;;
     esac
@@ -3202,7 +3270,7 @@ menu_main_server() {
         echo "  8) Follow Odoo logs (Ctrl-C to stop)"
         echo "  9) Security check"
         echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
-        echo " 11) Advanced — service, databases, database manager, RPC endpoints"
+        echo " 11) Advanced — service, databases, database manager, RPC endpoints, workers"
         echo "  x) Exit"
         echo ""
         ask_choice "1-11" "x"

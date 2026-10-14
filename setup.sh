@@ -1381,9 +1381,14 @@ if [ -f ".env" ]; then
     ADMIN_PASS=$(grep "^ODOO_ADMIN_PASSWORD=" .env | cut -d'=' -f2- | xargs)
     DB_FILTER=$(grep "^ODOO_DBFILTER=" .env | cut -d'=' -f2- | xargs)
     LIST_DB=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2- | xargs)
+    WORKERS_ENV=$(env_get ODOO_WORKERS)
+    CRON_THREADS=$(env_get ODOO_MAX_CRON_THREADS)
 
     ADMIN_PASS="${ADMIN_PASS:-}"
     LIST_DB="${LIST_DB:-True}"
+    # Whole numbers only: anything else in .env falls back to the default.
+    [[ "$WORKERS_ENV" =~ ^[0-9]+$ ]] || WORKERS_ENV=4
+    [[ "$CRON_THREADS" =~ ^[0-9]+$ ]] || CRON_THREADS=2
 
     if [ "$DEV_MODE" = "true" ]; then
         # Local dev: pin the master password to the memorable dev default —
@@ -1447,11 +1452,14 @@ ODOOEOF
             PROXY_MODE=False
             WORKERS_LINES="; Reached directly (SERVER_ACCESS=direct, published on port $DIRECT_PORT of the
 ; server): threaded mode, which also serves the live-update websocket on the
-; web port. Behind nginx this is workers = 4.
+; web port. Behind nginx this is ODOO_WORKERS from .env (4 when empty).
 workers = 0"
         else
             PROXY_MODE=True
-            WORKERS_LINES="workers = 4"
+            WORKERS_LINES="; Web workers: ODOO_WORKERS in .env (4 when empty). Each serves one request
+; at a time. bash manage.sh → Advanced → Workers and scheduled jobs suggests a
+; value for this machine and applies it without a setup run.
+workers = $WORKERS_ENV"
         fi
         # The master password is written as a hash on a server: odoo.conf has to
         # be readable by the container user, so it must not hold the password.
@@ -1479,7 +1487,10 @@ addons_path = $ADDONS_PATH_LINE
 proxy_mode = $PROXY_MODE
 
 $WORKERS_LINES
-max_cron_threads = 1
+; Scheduled jobs running at the same time (mail queue, EIOS, ePHEM AI answers,
+; reports): ODOO_MAX_CRON_THREADS in .env (2 when empty). With one, a long job
+; holds back every other one until it ends.
+max_cron_threads = $CRON_THREADS
 limit_memory_hard = 2684354560
 limit_memory_soft = 2147483648
 limit_request = 8192
