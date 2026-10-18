@@ -755,6 +755,10 @@ menu_status() {
     echo -e "${BOLD}SSL certificate:${NC}"
     if [ "$(server_access)" = direct ]; then
         echo "  none: Odoo is reached directly on port $(direct_port), no nginx (SERVER_ACCESS=direct)"
+    elif [ "$(server_access)" = proxy ]; then
+        echo "  on the proxy machine ($(env_get PROXY_FROM)), which serves https://$(env_get PROXY_DOMAIN)"
+        echo "  Its nginx config: $(proxy_conf_path "$(env_get PROXY_DOMAIN)")"
+        bash "$SCRIPT_DIR/scripts/proxy-firewall.sh" check || true
     elif ssl_is_configured; then
         certs_refresh
         local lin
@@ -1904,6 +1908,15 @@ menu_security() {
         # nginx is what blocks them; without it Odoo answers them itself.
         echo -e "  ${YELLOW}!${NC} RPC endpoints (/xmlrpc, /jsonrpc) OPEN: Odoo is reached directly on port $(direct_port), no nginx to block them"
         echo -e "  ${YELLOW}!${NC} plain HTTP, no SSL: passwords cross the network unencrypted (keep it on a closed network or VPN)"
+    elif [ "$(server_access)" = proxy ]; then
+        # Blocked or open on the proxy machine, by the config written here;
+        # this server cannot see what that nginx loaded.
+        local PF; PF="$(proxy_conf_path "$(env_get PROXY_DOMAIN)")"
+        echo -e "  ${CYAN}→${NC} RPC endpoints: $(rpc_domain_state "$(env_get PROXY_DOMAIN)"), in force once the proxy machine runs $PF"
+        [ -f "$PF" ] || echo -e "  ${YELLOW}!${NC} $PF is missing: bash setup.sh writes it (or change any setting in Advanced → RPC endpoints)"
+        grep -Eq '^proxy_mode *= *True' "$ODOO_CONF" 2>/dev/null \
+            && echo -e "  ${GREEN}✓${NC} Odoo reads the proxy's forwarded headers (proxy_mode): real client addresses, HTTPS links" \
+            || echo -e "  ${YELLOW}!${NC} proxy_mode is off in odoo.conf: Odoo sees every user as the proxy's address (bash setup.sh fixes it)"
     elif ! rpc_block_present; then
         echo -e "  ${YELLOW}!${NC} nginx config has no RPC block (predates the hardening): apply one via Advanced → 4"
     elif [ -z "$RPC" ]; then
@@ -1914,7 +1927,7 @@ menu_security() {
         echo -e "  ${GREEN}✓${NC} RPC endpoints open to $RPC only"
     fi
     local RPC_OPEN; RPC_OPEN=$(rpc_open_domains 2>/dev/null)
-    [ -n "$RPC_OPEN" ] && [ "$(server_access)" != direct ] && \
+    [ -n "$RPC_OPEN" ] && [ "$(server_access)" = nginx ] && \
         echo -e "  ${YELLOW}!${NC} RPC OPEN to everyone on: $RPC_OPEN (per domain, block again via Advanced → 4)"
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
@@ -1986,7 +1999,10 @@ menu_security() {
             && echo -e "  ${GREEN}✓${NC} Odoo reaches the converter only through the office gate" \
             || echo -e "  ${YELLOW}!${NC} the office gate is not running: ePHEM AI cannot read old Office files (docker compose up -d office-gate)"
     fi
-    if [ "$(server_access)" != direct ] && grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
+    if [ "$(server_access)" = proxy ]; then
+        bash "$SCRIPT_DIR/scripts/proxy-firewall.sh" check || true
+    fi
+    if [ "$(server_access)" = nginx ] && grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
         grep -q 'ssl_reject_handshake on' nginx/active.conf \
             && echo -e "  ${GREEN}✓${NC} nginx answers no one who connects by IP address or with an unknown name" \
             || echo -e "  ${YELLOW}!${NC} nginx has no catch-all HTTPS server (config from before the hardening): run bash setup.sh, or change any nginx setting here"
@@ -1997,19 +2013,24 @@ menu_security() {
 
 # ── 12) nginx upload size limit ───────────────
 menu_upload_limit() {
-    nginx_in_use || return 0
+    [ "$(server_access)" = proxy ] || nginx_in_use || return 0
     echo -e "${CYAN}${BOLD}Upload size limit (nginx)${NC}"
     echo ""
     echo "  Uploads bigger than this limit get '413 Request Entity Too Large' —"
     echo "  typically when restoring a large database through the database"
     echo "  manager. The limit applies to every upload (attachments too)."
     echo ""
-    if [ ! -f nginx/active.conf ]; then
+    local CUR
+    if [ "$(server_access)" = proxy ]; then
+        # Enforced by the nginx on the proxy machine, from the config file
+        # written here; .env is what that file is rendered from.
+        CUR=$(max_upload)
+    elif [ ! -f nginx/active.conf ]; then
         echo -e "  ${RED}✗${NC} nginx/active.conf not found — run setup.sh first."
         return 1
+    else
+        CUR=$(grep -m1 -o 'client_max_body_size[[:space:]]*[0-9]*[MmGg]' nginx/active.conf | awk '{print $NF}')
     fi
-    local CUR
-    CUR=$(grep -m1 -o 'client_max_body_size[[:space:]]*[0-9]*[MmGg]' nginx/active.conf | awk '{print $NF}')
     echo "  Current limit: ${CUR:-unknown}"
     read -r -p "  New limit (e.g. 300M or 2G), empty to cancel: " VAL
     [ -z "${VAL:-}" ] && { echo "  Cancelled."; return 0; }
@@ -2029,9 +2050,23 @@ menu_upload_limit() {
 # apply. nginx_apply rolls the config back if nginx rejects it; .env is
 # rolled back with it, so the two never disagree about what is in force.
 nginx_setting_apply() {  # nginx_setting_apply KEY VALUE
-    local KEY="$1" VAL="$2" PREV
+    local KEY="$1" VAL="$2" PREV PF
     PREV=$(env_get "$KEY")
     set_env_key "$KEY" "$VAL"
+    # proxy mode: no nginx here. The setting goes into the config file for
+    # the proxy machine, and is in force once that nginx loads it.
+    if [ "$(server_access)" = proxy ]; then
+        PF="$(proxy_conf_path "$(env_get PROXY_DOMAIN)")"
+        echo -e "  ${CYAN}→${NC} $KEY=$VAL  (.env), re-rendering $PF"
+        if render_proxy_conf; then
+            echo -e "  ${GREEN}✓${NC} Written. Copy it to the proxy machine and reload its nginx"
+            echo "     (sudo nginx -t && sudo systemctl reload nginx): only then is it in force."
+            return 0
+        fi
+        set_env_key "$KEY" "$PREV"
+        echo -e "  ${RED}✗${NC} Not written. .env is back to $KEY=$PREV."
+        return 1
+    fi
     echo -e "  ${CYAN}→${NC} $KEY=$VAL  (.env), re-rendering nginx/active.conf"
     rerender_active_conf && return 0
     set_env_key "$KEY" "$PREV"
@@ -2530,6 +2565,18 @@ offer_odoo_restart() {
 #   NGINX_RPC_OPEN    domains whose RPC is open to everyone (per tenant)
 #   NGINX_RPC_ALLOW   the server-wide default for every other domain
 menu_rpc() {
+    if [ "$(server_access)" = proxy ]; then
+        # One domain, served by the nginx on the proxy machine: the
+        # server-wide default is the whole choice, rendered into its config.
+        echo -e "${CYAN}${BOLD}RPC endpoints${NC} (/xmlrpc, /jsonrpc), on the proxy machine"
+        echo ""
+        echo "  $(env_get PROXY_DOMAIN): $(rpc_domain_state "$(env_get PROXY_DOMAIN)")"
+        echo "  Written into $(proxy_conf_path "$(env_get PROXY_DOMAIN)"), in force"
+        echo "  once that nginx loads it."
+        echo ""
+        menu_rpc_default
+        return 0
+    fi
     nginx_in_use || return 0
     echo -e "${CYAN}${BOLD}RPC endpoints${NC} (/xmlrpc, /jsonrpc)"
     echo ""
@@ -3260,6 +3307,8 @@ menu_main_server() {
         echo -e "${BOLD}ePHEM production menu${NC}   ($STATE)"
         [ "$(server_access)" = direct ] && \
             echo "  Odoo on port $(direct_port), no nginx: items 2, 3 and 10 need nginx (bash setup.sh to switch or change the port)"
+        [ "$(server_access)" = proxy ] && \
+            echo "  Behind the nginx on $(env_get PROXY_FROM): domains and SSL live there; 10 and Advanced → RPC rewrite its config file"
         echo "  1) Status & health"
         echo "  2) Manage domains — add / remove / certificates"
         echo "  3) SSL — set up HTTPS / show status"

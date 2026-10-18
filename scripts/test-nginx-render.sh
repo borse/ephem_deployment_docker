@@ -158,7 +158,9 @@ echo; echo "What a client sees of the rendered HTTPS config (real nginx, self-si
 printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' > "$T/.env"
 render_active_conf a.example.org b.example.org >/dev/null
 # A stand-in for Odoo on 127.0.0.1:8069 (the --add-host below): answers with a
-# session cookie and one the web client reads, so the cookie flags can be seen.
+# session cookie and one the web client reads, so the cookie flags can be seen,
+# and with the security headers Odoo sends itself: X-Frame-Options and a
+# frame-ancestors policy on pages, default-src 'none' on files, none on /api/.
 cat > "$T/out/fake-odoo.conf" <<'FAKE'
 server {
     listen 127.0.0.1:8069;
@@ -166,8 +168,17 @@ server {
         add_header Set-Cookie "session_id=abc; Path=/";
         add_header Set-Cookie "cids=1; Path=/";
         add_header X-Content-Type-Options nosniff;
+        add_header X-Frame-Options SAMEORIGIN;
+        add_header Content-Security-Policy "frame-ancestors 'self'";
         return 200 "odoo";
     }
+    location /web/content/ {
+        add_header X-Content-Type-Options nosniff;
+        add_header Content-Security-Policy "default-src 'none'";
+        return 200 "file";
+    }
+    location /api/ { return 200 "api"; }
+    location ~ /static/ { return 200 "static"; }
 }
 FAKE
 TC="ephem-tls-test-$$"
@@ -184,8 +195,24 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
              'content-security-policy: frame-ancestors' 'permissions-policy' 'x-permitted-cross-domain-policies'; do
         printf '%s\n' "$hdrs" | grep -qi "^$h" && ok "header sent: $h" || bad "header missing: $h"
     done
-    [ "$(printf '%s\n' "$hdrs" | grep -ci '^x-content-type-options')" -eq 1 ] \
-        && ok "x-content-type-options sent once (Odoo's own copy is dropped)" || bad "x-content-type-options sent $(printf '%s\n' "$hdrs" | grep -ci '^x-content-type-options') times"
+    for h in x-content-type-options x-frame-options content-security-policy; do
+        n="$(printf '%s\n' "$hdrs" | grep -ci "^$h")"
+        [ "$n" -eq 1 ] && ok "$h sent once on a page Odoo sends it on too" || bad "$h sent $n times on a page"
+    done
+    fh="$(curl -sk -D - -o /dev/null $A "https://a.example.org:$P/web/content/1" 2>&1 | grep -i '^content-security-policy' | tr -d '\r')"
+    [ "$fh" = "content-security-policy: default-src 'none'" ] \
+        && ok "a file keeps Odoo's own policy (default-src 'none'), alone" || bad "file CSP: $fh"
+    fh="$(curl -sk -D - -o /dev/null $A "https://a.example.org:$P/api/x" 2>&1)"
+    printf '%s\n' "$fh" | grep -qi "^content-security-policy: frame-ancestors 'self'" \
+        && ok "an answer without a policy of its own gets frame-ancestors" || bad "no CSP added where Odoo sent none"
+    # 100 requests as fast as one client can: the general zone (30 r/s, burst
+    # 60) refuses some on an ordinary URL, none on static files and bundles.
+    burst() { local i c=0; for i in $(seq 1 100); do [ "$(curl -sk -o /dev/null -w '%{http_code}' $A "https://a.example.org:$P$1")" = 429 ] && c=$((c + 1)); done; echo "$c"; }
+    n="$(burst /web/static/x.js)"; [ "$n" -eq 0 ] && ok "web static files: no 429 in a burst of 100" || bad "web static files: $n of 100 refused"
+    n="$(burst /eoc_base/static/src/x.png)"; [ "$n" -eq 0 ] && ok "module static files: no 429 in a burst of 100" || bad "module static files: $n of 100 refused"
+    n="$(burst /web/assets/1/abc/web.assets_web.min.js)"; [ "$n" -eq 0 ] && ok "asset bundles: no 429 in a burst of 100" || bad "asset bundles: $n of 100 refused"
+    sleep 3
+    n="$(burst /odoo/action-1)"; [ "$n" -gt 0 ] && ok "an ordinary URL is still rate limited ($n of 100 refused)" || bad "an ordinary URL is no longer rate limited"
     printf '%s\n' "$hdrs" | grep -i '^server:' | grep -qE '^[Ss]erver: nginx\s*$' && ok "Server header carries no version" || bad "Server header: $(printf '%s\n' "$hdrs" | grep -i '^server:')"
     printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'secure' \
         && printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'httponly' \
@@ -212,6 +239,115 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
     docker rm -f "$TC" >/dev/null 2>&1
 else
     bad "could not start the nginx container for the client checks"
+fi
+
+echo; echo "Proxy mode: the config for the nginx on another machine (render_proxy_conf)"
+PD=ephem.example.org
+mkdir -p "$T/le/live/$PD"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$PD" \
+    -keyout "$T/le/live/$PD/privkey.pem" -out "$T/le/live/$PD/fullchain.pem" >/dev/null 2>&1
+chmod -R a+rX "$T/le"
+PF="$(proxy_conf_path "$PD")"
+nginx_t_proxy() {  # nginx_t_proxy IMAGE FILE
+    docker run --rm -v "$2:/etc/nginx/conf.d/default.conf:ro" -v "$T/le:/etc/letsencrypt:ro" \
+        "$1" sh -c 'mkdir -p /var/cache/nginx/ephem_ephem_example_org; nginx -t' 2>&1
+}
+docker image inspect nginx:1.18-alpine >/dev/null 2>&1 || docker pull -q nginx:1.18-alpine >/dev/null 2>&1
+proxy_case() {  # proxy_case LABEL ALLOW OPEN WANT
+    local label="$1" f got
+    printf 'PROXY_DOMAIN=%s\nPROXY_BIND_HOST=10.20.30.40\nNGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=%s\nNGINX_RPC_OPEN=%s\n' "$PD" "$2" "$3" > "$T/.env"
+    rm -f "$PF"
+    if render_proxy_conf >/dev/null 2>&1 && [ -f "$PF" ]; then
+        f="$T/out/proxy_${label}.conf"; cp "$PF" "$f"
+        got="$(block_of "$f" "$PD")"
+        [ "$got" = "$4" ] && ok "proxy $label: RPC '$4'" || bad "proxy $label: RPC '$got', wanted '$4'"
+        grep -q 'client_max_body_size 250M;' "$f" && ok "proxy $label: upload limit kept" || bad "proxy $label: upload limit lost"
+        grep -q 'server 10.20.30.40:8069;' "$f" && grep -q 'server 10.20.30.40:8072;' "$f" \
+            && ok "proxy $label: upstreams on PROXY_BIND_HOST, 8069 and 8072" || bad "proxy $label: upstreams wrong"
+        grep -Eq 'odoo-backend|zone=ephem_limit|@[A-Z]+@' "$f" \
+            && bad "proxy $label: a name of this stack's nginx or a placeholder left in" || ok "proxy $label: only its own prefixed names"
+        out="$(nginx_t_proxy nginx:alpine "$f")" && ok "proxy $label: nginx -t (current)" || { bad "proxy $label: nginx -t (current)"; printf '%s\n' "$out" | sed 's/^/      /'; }
+        out="$(nginx_t_proxy nginx:1.18-alpine "$f")" && ok "proxy $label: nginx -t (1.18, Ubuntu 20.04)" || { bad "proxy $label: nginx -t (1.18)"; printf '%s\n' "$out" | sed 's/^/      /'; }
+    else bad "proxy $label: render failed"; fi
+}
+proxy_case blocked   ""                          ""    "deny all;"
+proxy_case allowlist "203.0.113.55 10.20.0.0/16" ""    "allow 203.0.113.55; allow 10.20.0.0/16; deny all;"
+proxy_case everyone  "all"                       ""    ""
+proxy_case open      ""                          "$PD" ""
+for bad_env in "PROXY_DOMAIN=" "PROXY_DOMAIN=not_a_domain" "PROXY_BIND_HOST=" "PROXY_BIND_HOST=0.0.0.0" "PROXY_BIND_HOST=10.0.0.1;evil" "PROXY_BIND_HOST=10.0.0.0/8"; do
+    # the other key valid, this one broken
+    key="${bad_env%%=*}"
+    { [ "$key" = PROXY_DOMAIN ] || echo "PROXY_DOMAIN=$PD"
+      [ "$key" = PROXY_BIND_HOST ] || echo "PROXY_BIND_HOST=10.20.30.40"
+      echo "$bad_env"; } > "$T/.env"
+    rm -f "$PF"
+    render_proxy_conf >/dev/null 2>&1 && bad "proxy refuses $bad_env: rendered anyway" \
+        || { [ -f "$PF" ] && bad "proxy refuses $bad_env: but wrote a file" || ok "proxy refuses $bad_env, writes nothing"; }
+done
+
+echo; echo "What a client and Odoo see through the proxy config (real nginx)"
+printf 'PROXY_DOMAIN=%s\nPROXY_BIND_HOST=127.0.0.1\nNGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' "$PD" > "$T/.env"
+render_proxy_conf >/dev/null
+# Odoo stand-in on 127.0.0.1:8069 and :8072. /echo shows what reached Odoo.
+cat > "$T/out/fake-odoo-proxy.conf" <<'FAKE'
+server {
+    listen 127.0.0.1:8069;
+    location / {
+        add_header Set-Cookie "session_id=abc; Path=/; HttpOnly";
+        add_header Set-Cookie "cids=1; Path=/";
+        add_header X-Frame-Options SAMEORIGIN;
+        add_header Content-Security-Policy "frame-ancestors 'self'";
+        return 200 "odoo";
+    }
+    location /echo { add_header X-Seen "$http_x_forwarded_host|$http_x_forwarded_proto|$http_x_forwarded_for|$host"; return 200 "echo"; }
+    location ~ /static/ { return 200 "static"; }
+    location /web/image/ { return 200 "image"; }
+}
+server {
+    listen 127.0.0.1:8072;
+    location /websocket { return 200 "gevent"; }
+}
+FAKE
+PC="ephem-proxy-test-$$"
+trap 'docker rm -f "$PC" >/dev/null 2>&1; rm -rf "$T"' EXIT
+if docker run -d --name "$PC" -p 127.0.0.1::443 \
+       -v "$PF:/etc/nginx/conf.d/default.conf:ro" \
+       -v "$T/out/fake-odoo-proxy.conf:/etc/nginx/conf.d/fake-odoo.conf:ro" \
+       -v "$T/le:/etc/letsencrypt:ro" nginx:alpine \
+       sh -c 'mkdir -p /var/cache/nginx/ephem_ephem_example_org && chown nginx /var/cache/nginx/ephem_ephem_example_org && exec nginx -g "daemon off;"' >/dev/null 2>&1; then
+    sleep 2
+    P="$(docker port "$PC" 443/tcp | head -1 | sed 's/.*://')"
+    A="--resolve $PD:$P:127.0.0.1"; B="https://$PD:$P"
+    code() { curl -sk -o /dev/null -w '%{http_code}' $A "$@"; }
+    hdrs="$(curl -sk -D - -o /dev/null $A "$B/web/login")"
+    for h in strict-transport-security x-frame-options x-content-type-options referrer-policy content-security-policy permissions-policy; do
+        n="$(printf '%s\n' "$hdrs" | grep -ci "^$h")"
+        [ "$n" -eq 1 ] && ok "proxy: $h sent once" || bad "proxy: $h sent $n times"
+    done
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'secure' && ok "proxy: session_id cookie made Secure" || bad "proxy: session_id cookie not Secure"
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: cids' | grep -qi 'httponly' && bad "proxy: cids made HttpOnly" || ok "proxy: cids stays readable by the web client"
+    [ "$(code "$B/xmlrpc/2/common")" = 403 ] && ok "proxy: /xmlrpc refused (403)" || bad "proxy: /xmlrpc answered $(code "$B/xmlrpc/2/common")"
+    [ "$(code "$B/web/database/manager")" = 403 ] && ok "proxy: database manager refused (403)" || bad "proxy: database manager answered"
+    [ "$(code "$B/web/database/x/static/y")" = 403 ] && ok "proxy: no static location takes a database manager URL" || bad "proxy: /web/database/x/static/y got through"
+    [ "$(code "$B/website/info")" = 404 ] && ok "proxy: /website/info hidden (404)" || bad "proxy: /website/info answered"
+    [ "$(curl -sk $A "$B/websocket")" = gevent ] && ok "proxy: /websocket goes to port 8072" || bad "proxy: /websocket not routed to 8072"
+    seen="$(curl -sk -D - -o /dev/null $A -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Forwarded-Host: evil.example.com' "$B/echo" | grep -i '^x-seen' | tr -d '\r' | cut -d' ' -f2-)"
+    case "$seen" in
+        "$PD|https|"*"|$PD") [[ "$seen" != *6.6.6.6* ]] \
+            && ok "proxy: Odoo gets the domain, https and the real client address only ($seen)" \
+            || bad "proxy: a forged X-Forwarded-For reached Odoo ($seen)" ;;
+        *) bad "proxy: Odoo saw '$seen'" ;;
+    esac
+    hit() { docker exec "$PC" sh -c "grep -c '\"GET $1 .*ucs=HIT' /var/log/nginx/$PD.access.log" 2>/dev/null || true; }
+    code "$B/eoc_base/static/x.png" >/dev/null; code "$B/eoc_base/static/x.png" >/dev/null
+    [ "$(hit /eoc_base/static/x.png)" -ge 1 ] && ok "proxy: module static file served from the cache the second time" || bad "proxy: static file never cached"
+    code "$B/web/image/res.partner/1/avatar_128" >/dev/null; code "$B/web/image/res.partner/1/avatar_128" >/dev/null
+    [ "$(hit /web/image/res.partner/1/avatar_128)" -eq 0 ] && ok "proxy: /web/image never cached" || bad "proxy: /web/image came from the cache"
+    n=0; for i in $(seq 1 25); do [ "$(code -X POST -d 'login=x' "$B/web/login")" = 429 ] && n=$((n + 1)); done
+    [ "$n" -ge 1 ] && ok "proxy: login POSTs throttled ($n of 25 refused)" || bad "proxy: login POSTs not throttled"
+    docker rm -f "$PC" >/dev/null 2>&1
+else
+    bad "could not start the nginx container for the proxy checks"
 fi
 
 echo; echo "Template itself"

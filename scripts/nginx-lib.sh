@@ -42,16 +42,30 @@ NC="${NC:-\033[0m}"
 dc() { docker compose -f "$EPHEM_ROOT/docker-compose.yml" "$@"; }
 
 # Domains, certificates and the nginx config mean nothing on a server where
-# Odoo is reached directly on 8069 (SERVER_ACCESS=direct in .env): nginx is
-# not running there, and starting it would take ports 80 and 443. A script
-# that works on nginx calls this first and stops when it fails.
+# nginx does not run: Odoo reached directly on 8069 (SERVER_ACCESS=direct in
+# .env), or behind an nginx on another machine (SERVER_ACCESS=proxy), where
+# the domain and its certificate live. Starting nginx here would take ports
+# 80 and 443. A script that works on nginx calls this first and stops when it
+# fails.
 nginx_in_use() {
-    [ "$(grep '^SERVER_ACCESS=' "$EPHEM_ROOT/.env" 2>/dev/null | cut -d= -f2- | xargs)" != direct ] && return 0
-    echo -e "\033[0;31m✗\033[0m This server runs without nginx: Odoo is reached directly on port 8069"
-    echo "  (SERVER_ACCESS=direct in .env). Domains and SSL need nginx. To switch:"
-    echo "    bash setup.sh   → 1) Server deploy → 2) nginx on ports 80/443"
-    return 1
+    case "$(_env_val SERVER_ACCESS)" in
+        direct)
+            echo -e "\033[0;31m✗\033[0m This server runs without nginx: Odoo is reached directly on port 8069"
+            echo "  (SERVER_ACCESS=direct in .env). Domains and SSL need nginx. To switch:"
+            echo "    bash setup.sh   → 1) Server deploy → 2) nginx on ports 80/443"
+            return 1 ;;
+        proxy)
+            echo -e "\033[0;31m✗\033[0m This server sits behind an nginx on another machine (SERVER_ACCESS=proxy"
+            echo "  in .env): the domain and its certificate live there. The config that nginx"
+            echo "  needs is $(proxy_conf_path "$(_env_val PROXY_DOMAIN)")."
+            return 1 ;;
+    esac
+    return 0
 }
+
+# One .env value. `|| true`: a missing key must give "", not stop a set -e
+# script (grep exits 1 on no match).
+_env_val() { grep "^$1=" "$EPHEM_ROOT/.env" 2>/dev/null | cut -d'=' -f2- | xargs || true; }
 
 # ── Certificates ──────────────────────────────
 #
@@ -321,15 +335,16 @@ rpc_block_present() {
 }
 
 # The location block itself, indented for a server { } body. The single
-# source for the HTTPS renderer (one call per domain) and the HTTP-only
-# template (no domain: the server-wide default alone).
-_render_rpc_block() {  # _render_rpc_block [DOMAIN]
-    local d="${1:-}" allow a
+# source for the HTTPS renderer (one call per domain), the HTTP-only template
+# (no domain: the server-wide default alone) and the proxy mode config, whose
+# upstream and rate limit zone carry names of their own.
+_render_rpc_block() {  # _render_rpc_block [DOMAIN [UPSTREAM [ZONE]]]
+    local d="${1:-}" up="${2:-odoo-backend}" zone="${3:-ephem_limit}" allow a
     echo '    location ~ ^/(xmlrpc|jsonrpc) {'
     if [ -n "$d" ] && rpc_domain_open "$d"; then
         echo "        # $d is listed in NGINX_RPC_OPEN (.env): every address may call in"
-        echo '        limit_req zone=ephem_limit burst=60 nodelay;'
-        echo '        proxy_pass http://odoo-backend;'
+        echo "        limit_req zone=$zone burst=60 nodelay;"
+        echo "        proxy_pass http://$up;"
         echo '    }'
         return 0
     fi
@@ -341,16 +356,16 @@ _render_rpc_block() {  # _render_rpc_block [DOMAIN]
             ;;
         all)
             echo '        # NGINX_RPC_ALLOW=all in .env: every address may call in'
-            echo '        limit_req zone=ephem_limit burst=60 nodelay;'
+            echo "        limit_req zone=$zone burst=60 nodelay;"
             ;;
         *)
             echo '        # NGINX_RPC_ALLOW in .env: only these addresses may call in'
             for a in $allow; do echo "        allow $a;"; done
             echo '        deny all;'
-            echo '        limit_req zone=ephem_limit burst=60 nodelay;'
+            echo "        limit_req zone=$zone burst=60 nodelay;"
             ;;
     esac
-    echo '        proxy_pass http://odoo-backend;'
+    echo "        proxy_pass http://$up;"
     echo '    }'
 }
 
@@ -390,11 +405,13 @@ server {
     add_header X-Frame-Options SAMEORIGIN always;
     add_header X-Content-Type-Options nosniff always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
-    add_header Content-Security-Policy "frame-ancestors 'self'" always;
+    add_header Content-Security-Policy \$ephem_csp always;
     add_header Permissions-Policy "geolocation=(self), camera=(self), microphone=(self), payment=(), usb=()" always;
     add_header X-Permitted-Cross-Domain-Policies none always;
-    # Odoo sends this one itself; one copy only, the one above.
+    # Odoo sends these two itself on some answers, with the same values; one
+    # copy only, the one above, so no scanner reports a duplicate header.
     proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header X-Frame-Options;
 
     # The login session is never sent over plain HTTP and never readable by a
     # script, whatever Odoo itself decides. Only this cookie: the web client
@@ -414,7 +431,9 @@ server {
     keepalive_timeout 30s;
     reset_timedout_connection on;
     proxy_read_timeout 720s;
-    proxy_connect_timeout 720s;
+    # Odoo is next door: a connection that is not made in seconds will not
+    # be made (nginx stops at 75 s whatever is asked), so fail fast.
+    proxy_connect_timeout 10s;
     proxy_send_timeout 720s;
 
     location /websocket {
@@ -444,7 +463,8 @@ $(_render_rpc_block "$d")
         proxy_pass http://odoo-backend;
     }
 
-    location /web/database/ {
+    # ^~ so no regex location below can take a URL under it.
+    location ^~ /web/database/ {
         proxy_redirect off;
         proxy_pass http://odoo-backend;
         limit_req zone=ephem_db_mgr burst=10 nodelay;
@@ -456,11 +476,16 @@ $(_render_rpc_block "$d")
         limit_req zone=ephem_limit burst=60 nodelay;
     }
 
-    # \`expires\` (browser caching) does the work here. Odoo fingerprints its
-    # asset URLs, so a shared proxy cache would add nothing but staleness.
-    location ~* /web/static/ {
-        proxy_buffering on;
-        expires 864000;
+    # Asset bundles and every module's static files (/<module>/static/...):
+    # the same for every visitor. The browser keeps them as long as Odoo says
+    # (a year for the bundles, whose URL changes with their content, a week
+    # for the rest). They stay out of the general rate limit, so the burst of
+    # files of a first visit never meets a 429 when an office shares one
+    # address.
+    location ^~ /web/assets/ {
+        proxy_pass http://odoo-backend;
+    }
+    location ~ ^/[^/]+/static/ {
         proxy_pass http://odoo-backend;
     }
 
@@ -537,6 +562,16 @@ upstream odoo-chat {
 map \$http_upgrade \$connection_upgrade {
     default upgrade;
     ''      close;
+}
+
+# Odoo sends its own Content-Security-Policy on pages (frame-ancestors) and on
+# files (default-src 'none', which stops an uploaded HTML or SVG file from
+# running scripts). Ours goes only on answers that carry none, so there is one
+# policy per answer and Odoo's file policy is never replaced. An empty value
+# adds no header.
+map \$upstream_http_content_security_policy \$ephem_csp {
+    ""      "frame-ancestors 'self'";
+    default "";
 }
 
 # ── TLS, for every HTTPS server below ─────────
@@ -679,6 +714,340 @@ rerender_active_conf() {
         render_http_only_conf || return 1
     fi
     nginx_apply
+}
+
+# ── Proxy mode: the config for the nginx on the other machine ──
+#
+# SERVER_ACCESS=proxy: this server runs Odoo only, and an nginx on another
+# machine (often a ministry's edge proxy, run by someone else) holds the
+# domain and its certificate. That nginx is not ours to change, so this
+# writes the config it needs into nginx/proxy/DOMAIN.conf, to copy there.
+# It carries the protections of the nginx this stack runs itself, from the
+# same .env settings (NGINX_MAX_UPLOAD, NGINX_RPC_ALLOW, NGINX_RPC_OPEN), and
+# closes the database manager outright: databases are managed from manage.sh
+# on this server.
+#
+# What differs from active.conf, and why:
+#   names    that nginx serves other sites too, so every zone, upstream, map,
+#            cache and log format carries a prefix made from the domain
+#   headers  Host is the domain, and X-Forwarded-For is set to the client's
+#            address rather than appended to: that nginx is the edge, nothing
+#            a client writes into the header counts
+#   cookies  Secure is added with proxy_cookie_path, which every nginx
+#            version knows (proxy_cookie_flags needs 1.19.3, and Ubuntu 20.04
+#            ships 1.18)
+#   cache    the asset bundles and module static files are kept at the proxy:
+#            across a network, every file of a first visit would otherwise
+#            cross to Odoo again. Never /web/image or /web/content, which
+#            answer under access rules
+#   http2    the `listen ... http2` form, which every version still in use
+#            accepts (1.25.1 and later only warn)
+#
+# PROXY_DOMAIN names the site and PROXY_BIND_HOST is the address of this
+# server where Odoo answers it (8069 web, 8072 live updates), both in .env.
+
+proxy_conf_path() {  # proxy_conf_path DOMAIN
+    printf '%s/nginx/proxy/%s.conf' "$EPHEM_ROOT" "$1"
+}
+
+valid_ipv4() {  # a single IPv4 address, no prefix
+    local o='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    printf '%s' "$1" | grep -Eq "^($o\.){3}$o\$"
+}
+
+# Writes nginx/proxy/$PROXY_DOMAIN.conf from .env. Refuses (1), writing
+# nothing, when the domain or the address is missing or malformed: both end
+# up inside the config.
+render_proxy_conf() {
+    local d bind max p rpc f tmp
+    d="$(_env_val PROXY_DOMAIN)"; bind="$(_env_val PROXY_BIND_HOST)"
+    if ! valid_domain "$d"; then
+        echo -e "  ${RED}✗${NC} PROXY_DOMAIN in .env is '${d}': the domain the proxy serves is needed (e.g. ephem.health.gov.xx)."
+        return 1
+    fi
+    if ! valid_ipv4 "$bind" || [ "$bind" = 0.0.0.0 ]; then
+        echo -e "  ${RED}✗${NC} PROXY_BIND_HOST in .env is '${bind}': the IPv4 address of this server the proxy connects to is needed."
+        return 1
+    fi
+    max="$(max_upload)"
+    p="ephem_$(printf '%s' "$d" | tr -c 'A-Za-z0-9' '_')"
+    rpc="$(_render_rpc_block "$d" "${p}_odoo" "${p}_general")"
+    f="$(proxy_conf_path "$d")"
+    mkdir -p "$(dirname "$f")"
+    tmp="$(mktemp)"
+    # The values are checked above and hold no sed or awk metacharacter that
+    # matters here (letters, digits, dots, hyphens, a size like 100M).
+    _proxy_conf_template \
+        | sed -e "s|@D@|$d|g" -e "s|@P@|$p|g" -e "s|@BIND@|$bind|g" -e "s|@MAX@|$max|g" \
+              -e "s|@DATE@|$(date '+%Y-%m-%d %H:%M')|g" \
+        | awk -v block="$rpc" '$0 == "@RPC@" { print block; next } { print }' > "$tmp"
+    cp "$tmp" "$f" && rm -f "$tmp"
+    chmod 644 "$f"
+}
+
+# The config with @placeholders@, in a quoted heredoc so that every nginx
+# $variable stays as written (no backslash before each one).
+_proxy_conf_template() {
+    cat <<'PROXYEOF'
+# ──────────────────────────────────────────────
+# @D@: the nginx on the proxy machine, in front of ePHEM (Odoo 18) on
+# @BIND@ (ephem-deploy, SERVER_ACCESS=proxy).
+#
+# GENERATED by ephem-deploy on the Odoo server, @DATE@. Its settings live in
+# that server's .env (PROXY_DOMAIN, PROXY_BIND_HOST, NGINX_MAX_UPLOAD,
+# NGINX_RPC_ALLOW, NGINX_RPC_OPEN) and bash manage.sh rewrites this file when
+# one changes. Edit there and copy the file again; a hand edit here is lost.
+#
+# Install on the proxy machine:
+#   sudo nginx -v           (1.25.1 or newer: see the note on listen below)
+#   sudo cp @D@.conf /etc/nginx/sites-available/@D@
+#   sudo ln -sf /etc/nginx/sites-available/@D@ /etc/nginx/sites-enabled/@D@
+#   sudo mkdir -p /var/cache/nginx/@P@ && sudo chown www-data: /var/cache/nginx/@P@
+#   sudo nginx -t && sudo systemctl reload nginx
+# Keep a copy of the file it replaces outside /etc/nginx, where no include
+# picks it up. The certificate is expected where certbot puts it
+# (/etc/letsencrypt/live/@D@/); change the two ssl_certificate lines if this
+# machine keeps it elsewhere. After the first install: sudo certbot renew --dry-run
+#
+# Everything above the first server block sits in nginx's http context,
+# shared with every other site on that nginx, so every name starts with @P@.
+# Never add an add_header inside a location below: nginx then drops every
+# security header of the server block for that location.
+# ──────────────────────────────────────────────
+
+# Timing in the access log: urt = the time Odoo took, rt = the whole request.
+# A slow page with a small urt is the network or the browser, a large urt is
+# Odoo. ucs = HIT or MISS of the static cache below.
+log_format @P@_timing '$remote_addr [$time_local] "$request" $status $body_bytes_sent '
+                      'rt=$request_time urt=$upstream_response_time ucs=$upstream_cache_status '
+                      '"$http_referer" "$http_user_agent"';
+
+# ── Rate limiting ─────────────────────────────
+# General zone: protection against floods only. One Odoo screen fires dozens
+# of requests at once, so it is generous; the login zone is the real
+# protection. Both count per client address: if every user reaches this
+# nginx through one NAT address, they count as one.
+limit_req_zone $binary_remote_addr zone=@P@_general:10m rate=30r/s;
+# Only credential submissions (POST) count. GETs of the login page never do,
+# which matters when a whole office shares one public address.
+map $request_method $@P@_login_key {
+    default "";
+    POST    $binary_remote_addr;
+}
+limit_req_zone $@P@_login_key zone=@P@_login:10m rate=30r/m;
+
+# ── Odoo ──────────────────────────────────────
+# No upstream keepalive on purpose: Odoo's web workers close the connection
+# after every answer, so a pool would never fill.
+upstream @P@_odoo {
+    server @BIND@:8069;
+}
+# The live update websocket (Odoo's gevent_port, served when workers > 0).
+upstream @P@_odoo_ws {
+    server @BIND@:8072;
+}
+
+map $http_upgrade $@P@_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Odoo sends its own Content-Security-Policy on pages (frame-ancestors) and on
+# files (default-src 'none', which stops an uploaded HTML or SVG file from
+# running scripts). Ours goes only on answers that carry none, so there is one
+# policy per answer and Odoo's file policy is never replaced. An empty value
+# adds no header.
+map $upstream_http_content_security_policy $@P@_csp {
+    ""      "frame-ancestors 'self'";
+    default "";
+}
+
+# Copies of the asset bundles and module static files only (see below).
+proxy_cache_path /var/cache/nginx/@P@ levels=1:2 keys_zone=@P@_static:10m
+                 max_size=1g inactive=7d use_temp_path=off;
+
+# ── HTTP: redirect only ───────────────────────
+server {
+    listen 80;
+    listen [::]:80;
+    server_name @D@;
+    server_tokens off;
+
+    return 301 https://@D@$request_uri;
+}
+
+# ── HTTPS ─────────────────────────────────────
+server {
+    # nginx 1.25.1 or newer: write `listen 443 ssl;` and add `http2 on;` (the
+    # form below still works there, nginx -t only warns).
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name @D@;
+    server_tokens off;
+
+    ssl_certificate /etc/letsencrypt/live/@D@/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/@D@/privkey.pem; # managed by Certbot
+
+    # Mozilla "intermediate": TLS 1.2 with forward secrecy and AEAD ciphers
+    # only, TLS 1.3 with its own fixed suites; the client picks among them.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    # A resumed TLS session skips most of the handshake: one round trip less
+    # per reconnect, which counts on slow links.
+    ssl_session_cache shared:@P@_ssl:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # ── Security headers ──────────────────────
+    # HSTS: browsers never try plain HTTP again for a year, so the session
+    # cookie and the tokens in emailed links cannot leak on a first hop over
+    # port 80. includeSubDomains left out: names under this one are not ours
+    # to promise.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header Content-Security-Policy $@P@_csp always;
+    add_header Permissions-Policy "geolocation=(self), camera=(self), microphone=(self), payment=(), usb=()" always;
+    add_header X-Permitted-Cross-Domain-Policies none always;
+    # Odoo sends these two itself on some answers, with the same values; one
+    # copy only, the one above, so no scanner reports a duplicate header.
+    proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header X-Frame-Options;
+    # Odoo 18 never marks its cookies Secure (session_id is already
+    # HttpOnly). This adds Secure to every cookie it sets on path /, which is
+    # all of them.
+    proxy_cookie_path / "/; Secure";
+
+    # ── To Odoo ───────────────────────────────
+    # X-Forwarded-Host is what makes Odoo apply proxy_mode: without it Odoo
+    # ignores every X-Forwarded header, sees all users as this nginx's address
+    # and believes the site is plain HTTP.
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For   $remote_addr;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_redirect off;
+
+    # nginx takes the whole answer quickly and feeds it to a slow client
+    # itself, so an Odoo worker is free in milliseconds instead of waiting on
+    # a phone on 3G. Bigger buffers keep large JSON answers in memory.
+    proxy_buffering on;
+    proxy_buffers 16 64k;
+    proxy_buffer_size 16k;
+
+    client_max_body_size @MAX@;
+    # A client that stalls on its headers or stops sending a body is dropped
+    # (slowloris). Odoo's own slow work (reports, imports) is the proxy_*
+    # timeouts.
+    client_header_timeout 15s;
+    client_body_timeout 60s;
+    send_timeout 60s;
+    keepalive_timeout 75s;
+    reset_timedout_connection on;
+    # Fail fast when Odoo is not there; wait long when it is busy working.
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 720s;
+    proxy_read_timeout 720s;
+
+    limit_req_status 429;
+
+    access_log /var/log/nginx/@D@.access.log @P@_timing;
+    error_log  /var/log/nginx/@D@.error.log warn;
+
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_vary on;
+    gzip_types text/plain text/css text/xml text/javascript
+               application/javascript application/json application/xml image/svg+xml;
+
+    # ── Live updates (bus, chat, notifications) ──
+    # A location with its own proxy_set_header inherits none of the server
+    # ones, so they are all repeated here.
+    location /websocket {
+        proxy_pass http://@P@_odoo_ws;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $@P@_connection_upgrade;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For   $remote_addr;
+        proxy_set_header X-Real-IP         $remote_addr;
+    }
+
+    # ── RPC endpoints ─────────────────────────
+    # Password login with no login page and no CSRF token: the favourite
+    # target of credential stuffing. The Odoo web client never uses them.
+    # Opened per address from manage.sh on the Odoo server (Advanced → RPC
+    # endpoints), which rewrites this file.
+@RPC@
+
+    # ── Database manager: closed ──────────────
+    # Create, drop, back up (the whole database with its files) and restore,
+    # guarded only by the master password. From the internet it has no use:
+    # manage.sh on the Odoo server does all of this (Advanced → Databases).
+    # ^~ so no regex location below can take a URL under it.
+    location ^~ /web/database/ {
+        deny all;
+        proxy_pass http://@P@_odoo;
+    }
+
+    # Lists installed apps and versions when the website app is installed.
+    location = /website/info {
+        return 404;
+    }
+
+    # ── Credential submissions: throttled ─────
+    # Password reset and sign up are the same kind of target (guessing, and
+    # mailing strangers); /web/login also covers /web/login/totp, the 2FA code.
+    location ~ ^/(web/login|web/session/authenticate|web/reset_password|web/signup) {
+        limit_req zone=@P@_login burst=20 nodelay;
+        proxy_pass http://@P@_odoo;
+    }
+
+    # ── Static files: cached here ─────────────
+    # Only files that are the same for every visitor. /web/image and
+    # /web/content are not cached: they carry attachments and record images
+    # under access rules, and an anonymous request for the same URL gets a
+    # placeholder or a 404 that a shared cache would then hand to logged in
+    # users. A response that sets a cookie is never stored either (nginx's
+    # own rule), so a visitor without a session never seeds the cache.
+    #
+    # Asset bundles: the URL holds a hash of the content, so a copy is kept as
+    # long as Odoo says (a year, immutable) and is never stale. Odoo's own
+    # headers decide, so debug bundles (max-age=0) are never stored.
+    location ^~ /web/assets/ {
+        proxy_pass http://@P@_odoo;
+        proxy_cache @P@_static;
+        proxy_cache_valid 200 1d;
+        proxy_cache_lock on;
+        proxy_cache_use_stale error timeout updating http_502 http_503 http_504;
+    }
+
+    # Module static files (/<module>/static/...): public by design, but not
+    # hashed, so a module update can change a file under the same name. This
+    # copy lasts an hour; the browser still gets Odoo's own headers (a week).
+    location ~ ^/[^/]+/static/ {
+        proxy_pass http://@P@_odoo;
+        proxy_cache @P@_static;
+        proxy_ignore_headers Cache-Control Expires;
+        proxy_cache_valid 200 60m;
+        proxy_cache_lock on;
+        proxy_cache_use_stale error timeout updating http_502 http_503 http_504;
+    }
+
+    # ── Everything else ───────────────────────
+    location / {
+        limit_req zone=@P@_general burst=60 nodelay;
+        proxy_pass http://@P@_odoo;
+    }
+}
+PROXYEOF
 }
 
 nginx_state() {

@@ -1,3 +1,79 @@
+# Updating an Existing Server (October 2026: nginx fixes, proxy mode)
+
+Code and configuration only: no new image, no data, no module update.
+
+What changes:
+
+1. **nginx (servers with `SERVER_ACCESS=nginx`).** Each security header is
+   sent once: Odoo sends `X-Frame-Options` and a `Content-Security-Policy`
+   itself on some answers, and those came out twice. Odoo's own policy on
+   files (`default-src 'none'`, which stops an uploaded HTML or SVG file from
+   running scripts) is kept as it is. nginx gives up on connecting to Odoo
+   after 10 seconds instead of hanging, every module's static files and the
+   asset bundles stay out of the general rate limit (an office behind one
+   address no longer meets a 429 on a first visit), and no other location
+   can take a database manager URL.
+2. **A third way to reach Odoo: behind an nginx on another machine**
+   (`SERVER_ACCESS=proxy`, README → Mode 1). For servers where a ministry's
+   own proxy holds the domain and the certificate. Until now such servers ran
+   the direct choice, which means one Odoo process (`workers = 0`), no live
+   updates through the proxy, and every user seen as the proxy's address.
+
+## Steps
+
+Every server:
+
+```bash
+cd ~/ephem-deploy
+git pull
+bash setup.sh          # 1) Server deploy, Enter keeps your access choice
+```
+
+On an nginx server setup re-renders `nginx/active.conf` with the fixes
+(tested first, rolled back if nginx refuses it). Without a setup run, any
+change in `bash manage.sh` → 10 or Advanced → RPC endpoints re-renders it too.
+
+A **direct server behind another machine's nginx** moves to proxy mode in the
+same run: choose **3** at "How will people reach ePHEM?", then give this
+server's LAN address, the proxy machine's address and the domain. Find the
+proxy's address first, while Odoo still logs it (direct mode has
+`proxy_mode` off, so every request comes from it):
+
+```bash
+docker logs --since 15m ephem-app 2>&1 | grep -oE 'werkzeug: [0-9.]+' | sort | uniq -c | sort -rn | head
+```
+
+Setup asks for sudo once (the firewall rule), restarts Odoo with workers, and
+writes `nginx/proxy/DOMAIN.conf`. Then, on the proxy machine:
+
+1. Copy that file and install it as its first lines say (back up the current
+   site config outside `/etc/nginx` first).
+2. `sudo nginx -t && sudo systemctl reload nginx`, then
+   `sudo certbot renew --dry-run`.
+3. In Odoo, Settings → Technical → System Parameters: `web.base.url` must be
+   `https://DOMAIN`; add `web.base.url.freeze` = `True`.
+
+Either machine can go first: the old proxy config keeps working against the
+new Odoo (only the live updates stay broken until the new config is in), and
+the new proxy config against the old Odoo (the live updates answer 502 until
+setup has run).
+
+## Verify afterwards
+
+```bash
+bash manage.sh          # 9) Security check: firewall and proxy_mode lines
+bash scripts/proxy-firewall.sh status                                       # proxy mode
+curl -s -o /dev/null -w '%{http_code}\n' https://DOMAIN/websocket/health    # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://DOMAIN/xmlrpc/2/common     # 403
+```
+
+## Rolling back
+
+`git checkout` the previous commit and run `bash setup.sh` again with your old
+access choice. Leaving proxy mode removes the firewall rule (it asks for sudo).
+
+---
+
 # Updating an Existing Server (October 2026: network hardening)
 
 Code and configuration only: no new image, no data is touched, no module

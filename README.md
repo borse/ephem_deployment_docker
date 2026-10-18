@@ -183,9 +183,10 @@ After choosing **1**, setup asks how people will reach ePHEM:
 |---|---|---|
 | **1) Directly on a port** | `http://SERVER_IP:8069`, or the port you choose | Odoo only. No nginx, no domain, no SSL |
 | **2) nginx on ports 80/443** | `https://your.domain` or `http://SERVER_IP` | nginx in front of Odoo: domains, HTTPS, RPC blocking |
+| **3) Behind an nginx on another machine** | `https://your.domain`, served by that machine | Odoo only, with workers; the other machine's nginx holds the domain and HTTPS |
 
-The choice is saved as `SERVER_ACCESS` in `.env` (`direct` or `nginx`). To change
-your mind later, run `bash setup.sh` again, choose **1**, then the other option.
+The choice is saved as `SERVER_ACCESS` in `.env` (`direct`, `nginx` or `proxy`). To change
+your mind later, run `bash setup.sh` again, choose **1**, then another option.
 Nothing is lost when you switch: while Odoo is reached directly, nginx's config
 and certificates stay on disk, and choosing nginx again brings the domains and
 HTTPS back as they were. Databases are never touched.
@@ -201,6 +202,31 @@ Direct access is plain HTTP, so passwords travel unencrypted. Use it on a closed
 network or VPN. Odoo then also answers `/xmlrpc` and `/jsonrpc` (nginx blocks
 them), and runs in threaded mode (`workers = 0`) so the live updates work on
 that port. The domain and SSL items in `bash manage.sh` need nginx and say so.
+
+**Behind an nginx on another machine** (`proxy`) is for a ministry that runs
+its own edge proxy with the domain and the certificate, and passes requests
+to this server. Setup asks three things, saved in `.env`:
+
+| Key | What |
+|---|---|
+| `PROXY_BIND_HOST` | the address of this server the proxy connects to; Odoo is published there only, on 8069 (web) and 8072 (live updates) |
+| `PROXY_FROM` | the proxy machine's address as this server sees it |
+| `PROXY_DOMAIN` | the domain the proxy serves |
+
+Odoo then runs with workers and `proxy_mode`, so it sees each user's real
+address and knows the site is HTTPS. Because Odoo trusts the proxy's forwarded
+headers, nobody else may reach those two ports: `scripts/proxy-firewall.sh`
+puts a rule in Docker's `DOCKER-USER` chain (ufw does not see Docker's ports)
+that lets only `PROXY_FROM` in, through a systemd unit that restores it after
+a reboot. `bash scripts/proxy-firewall.sh status` shows it.
+
+The proxy machine needs a matching nginx config, and setup writes it:
+`nginx/proxy/PROXY_DOMAIN.conf`. Copy it there; its first lines say how to
+install it. It carries the same protections as the nginx this stack runs
+(security headers, login throttle, RPC endpoints closed, database manager
+closed, Secure session cookie), plus gzip, HTTP/2 and a cache for the static
+files, and works on nginx 1.18 and newer. Changing the upload limit or the RPC
+endpoints in `bash manage.sh` rewrites it: copy it again then.
 
 ### Configure Your Settings
 

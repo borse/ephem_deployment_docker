@@ -154,9 +154,15 @@ ephem_mode_save() {  # ephem_mode_save MODE
 #           and what every server installed before the choice existed runs)
 #   direct  Odoo itself on a port of the server (DIRECT_PORT, 8069 by
 #           default), plain HTTP, no nginx
+#   proxy   an nginx on ANOTHER machine holds the domain and HTTPS and
+#           reaches Odoo on PROXY_BIND_HOST, ports 8069 and 8072; no nginx
+#           here. Odoo runs workers with proxy_mode, scripts/proxy-firewall.sh
+#           lets only PROXY_FROM reach the two ports, and
+#           nginx/proxy/PROXY_DOMAIN.conf is the config for that nginx
 server_access() {
     case "$(env_get SERVER_ACCESS)" in
         direct) echo direct ;;
+        proxy)  echo proxy ;;
         *)      echo nginx ;;
     esac
 }

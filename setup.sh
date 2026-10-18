@@ -614,25 +614,37 @@ esac
 
 # ── Server: how people reach Odoo ─────────────
 # SERVER_ACCESS in .env (saved at the end, with EPHEM_MODE). Running setup
-# again switches between the two, and nothing is lost on the way: while Odoo
-# is reached directly, nginx/active.conf and the certificates stay on disk,
-# and choosing nginx again brings the domains and HTTPS back as they were.
+# again switches between the three, and nothing is lost on the way: while
+# nginx is off, nginx/active.conf and the certificates stay on disk, and
+# choosing nginx again brings the domains and HTTPS back as they were.
 SERVER_ACCESS=""
 DIRECT_PORT=""
+PROXY_BIND_HOST=""
+PROXY_FROM=""
+PROXY_DOMAIN=""
+# The address and domain checks live in nginx-lib.sh; a subshell keeps its
+# names out of this script.
+nginx_lib() { ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; "$@" ); }
 if [ "$MODE" = "server" ]; then
     echo ""
     echo "How will people reach ePHEM?"
     echo ""
     echo -e "  ${BOLD}1)${NC} Directly on a port of this server  — http://SERVER_IP:PORT (8069 by default), no nginx, no domain, no SSL"
     echo -e "  ${BOLD}2)${NC} nginx on ports 80/443  — domains and HTTPS (Let's Encrypt)"
+    echo -e "  ${BOLD}3)${NC} Behind an nginx on another machine: that machine holds the domain and HTTPS, this one runs Odoo"
     echo ""
-    if [ "$(server_access)" = direct ]; then DEFAULT_ACCESS=1; else DEFAULT_ACCESS=2; fi
-    read -p "Choose [1-2] (Enter keeps $DEFAULT_ACCESS): " ACCESS_CHOICE
+    case "$(server_access)" in
+        direct) DEFAULT_ACCESS=1 ;;
+        proxy)  DEFAULT_ACCESS=3 ;;
+        *)      DEFAULT_ACCESS=2 ;;
+    esac
+    read -p "Choose [1-3] (Enter keeps $DEFAULT_ACCESS): " ACCESS_CHOICE
     case "${ACCESS_CHOICE:-$DEFAULT_ACCESS}" in
         1) SERVER_ACCESS=direct ;;
         2) SERVER_ACCESS=nginx ;;
+        3) SERVER_ACCESS=proxy ;;
         *)
-            echo -e "${RED}✗${NC} Invalid choice. Run the script again and choose 1 or 2."
+            echo -e "${RED}✗${NC} Invalid choice. Run the script again and choose 1, 2 or 3."
             exit 1
             ;;
     esac
@@ -662,6 +674,83 @@ if [ "$MODE" = "server" ]; then
             break
         done
         echo -e "${GREEN}✓${NC} Odoo will be published on port $DIRECT_PORT  (http://SERVER_IP:$DIRECT_PORT)"
+    fi
+    if [ "$SERVER_ACCESS" = proxy ]; then
+        # Three answers, saved in .env with the override below:
+        #   PROXY_BIND_HOST  the address of this server the proxy connects to.
+        #                    Odoo is published there only, never on every
+        #                    interface: 8069 (web) and 8072 (live updates).
+        #   PROXY_FROM       the proxy machine's address as this server sees
+        #                    it; scripts/proxy-firewall.sh lets only it in.
+        #   PROXY_DOMAIN     the domain the proxy serves, for the config it
+        #                    needs (nginx/proxy/PROXY_DOMAIN.conf).
+        echo ""
+        echo "  The other machine's nginx keeps the domain and the certificate and"
+        echo "  passes requests to Odoo here. Odoo then runs with workers and trusts"
+        echo "  that nginx's forwarded headers, so only that machine may reach it."
+        echo ""
+        LOCAL_IPS=()
+        if command -v ip >/dev/null 2>&1; then
+            mapfile -t LOCAL_IPS < <(ip -o -4 addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+        fi
+        PROXY_BIND_HOST=$(env_get PROXY_BIND_HOST)
+        [ -n "$PROXY_BIND_HOST" ] || PROXY_BIND_HOST=$(get_server_ip)
+        while :; do
+            read -p "Address of THIS server the proxy connects to [Enter keeps $PROXY_BIND_HOST]: " ANSWER
+            ANSWER="${ANSWER:-$PROXY_BIND_HOST}"
+            if ! nginx_lib valid_ipv4 "$ANSWER" || [ "$ANSWER" = 0.0.0.0 ] || [[ "$ANSWER" == 127.* ]]; then
+                echo -e "${RED}✗${NC} One IPv4 address of this server, the one the other machine reaches (not 0.0.0.0 or 127.x)."
+                continue
+            fi
+            if [ "${#LOCAL_IPS[@]}" -gt 0 ] && ! nginx_lib in_list "$ANSWER" "${LOCAL_IPS[@]}"; then
+                echo -e "${RED}✗${NC} $ANSWER is not an address of this server (it has: ${LOCAL_IPS[*]}). Docker can only publish on one of those."
+                continue
+            fi
+            PROXY_BIND_HOST="$ANSWER"
+            break
+        done
+        PROXY_FROM=$(env_get PROXY_FROM)
+        while :; do
+            read -p "Address of the proxy machine, as this server sees it${PROXY_FROM:+ [Enter keeps $PROXY_FROM]}: " ANSWER
+            ANSWER="$(printf '%s' "${ANSWER:-$PROXY_FROM}" | tr ',' ' ' | xargs)"
+            if [ -z "$ANSWER" ]; then
+                echo -e "${RED}✗${NC} Needed: only that address will be let in. Its admin can tell (hostname -I there)."
+                continue
+            fi
+            BAD=""
+            for a in $ANSWER; do
+                { nginx_lib valid_rpc_addr "$a" && [[ "$a" != *:* ]]; } || BAD="$BAD $a"
+            done
+            if [ -n "$BAD" ]; then
+                echo -e "${RED}✗${NC} Not an IPv4 address or range:$BAD"
+                continue
+            fi
+            PROXY_FROM="$ANSWER"
+            break
+        done
+        PROXY_DOMAIN=$(env_get PROXY_DOMAIN)
+        while :; do
+            read -p "Domain the proxy serves (e.g. ephem.health.gov.xx)${PROXY_DOMAIN:+ [Enter keeps $PROXY_DOMAIN]}: " ANSWER
+            ANSWER="${ANSWER:-$PROXY_DOMAIN}"
+            if ! nginx_lib valid_domain "$ANSWER"; then
+                echo -e "${RED}✗${NC} A domain name, like ephem.health.gov.xx."
+                continue
+            fi
+            PROXY_DOMAIN="$ANSWER"
+            break
+        done
+        # 8069 and 8072 free on this server? The current Odoo may hold them
+        # already (a direct install): those are its own.
+        if command -v ss >/dev/null 2>&1; then
+            LISTENING=" $(ss -ltnH 2>/dev/null | awk '{print $4}' | tr '\n' ' ' || true)"
+            for PORT in 8069 8072; do
+                if [[ "$LISTENING" =~ [:.]${PORT}\  ]] && [ -z "$(docker port ephem-app "$PORT/tcp" 2>/dev/null)" ]; then
+                    echo -e "${RED}✗${NC} Port $PORT is already in use on this server by something else (see: ss -ltnp). Free it, then run setup again."
+                    exit 1
+                fi
+            done
+        fi
+        echo -e "${GREEN}✓${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072, for $PROXY_FROM only; the proxy serves https://$PROXY_DOMAIN"
     fi
 fi
 
@@ -1192,6 +1281,8 @@ if [ -f ".env" ]; then
         SERVER_IP=$(get_server_ip)
         if [ "$SERVER_ACCESS" = direct ]; then
             echo -e "${GREEN}✓${NC} No domain needed — Odoo on http://$SERVER_IP:$DIRECT_PORT"
+        elif [ "$SERVER_ACCESS" = proxy ]; then
+            echo -e "${GREEN}✓${NC} Domain on the proxy machine: $PROXY_DOMAIN (DOMAIN in .env is for nginx on this server)"
         elif [ "$MODE" = "server" ]; then
             echo -e "${YELLOW}!${NC} No domain set — running in IP mode ($SERVER_IP)"
             echo ""
@@ -1455,6 +1546,8 @@ ODOOEOF
 ; web port. Behind nginx this is ODOO_WORKERS from .env (4 when empty).
 workers = 0"
         else
+            # Behind nginx: this server's own, or with SERVER_ACCESS=proxy the
+            # one on the proxy machine, which reaches the websocket on 8072.
             PROXY_MODE=True
             WORKERS_LINES="; Web workers: ODOO_WORKERS in .env (4 when empty). Each serves one request
 ; at a time. bash manage.sh → Advanced → Workers and scheduled jobs suggests a
@@ -1499,7 +1592,8 @@ limit_time_real = 1200
 
 ; The ports INSIDE the container. Keep them: the image's health check and the
 ; restart commands probe 8069 in the container. The port people use is
-; DIRECT_PORT in .env (direct access) or 80/443 on nginx.
+; DIRECT_PORT in .env (direct access), 80/443 on nginx, or 443 on the proxy
+; machine (SERVER_ACCESS=proxy).
 xmlrpc_port = 8069
 gevent_port = 8072
 
@@ -1634,10 +1728,61 @@ OVERRIDE
         docker compose -f docker-compose.yml rm -sf nginx certbot >/dev/null 2>&1 || true
         echo -e "${GREEN}✓${NC} nginx stopped (its config and certificates are kept)"
     fi
+elif [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" = proxy ]; then
+    cat > docker-compose.override.yml << 'OVERRIDE'
+# Server behind a proxy, generated by setup.sh
+# SERVER_ACCESS=proxy: an nginx on another machine holds the domain and HTTPS
+# and connects to Odoo on PROXY_BIND_HOST (.env): 8069 for the web, 8072 for
+# the live updates (Odoo runs workers, which serve the websocket on that port
+# only). Published on that one address, never on every interface, and
+# scripts/proxy-firewall.sh lets only PROXY_FROM reach the two ports. nginx
+# and certbot are off. bash setup.sh → Server deploy → another choice removes
+# this file again.
+services:
+  odoo:
+    ports:
+      - "${PROXY_BIND_HOST:?Set PROXY_BIND_HOST in .env (bash setup.sh)}:8069:8069"
+      - "${PROXY_BIND_HOST:?Set PROXY_BIND_HOST in .env (bash setup.sh)}:8072:8072"
+
+  nginx:
+    profiles:
+      - disabled
+
+  certbot:
+    profiles:
+      - disabled
+OVERRIDE
+    echo -e "${GREEN}✓${NC} docker-compose.override.yml created (nginx off, Odoo on $PROXY_BIND_HOST:8069 and :8072)"
+    # The override reads the address from .env, so it must be there before
+    # the first `docker compose up` below; the firewall reads all three.
+    set_env_key PROXY_BIND_HOST "$PROXY_BIND_HOST"
+    set_env_key PROXY_FROM "$PROXY_FROM"
+    set_env_key PROXY_DOMAIN "$PROXY_DOMAIN"
+    if [ -n "$(docker ps -aq --filter name='^ephem-(nginx|certbot)$')" ]; then
+        docker compose -f docker-compose.yml rm -sf nginx certbot >/dev/null 2>&1 || true
+        echo -e "${GREEN}✓${NC} nginx stopped (its config and certificates are kept)"
+    fi
+    # Before Odoo is published with proxy_mode on: from the first second only
+    # the proxy machine may reach it. The rules match the address, so they
+    # can go in before the container exists.
+    echo "Letting only the proxy machine reach Odoo's ports (asks for sudo)…"
+    if ! bash scripts/proxy-firewall.sh apply; then
+        echo ""
+        echo -e "${YELLOW}!${NC} Without it, any machine that reaches $PROXY_BIND_HOST:8069 can pass"
+        echo "   itself off as any address to Odoo and skip the proxy's protections."
+        read -p "  Continue without it (apply later: bash scripts/proxy-firewall.sh apply)? [y/N]: " GO_ON
+        [[ "${GO_ON:-N}" =~ ^[Yy]$ ]] || { echo "  Stopped. Fix the cause above and run setup again."; exit 1; }
+    fi
 elif [ "$MODE" = "server" ]; then
     # nginx in front: no override. One left by the direct choice, or by an
     # earlier demo install, would keep nginx off.
     retire_single_override || true
+fi
+# Leaving proxy mode: the firewall rules name the old address and would keep
+# shutting it to everyone but the old proxy. Only where they were installed.
+if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" != proxy ] && [ -f /etc/systemd/system/ephem-proxy-ports.service ]; then
+    echo "Removing the proxy mode firewall (asks for sudo)…"
+    bash scripts/proxy-firewall.sh remove || echo -e "${YELLOW}!${NC} Remove it later: bash scripts/proxy-firewall.sh remove"
 fi
 
 echo "Starting database…"
@@ -1723,10 +1868,20 @@ nginx_follow_odoo "$ODOO_CID_BEFORE" odoo
 # (security headers, TLS settings, the catch-all server). An older
 # nginx/active.conf keeps serving until this runs. nginx_apply tests the new
 # file first and puts the old one back if nginx refuses it.
-if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" != "direct" ] && [ -f nginx/active.conf ]; then
+if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" = nginx ] && [ -f nginx/active.conf ]; then
     echo "Applying the current nginx settings…"
     if ! ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; rerender_active_conf ); then
         echo -e "${YELLOW}!${NC} nginx kept its previous config. Retry from: bash manage.sh → Advanced → RPC endpoints (any change re-renders it)."
+    fi
+fi
+# proxy mode: the same settings, written for the nginx on the proxy machine.
+PROXY_CONF_FILE=""
+if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" = proxy ]; then
+    if nginx_lib render_proxy_conf; then
+        PROXY_CONF_FILE="$(nginx_lib proxy_conf_path "$PROXY_DOMAIN")"
+        echo -e "${GREEN}✓${NC} Config for the proxy machine written: $PROXY_CONF_FILE"
+    else
+        echo -e "${YELLOW}!${NC} The config for the proxy machine was not written (see above)."
     fi
 fi
 
@@ -1889,6 +2044,19 @@ else
         echo "  Plain HTTP: keep it on a closed network or VPN."
         echo ""
         echo "  Domains and HTTPS later:  bash setup.sh → 1) Server deploy → 2) nginx"
+    elif [ "$SERVER_ACCESS" = proxy ]; then
+        echo "Your site is served by the nginx on the proxy machine ($PROXY_FROM):"
+        echo "  https://$PROXY_DOMAIN"
+        echo ""
+        echo "  That nginx needs the config this setup wrote. Copy it there; the first"
+        echo "  lines of the file say how to install it:"
+        echo "    ${PROXY_CONF_FILE:-nginx/proxy/$PROXY_DOMAIN.conf (not written, see above)}"
+        echo "  It changes when the upload limit or the RPC endpoints change in"
+        echo "  bash manage.sh: copy it again then."
+        echo ""
+        echo "  Odoo answers $PROXY_BIND_HOST:8069 (web) and :8072 (live updates) for $PROXY_FROM"
+        echo "  only:  bash scripts/proxy-firewall.sh status"
+        echo "  Another address, proxy or domain later: run this setup again."
     elif grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
         DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" \
                  | sed 's/.*server_name//;s/;//' | tr ' ' '\n' \

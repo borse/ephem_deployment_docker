@@ -24,6 +24,12 @@ What this means in practice:
   to the internet and no firewall setting will save you. Developer and demo
   modes bind to `127.0.0.1` for exactly this reason.
 - ufw still fully protects everything that is *not* Docker: use it for SSH.
+- **Behind an nginx on another machine** (`SERVER_ACCESS=proxy`), Odoo is
+  published on one LAN address, ports 8069 and 8072, for that nginx. setup.sh
+  runs `scripts/proxy-firewall.sh apply`, which lets only `PROXY_FROM` reach
+  them through Docker's `DOCKER-USER` chain, the one place Docker's own
+  rules leave to you. Odoo trusts that nginx's forwarded headers there, so
+  this rule is not optional.
 
 ```bash
 sudo apt install -y ufw
@@ -132,7 +138,11 @@ is not yet known to work.
 ```bash
 # Public listeners: expect sshd (22) and docker-proxy (80, 443) ONLY.
 # 8069/8072/5432 must NOT appear on 0.0.0.0 — loopback or absent is correct.
+# Proxy mode: 8069 and 8072 on PROXY_BIND_HOST only, no 80/443.
 sudo ss -tlnp
+# Proxy mode: only the proxy machine may reach them (expect a ✓ line and two
+# rules naming PROXY_BIND_HOST)
+bash scripts/proxy-firewall.sh status
 
 # The app's database role must not be a superuser (expect superuser=f)
 docker compose exec db psql -U odoo -d postgres -c \
