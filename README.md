@@ -210,15 +210,24 @@ to this server. Setup asks three things, saved in `.env`:
 | Key | What |
 |---|---|
 | `PROXY_BIND_HOST` | the address of this server the proxy connects to; Odoo is published there only, on 8069 (web) and 8072 (live updates) |
-| `PROXY_FROM` | the proxy machine's address as this server sees it |
+| `PROXY_FROM` | the proxy machine's address as this server sees it; may stay empty until it is known |
 | `PROXY_DOMAIN` | the domain the proxy serves |
 
 Odoo then runs with workers and `proxy_mode`, so it sees each user's real
 address and knows the site is HTTPS. Because Odoo trusts the proxy's forwarded
-headers, nobody else may reach those two ports: `scripts/proxy-firewall.sh`
+headers, nobody else should reach those two ports: `scripts/proxy-firewall.sh`
 puts a rule in Docker's `DOCKER-USER` chain (ufw does not see Docker's ports)
 that lets only `PROXY_FROM` in, through a systemd unit that restores it after
 a reboot. `bash scripts/proxy-firewall.sh status` shows it.
+
+The proxy's address is often unknown when the server is prepared (another
+team's machine, sometimes set up after a penetration test). Leave
+`PROXY_FROM` empty then: no firewall is installed, Odoo answers any machine
+that reaches `PROXY_BIND_HOST`, and the security check says so. Once the
+proxy is in use, `bash scripts/proxy-firewall.sh detect` lists the machines
+connected to Odoo (the proxy holds the live update connections open while
+anyone is logged in). Put its address in `.env` as `PROXY_FROM=` and run
+`bash scripts/proxy-firewall.sh apply`.
 
 The proxy machine needs a matching nginx config, and setup writes it:
 `nginx/proxy/PROXY_DOMAIN.conf`. Copy it there; its first lines say how to

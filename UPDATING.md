@@ -35,16 +35,19 @@ change in `bash manage.sh` → 10 or Advanced → RPC endpoints re-renders it to
 
 A **direct server behind another machine's nginx** moves to proxy mode in the
 same run: choose **3** at "How will people reach ePHEM?", then give this
-server's LAN address, the proxy machine's address and the domain. Find the
-proxy's address first, while Odoo still logs it (direct mode has
-`proxy_mode` off, so every request comes from it):
+server's LAN address, the proxy machine's address and the domain. The proxy's
+address may be left empty when it is not known: no firewall then, set
+`PROXY_FROM` in `.env` later and run `bash scripts/proxy-firewall.sh apply`
+(`detect` finds it once the proxy is in use). On a server that already runs
+behind the proxy, Odoo's log shows it now (direct mode has `proxy_mode` off,
+so every request comes from it):
 
 ```bash
 docker logs --since 15m ephem-app 2>&1 | grep -oE 'werkzeug: [0-9.]+' | sort | uniq -c | sort -rn | head
 ```
 
-Setup asks for sudo once (the firewall rule), restarts Odoo with workers, and
-writes `nginx/proxy/DOMAIN.conf`. Then, on the proxy machine:
+Setup asks for sudo once (the firewall rule, when the address is set),
+restarts Odoo with workers, and writes `nginx/proxy/DOMAIN.conf`. Then, on the proxy machine:
 
 1. Copy that file and install it as its first lines say (back up the current
    site config outside `/etc/nginx` first).

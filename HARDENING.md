@@ -29,7 +29,10 @@ What this means in practice:
   runs `scripts/proxy-firewall.sh apply`, which lets only `PROXY_FROM` reach
   them through Docker's `DOCKER-USER` chain, the one place Docker's own
   rules leave to you. Odoo trusts that nginx's forwarded headers there, so
-  this rule is not optional.
+  set `PROXY_FROM` as soon as the proxy's address is known (it may wait,
+  `bash scripts/proxy-firewall.sh detect` finds it once the proxy is in use)
+  and run `apply`; until then any machine that reaches the address can skip
+  the proxy.
 
 ```bash
 sudo apt install -y ufw

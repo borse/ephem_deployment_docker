@@ -20,7 +20,16 @@
 # Connections made on this server itself (an SSH tunnel to the bind address,
 # the health checks) do not pass DOCKER-USER and keep working.
 #
+# The proxy's address is often not known when the server is prepared (it may
+# be another team's machine, set up after a penetration test). PROXY_FROM can
+# then stay empty and be set in .env later, followed by `apply`. Until then
+# Odoo's ports answer every machine that reaches PROXY_BIND_HOST, and the
+# security check says so. `detect` finds the address once the proxy is in
+# use: it holds the live update connections to 8072 open while anyone is
+# logged in.
+#
 # Usage:
+#   bash scripts/proxy-firewall.sh detect   which machines are connected to Odoo now
 #   bash scripts/proxy-firewall.sh apply    write the rules and put them in force (sudo)
 #   bash scripts/proxy-firewall.sh remove   take them out and delete them (sudo)
 #   bash scripts/proxy-firewall.sh status   what is in force (sudo for the rule listing)
@@ -39,6 +48,7 @@ source "$SCRIPT_DIR/scripts/nginx-lib.sh"     # valid_ipv4, valid_rpc_addr
 UNIT=ephem-proxy-ports
 UNIT_FILE=/etc/systemd/system/$UNIT.service
 RULES=/usr/local/sbin/$UNIT
+CTN=ephem-app       # the Odoo container (container_name in docker-compose.yml)
 
 SUDO=""
 if [ "$(id -u)" -ne 0 ]; then
@@ -154,7 +164,8 @@ cmd_apply() {
     from="$(proxy_from_list)" || exit 1
     if [ -z "$from" ]; then
         # An empty list would shut the proxy out as well: the site goes down.
-        echo -e "${RED}✗${NC} PROXY_FROM in .env is empty: the address of the proxy machine is needed (bash setup.sh asks for it)."
+        echo -e "${RED}✗${NC} PROXY_FROM in .env is empty: set the proxy machine's address there first."
+        echo "     Not known? Once the proxy is in use: bash scripts/proxy-firewall.sh detect"
         exit 1
     fi
     if ! systemctl cat docker.service >/dev/null 2>&1; then
@@ -202,6 +213,11 @@ rules_value() { sed -n "s/^$1='\(.*\)'\$/\1/p" "$RULES" 2>/dev/null | head -1; }
 cmd_check() {
     local bind from have_bind have_from
     bind="$(env_get PROXY_BIND_HOST)"; from="$(proxy_from_list 2>/dev/null || true)"
+    if [ -z "$from" ]; then
+        echo -e "  ${YELLOW}!${NC} proxy machine not set (PROXY_FROM in .env): Odoo's ports on ${bind:-PROXY_BIND_HOST} answer every machine that reaches them."
+        echo "     Find it: bash scripts/proxy-firewall.sh detect; set PROXY_FROM, then: bash scripts/proxy-firewall.sh apply"
+        return 1
+    fi
     if ! systemctl is-active --quiet "$UNIT" 2>/dev/null; then
         echo -e "  ${YELLOW}!${NC} Odoo's ports are open to every address that reaches $bind (no proxy firewall): bash scripts/proxy-firewall.sh apply"
         return 1
@@ -225,10 +241,53 @@ cmd_status() {
     fi
 }
 
+# The machines connected to Odoo's ports right now, from the Odoo
+# container's own socket table (/proc/net/tcp: addresses in hex, the IP
+# byte reversed, then the port). Docker keeps the caller's address when it
+# forwards a published port, so the far end of a connection to 8069 or 8072
+# is the machine that opened it, whatever proxy_mode makes of the headers.
+cmd_detect() {
+    local gw found
+    if ! docker inspect "$CTN" >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} The Odoo container ($CTN) is not running."
+        exit 1
+    fi
+    gw=" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "$CTN" 2>/dev/null || true) "
+    # 1F85 = 8069, 1F88 = 8072; state 01 = established; 127.x is the
+    # container talking to itself (its health check).
+    found="$(docker exec "$CTN" cat /proc/net/tcp 2>/dev/null \
+        | awk 'NR > 1 && $4 == "01" { print $2, $3 }' \
+        | while read -r loc rem; do
+              case "${loc##*:}" in 1F85|1F88) ;; *) continue ;; esac
+              h="${rem%%:*}"
+              ip="$(printf '%d.%d.%d.%d' "0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}")"
+              case "$ip" in 127.*) continue ;; esac
+              echo "$ip"
+          done | sort | uniq -c | sort -rn || true)"
+    if [ -z "$found" ]; then
+        echo "  No machine is connected to Odoo right now. Open the site through the"
+        echo "  proxy in a browser and log in, then run this again."
+        return 0
+    fi
+    echo "  Connected to Odoo (ports 8069 and 8072) right now:"
+    while read -r n ip; do
+        if [[ "$gw" == *" $ip "* ]]; then
+            printf '    %4s  %-16s (this server, through Docker: an SSH tunnel or a local call)\n' "$n" "$ip"
+        else
+            printf '    %4s  %s\n' "$n" "$ip"
+        fi
+    done <<< "$found"
+    echo ""
+    echo "  The proxy holds the live update connections open while anyone is logged"
+    echo "  in, so it is the address with most of them. Put it in .env as"
+    echo "  PROXY_FROM=<address>, then run: bash scripts/proxy-firewall.sh apply"
+}
+
 case "${1:-}" in
+    detect) cmd_detect ;;
     apply)  cmd_apply ;;
     remove) cmd_remove ;;
     check)  cmd_check ;;
     status) cmd_status ;;
-    *)      sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *)      sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

@@ -682,6 +682,10 @@ if [ "$MODE" = "server" ]; then
         #                    interface: 8069 (web) and 8072 (live updates).
         #   PROXY_FROM       the proxy machine's address as this server sees
         #                    it; scripts/proxy-firewall.sh lets only it in.
+        #                    Optional: often not known yet when a server is
+        #                    prepared (another team's machine), so it can be
+        #                    set in .env later, followed by proxy-firewall.sh
+        #                    apply. No firewall until then.
         #   PROXY_DOMAIN     the domain the proxy serves, for the config it
         #                    needs (nginx/proxy/PROXY_DOMAIN.conf).
         echo ""
@@ -710,12 +714,19 @@ if [ "$MODE" = "server" ]; then
             break
         done
         PROXY_FROM=$(env_get PROXY_FROM)
+        echo ""
+        echo "  The proxy machine's address: once set, only it may reach Odoo here."
+        echo "  Not known yet? Leave it empty and set PROXY_FROM in .env later, then run"
+        echo "  bash scripts/proxy-firewall.sh apply  (its 'detect' finds the address once"
+        echo "  the proxy is in use). Until then Odoo answers any machine that reaches it."
+        if [ -n "$PROXY_FROM" ]; then HINT="Enter keeps $PROXY_FROM, 'none' empties it"; else HINT="Enter leaves it empty"; fi
         while :; do
-            read -p "Address of the proxy machine, as this server sees it${PROXY_FROM:+ [Enter keeps $PROXY_FROM]}: " ANSWER
+            read -p "Address of the proxy machine, as this server sees it [$HINT]: " ANSWER
+            case "$ANSWER" in none|NONE) PROXY_FROM=""; break ;; esac
             ANSWER="$(printf '%s' "${ANSWER:-$PROXY_FROM}" | tr ',' ' ' | xargs)"
             if [ -z "$ANSWER" ]; then
-                echo -e "${RED}✗${NC} Needed: only that address will be let in. Its admin can tell (hostname -I there)."
-                continue
+                PROXY_FROM=""
+                break
             fi
             BAD=""
             for a in $ANSWER; do
@@ -750,7 +761,11 @@ if [ "$MODE" = "server" ]; then
                 fi
             done
         fi
-        echo -e "${GREEN}✓${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072, for $PROXY_FROM only; the proxy serves https://$PROXY_DOMAIN"
+        if [ -n "$PROXY_FROM" ]; then
+            echo -e "${GREEN}✓${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072, for $PROXY_FROM only; the proxy serves https://$PROXY_DOMAIN"
+        else
+            echo -e "${YELLOW}!${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072 for any machine that reaches it, until PROXY_FROM is set; the proxy serves https://$PROXY_DOMAIN"
+        fi
     fi
 fi
 
@@ -1764,14 +1779,20 @@ OVERRIDE
     fi
     # Before Odoo is published with proxy_mode on: from the first second only
     # the proxy machine may reach it. The rules match the address, so they
-    # can go in before the container exists.
-    echo "Letting only the proxy machine reach Odoo's ports (asks for sudo)…"
-    if ! bash scripts/proxy-firewall.sh apply; then
-        echo ""
-        echo -e "${YELLOW}!${NC} Without it, any machine that reaches $PROXY_BIND_HOST:8069 can pass"
-        echo "   itself off as any address to Odoo and skip the proxy's protections."
-        read -p "  Continue without it (apply later: bash scripts/proxy-firewall.sh apply)? [y/N]: " GO_ON
-        [[ "${GO_ON:-N}" =~ ^[Yy]$ ]] || { echo "  Stopped. Fix the cause above and run setup again."; exit 1; }
+    # can go in before the container exists. Only once the address is known.
+    if [ -n "$PROXY_FROM" ]; then
+        echo "Letting only the proxy machine reach Odoo's ports (asks for sudo)…"
+        if ! bash scripts/proxy-firewall.sh apply; then
+            echo ""
+            echo -e "${YELLOW}!${NC} Without it, any machine that reaches $PROXY_BIND_HOST:8069 can pass"
+            echo "   itself off as any address to Odoo and skip the proxy's protections."
+            read -p "  Continue without it (apply later: bash scripts/proxy-firewall.sh apply)? [y/N]: " GO_ON
+            [[ "${GO_ON:-N}" =~ ^[Yy]$ ]] || { echo "  Stopped. Fix the cause above and run setup again."; exit 1; }
+        fi
+    elif [ -f /etc/systemd/system/ephem-proxy-ports.service ]; then
+        # Emptied: rules for the old address would keep a new proxy out.
+        echo "PROXY_FROM is empty: removing the proxy firewall (asks for sudo)…"
+        bash scripts/proxy-firewall.sh remove || echo -e "${YELLOW}!${NC} Remove it later: bash scripts/proxy-firewall.sh remove"
     fi
 elif [ "$MODE" = "server" ]; then
     # nginx in front: no override. One left by the direct choice, or by an
@@ -2054,8 +2075,15 @@ else
         echo "  It changes when the upload limit or the RPC endpoints change in"
         echo "  bash manage.sh: copy it again then."
         echo ""
-        echo "  Odoo answers $PROXY_BIND_HOST:8069 (web) and :8072 (live updates) for $PROXY_FROM"
-        echo "  only:  bash scripts/proxy-firewall.sh status"
+        if [ -n "$PROXY_FROM" ]; then
+            echo "  Odoo answers $PROXY_BIND_HOST:8069 (web) and :8072 (live updates) for $PROXY_FROM"
+            echo "  only:  bash scripts/proxy-firewall.sh status"
+        else
+            echo -e "  ${YELLOW}!${NC} Odoo answers $PROXY_BIND_HOST:8069 and :8072 for ANY machine that reaches"
+            echo "    it: the proxy machine's address is not set. Once known (or once the"
+            echo "    proxy is in use: bash scripts/proxy-firewall.sh detect), put it in .env"
+            echo "    as PROXY_FROM=<address> and run: bash scripts/proxy-firewall.sh apply"
+        fi
         echo "  Another address, proxy or domain later: run this setup again."
     elif grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
         DOMAIN=$(grep "server_name" nginx/active.conf | grep -v "#" \
