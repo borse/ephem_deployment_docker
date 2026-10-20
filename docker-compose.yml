@@ -67,6 +67,9 @@ services:
       # never with a LibreOffice of its own. Odoo talks to the converter only
       # through office-gate, which is the one thing it shares a network with.
       EPHEM_OFFICE_URL: http://office-gate:2003
+      # 0 when the server runs without the converter (OFFICE_CONVERTER below):
+      # ePHEM AI then says so instead of reporting the converter as down.
+      EPHEM_OFFICE_CONVERTER: ${OFFICE_CONVERTER:-1}
     volumes:
       - odoo-data:/var/lib/odoo
       # addons/ is a parent folder: addons/ePHEM-core (the ePHEM clone) plus any

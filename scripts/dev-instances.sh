@@ -215,6 +215,7 @@ cmd_up() {
       PASSWORD: \${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       ODOO_PY_COLORS: \"1\"
       EPHEM_OFFICE_URL: http://office:2003
+      EPHEM_OFFICE_CONVERTER: \${OFFICE_CONVERTER:-1}
     volumes:
       - odoo-data-$name:/var/lib/odoo
       - ./odca$name:/mnt/extra-addons:rw
