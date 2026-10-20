@@ -67,6 +67,39 @@ set_env_key() {  # set_env_key KEY VALUE: update or append KEY=VALUE in .env
     fi
 }
 
+# ── Office converter ──────────────────────────
+# OFFICE_CONVERTER in .env: 1 = the office converter (services office and
+# office-gate) runs, 0 = it does not. Empty or absent means 1, so a server
+# set up before the key keeps its converter. docker-compose.yml uses it as
+# the scale of both services, which takes a number only.
+office_converter_on() { [ "$(env_get OFFICE_CONVERTER)" != 0 ]; }
+
+# A value docker compose cannot read ("off", "yes") stops every compose
+# command with a cast error. Rewrite it as 0 or 1, and say so.
+office_converter_normalize() {
+    local v; v=$(env_get OFFICE_CONVERTER)
+    case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
+        ""|0|1) return 0 ;;
+        off|no|n|false|none) set_env_key OFFICE_CONVERTER 0 ;;
+        *) set_env_key OFFICE_CONVERTER 1 ;;
+    esac
+    echo -e "  ${YELLOW}!${NC} OFFICE_CONVERTER=$v in .env is not 1 or 0: now $(env_get OFFICE_CONVERTER)"
+}
+
+# The services to pull: none named (= every service) while the office
+# converter runs, else every service but the converter and its gate (at
+# scale 0 a plain `docker compose pull` would still download the image).
+# Usage: docker compose pull $(pull_services [-f FILE …])   (compose files of
+# the current mode when none are given)
+pull_services() {
+    office_converter_on && return 0
+    if [ $# -gt 0 ]; then
+        docker compose "$@" config --services 2>/dev/null
+    else
+        docker compose ${COMPOSE_FILES[@]+"${COMPOSE_FILES[@]}"} config --services 2>/dev/null
+    fi | grep -vxE 'office|office-gate' || true
+}
+
 DB_USER="$(env_get POSTGRES_USER)"; DB_USER="${DB_USER:-odoo}"
 
 # ── Host paths ────────────────────────────────

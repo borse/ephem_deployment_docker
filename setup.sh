@@ -622,6 +622,7 @@ DIRECT_PORT=""
 PROXY_BIND_HOST=""
 PROXY_FROM=""
 PROXY_DOMAIN=""
+OFFICE_CONVERTER_CHOICE=""   # server mode: 1 or 0, saved in .env below
 # The address and domain checks live in nginx-lib.sh; a subshell keeps its
 # names out of this script.
 nginx_lib() { ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; "$@" ); }
@@ -766,6 +767,25 @@ if [ "$MODE" = "server" ]; then
         else
             echo -e "${YELLOW}!${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072 for any machine that reaches it, until PROXY_FROM is set; the proxy serves https://$PROXY_DOMAIN"
         fi
+    fi
+    # The office converter (OFFICE_CONVERTER in .env, written once .env
+    # exists, below). Enter keeps what the server has now: installed, unless
+    # it was turned off before.
+    echo ""
+    echo "Document converter (LibreOffice in its own sealed container, about 600 MB):"
+    echo "  it lets ePHEM AI read older Office, OpenDocument and RTF files (.doc, .ppt, .rtf, .odt)."
+    echo "  Without it those files are not read; .docx, .pptx, .xlsx and PDF files are read either way."
+    if office_converter_on; then
+        read -p "Install the document converter? [Y/n]: " OFFICE_ANSWER
+        [[ "${OFFICE_ANSWER:-Y}" =~ ^[Nn] ]] && OFFICE_CONVERTER_CHOICE=0 || OFFICE_CONVERTER_CHOICE=1
+    else
+        read -p "Install the document converter? [y/N]: " OFFICE_ANSWER
+        [[ "${OFFICE_ANSWER:-N}" =~ ^[Yy] ]] && OFFICE_CONVERTER_CHOICE=1 || OFFICE_CONVERTER_CHOICE=0
+    fi
+    if [ "$OFFICE_CONVERTER_CHOICE" = 1 ]; then
+        echo -e "${GREEN}✓${NC} The document converter will run (OFFICE_CONVERTER=1)"
+    else
+        echo -e "${GREEN}✓${NC} No document converter (OFFICE_CONVERTER=0); run setup again to add it"
     fi
 fi
 
@@ -958,13 +978,23 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         ensure_native_image_arch
         read -p "  Pull latest Odoo image first? [y/N]: " PULL_IMG
+        office_converter_normalize
         if [[ "${PULL_IMG:-N}" =~ ^[Yy]$ ]]; then
-            echo "  Pulling the ePHEM images, borrs/ephem and borrs/ephem-office (this may take a few minutes)..."
+            # The office image only while the converter runs (OFFICE_CONVERTER).
+            if office_converter_on; then
+                OFFICE_SVC=office
+                echo "  Pulling the ePHEM images, borrs/ephem and borrs/ephem-office (this may take a few minutes)..."
+            else
+                OFFICE_SVC=""
+                echo "  Pulling the ePHEM image, borrs/ephem (this may take a few minutes)..."
+            fi
+            # shellcheck disable=SC2046  # one service name per word
             if [ -f docker-compose.dev-multi.yml ]; then
                 docker compose -f docker-compose.yml -f docker-compose.dev-multi.yml pull \
-                    || docker compose pull odoo office || true
+                    $(pull_services -f docker-compose.yml -f docker-compose.dev-multi.yml) \
+                    || docker compose pull odoo $OFFICE_SVC || true
             else
-                docker compose pull odoo office || true
+                docker compose pull odoo $OFFICE_SVC || true
             fi
         fi
 
@@ -1357,6 +1387,14 @@ fi
 # The file holds the database passwords and the Odoo master password. Created
 # 0644 by the copy above and by every earlier version of this script.
 [ -f .env ] && chmod 600 .env 2>/dev/null || true
+
+# ── Office converter: the server's answer, and a value compose can read ──
+if [ -f .env ]; then
+    office_converter_normalize
+    if [ -n "$OFFICE_CONVERTER_CHOICE" ]; then
+        set_env_key OFFICE_CONVERTER "$OFFICE_CONVERTER_CHOICE"
+    fi
+fi
 
 # ── Nginx config ─────────────────────────────
 if [ ! -f "nginx/active.conf" ] && [ -f "nginx/default.conf" ]; then

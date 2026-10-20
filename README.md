@@ -237,6 +237,16 @@ closed, Secure session cookie), plus gzip, HTTP/2 and a cache for the static
 files, and works on nginx 1.18 and newer. Changing the upload limit or the RPC
 endpoints in `bash manage.sh` rewrites it: copy it again then.
 
+**Document converter.** Setup then asks whether to install the office
+converter (`borrs/ephem-office`, LibreOffice in its own container with no
+route out, about 600 MB). It lets ePHEM AI read older Office, OpenDocument
+and RTF files (`.doc`, `.ppt`, `.rtf`, `.odt`); without it those files are
+reported as unreadable, while `.docx`, `.pptx`, `.xlsx` and PDF are read
+either way. The answer is saved as `OFFICE_CONVERTER` in `.env` (`1`, or
+empty, installed; `0` not installed). Run setup again, or use
+`bash manage.sh` → Advanced → Document converter, to switch it either way.
+Servers set up before this question keep their converter.
+
 ### Configure Your Settings
 
 When you run `bash setup.sh` and choose **1**, the script creates a `.env` file from the template and immediately stops to ask you to fill it in. Open it:
@@ -843,7 +853,10 @@ Some updates need a step or two more on an existing server. Those are written up
 ePHEM runs two images released under the same version number: the app image
 (`borrs/ephem`) and the office converter (`borrs/ephem-office`, LibreOffice for
 ePHEM AI's old Office files, on an internal network with no route out). One
-pull takes both; `up -d` recreates both containers.
+pull takes both; `up -d` recreates both containers. With the converter not
+installed (`OFFICE_CONVERTER=0`) `up -d` leaves it out, but a plain
+`docker compose pull` still downloads its image; `bash manage.sh` → 4) pulls
+only what runs.
 
 ```bash
 bash scripts/backup.sh

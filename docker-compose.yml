@@ -108,9 +108,17 @@ services:
   # office-link. A conversion is one request that Odoo opens and the answer
   # comes back on that same connection; the office never opens one of its own
   # toward Odoo, and nothing in its network leads there.
+  #
+  # Optional: OFFICE_CONVERTER in .env (asked by bash setup.sh) is the scale
+  # of this service and of office-gate. 1, or absent (servers set up before
+  # the key), runs both; 0 runs neither, and ePHEM AI then reports such files
+  # as unreadable. A number only: docker compose cannot read "off". A plain
+  # `docker compose pull` still downloads the image at 0; manage.sh and
+  # setup.sh leave it out (pull_services in scripts/stack-lib.sh).
   office:
     image: borrs/ephem-office:${EPHEM_OFFICE_TAG:-${EPHEM_IMAGE_TAG:-latest}}
     container_name: ephem-office
+    scale: ${OFFICE_CONVERTER:-1}
     restart: unless-stopped
     # Reaps a LibreOffice left behind when a conversion is killed.
     init: true
@@ -148,10 +156,13 @@ services:
   office-gate:
     image: nginx:alpine
     container_name: ephem-office-gate
+    scale: ${OFFICE_CONVERTER:-1}
     restart: unless-stopped
     depends_on:
       office:
         condition: service_healthy
+        # With OFFICE_CONVERTER=0 neither service exists: nothing to wait for.
+        required: false
     user: "101:101"
     read_only: true
     command: ["nginx", "-c", "/etc/ephem-office-gate/nginx.conf", "-g", "daemon off;"]

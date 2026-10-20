@@ -77,6 +77,8 @@ if [ "$EPHEM_MODE_SOURCE" = detected ]; then
         echo -e "  ${GREEN}✓${NC} EPHEM_MODE=$EPHEM_MODE saved. Wrong? Edit .env, or re-run bash setup.sh."
     fi
 fi
+# OFFICE_CONVERTER written by hand as "off" would stop every compose command.
+office_converter_normalize
 # dev-multi: remember the instance for next time.
 if [ "$EPHEM_MODE" = dev-multi ] && [ "$(env_get EPHEM_INSTANCE)" != "$EPHEM_INSTANCE" ]; then
     stack_pin_instance "$EPHEM_INSTANCE"
@@ -746,7 +748,11 @@ menu_status() {
     if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none, or database not running)"; fi
     echo ""
     echo -e "${BOLD}App image:${NC}  borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest  (! unpinned — set EPHEM_IMAGE_TAG in .env on production)')"
-    echo -e "${BOLD}Office image:${NC} borrs/ephem-office:$(env_get EPHEM_OFFICE_TAG | grep . || env_get EPHEM_IMAGE_TAG | grep . || echo latest)"
+    if office_converter_on; then
+        echo -e "${BOLD}Office image:${NC} borrs/ephem-office:$(env_get EPHEM_OFFICE_TAG | grep . || env_get EPHEM_IMAGE_TAG | grep . || echo latest)"
+    else
+        echo -e "${BOLD}Office image:${NC} not installed (OFFICE_CONVERTER=0, Advanced → Document converter)"
+    fi
     echo -e "${BOLD}Addons ($ADDONS_NAME/):${NC}"
     sources_table "$ADDONS_DIR"
     echo -e "${BOLD}Disk:${NC}"
@@ -988,17 +994,20 @@ menu_update_app() {
         # The office converter (borrs/ephem-office) is released under the same
         # number since 1.0.5 and follows EPHEM_IMAGE_TAG. For a release
         # without one, pin the office image to what runs today so the pull
-        # below cannot fail on it.
-        echo -n "  Checking that borrs/ephem-office:$NEWTAG exists too... "
-        if docker manifest inspect "borrs/ephem-office:$NEWTAG" >/dev/null 2>&1; then
-            echo "yes"
-            set_env_key EPHEM_OFFICE_TAG ""
-        else
-            echo "no"
-            local OFFICE_KEEP; OFFICE_KEEP=$(env_get EPHEM_OFFICE_TAG); OFFICE_KEEP="${OFFICE_KEEP:-${TAG:-latest}}"
-            set_env_key EPHEM_OFFICE_TAG "$OFFICE_KEEP"
-            echo -e "  ${YELLOW}!${NC} That release has no office converter image: keeping borrs/ephem-office:$OFFICE_KEEP"
-            echo "     (EPHEM_OFFICE_TAG in .env; clear it once you pin a release that has one)."
+        # below cannot fail on it. Not installed (OFFICE_CONVERTER=0): nothing
+        # to check, EPHEM_OFFICE_TAG is left as it is.
+        if office_converter_on; then
+            echo -n "  Checking that borrs/ephem-office:$NEWTAG exists too... "
+            if docker manifest inspect "borrs/ephem-office:$NEWTAG" >/dev/null 2>&1; then
+                echo "yes"
+                set_env_key EPHEM_OFFICE_TAG ""
+            else
+                echo "no"
+                local OFFICE_KEEP; OFFICE_KEEP=$(env_get EPHEM_OFFICE_TAG); OFFICE_KEEP="${OFFICE_KEEP:-${TAG:-latest}}"
+                set_env_key EPHEM_OFFICE_TAG "$OFFICE_KEEP"
+                echo -e "  ${YELLOW}!${NC} That release has no office converter image: keeping borrs/ephem-office:$OFFICE_KEEP"
+                echo "     (EPHEM_OFFICE_TAG in .env; clear it once you pin a release that has one)."
+            fi
         fi
         set_env_key EPHEM_IMAGE_TAG "$NEWTAG"
         echo -e "  ${GREEN}✓${NC} EPHEM_IMAGE_TAG=$NEWTAG"
@@ -1009,7 +1018,8 @@ menu_update_app() {
     echo ""
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
     local before; before=$(odoo_cid)
-    compose pull && compose up -d
+    # shellcheck disable=SC2046  # one service name per word (none = every service)
+    compose pull $(pull_services) && compose up -d
     nginx_follow_odoo "$before"      # a new image means a new container: nginx re-resolves
     echo ""
     echo "  If this release includes module changes, run menu item 6 next"
@@ -1998,6 +2008,8 @@ menu_security() {
         [ "$(svc_state office-gate)" = running ] \
             && echo -e "  ${GREEN}✓${NC} Odoo reaches the converter only through the office gate" \
             || echo -e "  ${YELLOW}!${NC} the office gate is not running: ePHEM AI cannot read old Office files (docker compose up -d office-gate)"
+    elif ! office_converter_on; then
+        echo -e "  ${GREEN}✓${NC} no office converter installed (OFFICE_CONVERTER=0): ePHEM AI does not read old Office files"
     fi
     if [ "$(server_access)" = proxy ]; then
         bash "$SCRIPT_DIR/scripts/proxy-firewall.sh" check || true
@@ -2111,6 +2123,40 @@ menu_capacity() {
         b) return 0 ;;
         *) invalid_choice ;;
     esac
+}
+
+# ── Document converter ────────────────────────
+# OFFICE_CONVERTER in .env is the scale of the office and office-gate
+# services (docker-compose.yml): `up -d office office-gate` creates or
+# removes both and touches nothing else. Odoo keeps running throughout; it
+# reaches the converter per conversion only.
+menu_office() {
+    local R
+    echo -e "${CYAN}${BOLD}Document converter${NC}"
+    echo ""
+    echo "  LibreOffice in its own sealed container (borrs/ephem-office, about 600 MB)."
+    echo "  It lets ePHEM AI read older Office, OpenDocument and RTF files (.doc, .ppt,"
+    echo "  .rtf, .odt). Without it those files are not read; .docx, .pptx, .xlsx and"
+    echo "  PDF files are read either way."
+    echo ""
+    if office_converter_on; then
+        echo -e "  Now: ${BOLD}installed${NC}  (converter: $(svc_state office), gate: $(svc_state office-gate))"
+        read -r -p "  Remove it? [y/N]: " R
+        [[ "${R:-N}" =~ ^[Yy]$ ]] || { echo "  Nothing changed."; return 0; }
+        set_env_key OFFICE_CONVERTER 0
+    else
+        echo -e "  Now: ${BOLD}not installed${NC}  (OFFICE_CONVERTER=0 in .env)"
+        read -r -p "  Install it? [Y/n]: " R
+        [[ "${R:-Y}" =~ ^[Nn]$ ]] && { echo "  Nothing changed."; return 0; }
+        set_env_key OFFICE_CONVERTER 1
+    fi
+    echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d office office-gate   (OFFICE_CONVERTER=$(env_get OFFICE_CONVERTER))"
+    if compose up -d office office-gate; then
+        echo -e "  ${GREEN}✓${NC} converter: $(svc_state office), gate: $(svc_state office-gate)"
+    else
+        echo -e "  ${RED}✗${NC} See the output above. OFFICE_CONVERTER is saved in .env; run $(compose_cmd_text) up -d office office-gate again once fixed."
+        return 1
+    fi
 }
 
 capacity_change() {  # capacity_change CURRENT_WORKERS CURRENT_CRON SUGGESTED_WORKERS
@@ -2756,9 +2802,10 @@ menu_advanced() {
     echo "  5) Database routing — which database answers which domain (dbfilter)"
     echo "  6) Local basemap: the maps draw from a file on this server"
     echo "  7) Workers and scheduled jobs: check the load, change them"
+    echo "  8) Document converter (ePHEM AI's reader of old Office files): install / remove"
     echo "  b) Back"
     echo "  x) Exit"
-    ask_choice "1-7"
+    ask_choice "1-8"
     case "$CHOICE" in
         1) menu_service ;;
         2) menu_db_admin ;;
@@ -2767,6 +2814,7 @@ menu_advanced() {
         5) menu_dbfilter ;;
         6) menu_basemap ;;
         7) menu_capacity ;;
+        8) menu_office ;;
         b) return 0 ;;
         *) invalid_choice ;;
     esac
@@ -3188,7 +3236,8 @@ menu_image_local() {
     # a failed pull is explained (WSL credential helper, registry, network).
     ensure_native_image_arch
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) pull && $(compose_cmd_text) up -d"
-    docker_pull_with_diagnosis || return 1
+    # shellcheck disable=SC2046  # one service name per word (none = every service)
+    docker_pull_with_diagnosis $(pull_services) || return 1
     compose up -d || { echo -e "  ${RED}✗${NC} See the output above."; return 1; }
     echo "  Now:  $(image_summary)"
     wait_for_odoo
@@ -3319,7 +3368,7 @@ menu_main_server() {
         echo "  8) Follow Odoo logs (Ctrl-C to stop)"
         echo "  9) Security check"
         echo " 10) Upload size limit (fix '413 Request Entity Too Large')"
-        echo " 11) Advanced — service, databases, database manager, RPC endpoints, workers"
+        echo " 11) Advanced — service, databases, database manager, RPC endpoints, workers, document converter"
         echo "  x) Exit"
         echo ""
         ask_choice "1-11" "x"
