@@ -55,16 +55,19 @@ NC="${NC:-\033[0m}"
 # (grep exits 1 on no match).
 env_get() { grep "^$1=" "$EPHEM_ROOT/.env" 2>/dev/null | cut -d'=' -f2- | xargs || true; }
 
+# Without sed -i, which macOS's sed reads differently (it wants -i ''). The
+# value goes through ENVIRON, not awk -v, so backslashes stay as typed; awk
+# also ends a last line that had no newline. Rewritten in place (cat >) to
+# keep the file's permissions.
 set_env_key() {  # set_env_key KEY VALUE: update or append KEY=VALUE in .env
-    local f="$EPHEM_ROOT/.env"
+    local f="$EPHEM_ROOT/.env" tmp
     [ -f "$f" ] || touch "$f"
-    if grep -q "^$1=" "$f"; then
-        sed -i "s|^$1=.*|$1=$2|" "$f"
-    else
-        # A .env whose last line has no newline would otherwise swallow the key.
-        [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"
-        printf '%s=%s\n' "$1" "$2" >> "$f"
-    fi
+    tmp="$(mktemp)"
+    K="$1" V="$2" awk '
+        index($0, ENVIRON["K"] "=") == 1 { print ENVIRON["K"] "=" ENVIRON["V"]; done = 1; next }
+        { print }
+        END { if (!done) print ENVIRON["K"] "=" ENVIRON["V"] }' "$f" > "$tmp" && cat "$tmp" > "$f"
+    rm -f "$tmp"
 }
 
 DB_USER="$(env_get POSTGRES_USER)"; DB_USER="${DB_USER:-odoo}"
