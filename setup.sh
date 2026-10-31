@@ -1323,7 +1323,7 @@ if [ -f ".env" ]; then
     if [ -n "$ENV_DOMAIN" ]; then
         echo -e "${GREEN}✓${NC} Domain: $ENV_DOMAIN"
     else
-        SERVER_IP=$(get_server_ip)
+        SERVER_IP=$(get_lan_ip)   # the Windows host address under WSL
         if [ "$SERVER_ACCESS" = direct ]; then
             echo -e "${GREEN}✓${NC} No domain needed — Odoo on http://$SERVER_IP:$DIRECT_PORT"
         elif [ "$SERVER_ACCESS" = proxy ]; then
@@ -1597,6 +1597,15 @@ ODOOEOF
             WORKERS_LINES="; Reached directly (SERVER_ACCESS=direct, published on port $DIRECT_PORT of the
 ; server): threaded mode, which also serves the live-update websocket on the
 ; web port. Behind nginx this is ODOO_WORKERS from .env (4 when empty).
+workers = 0"
+        elif [ "$MODE" = "demo" ]; then
+            # Demo has no nginx either (its override publishes 8069 itself),
+            # so the same reasoning: with workers the browser's websocket on
+            # 8069 is refused and live updates never arrive, and proxy_mode
+            # would trust X-Forwarded-* headers any client can write.
+            PROXY_MODE=False
+            WORKERS_LINES="; Demo: Odoo is reached directly on port 8069, no nginx: threaded mode, which
+; also serves the live-update websocket on the web port.
 workers = 0"
         else
             # Behind nginx: this server's own, or with SERVER_ACCESS=proxy the
@@ -2017,7 +2026,7 @@ echo ""
 
 ENV_DOMAIN=$(grep "^DOMAIN=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
 ENV_EMAIL=$(grep "^SSL_EMAIL=" .env 2>/dev/null | cut -d'=' -f2- | xargs)
-SERVER_IP=$(get_server_ip)
+SERVER_IP=$(get_lan_ip)   # the Windows host address under WSL, where Docker Desktop publishes the ports
 
 if [ "$MODE" = "developer" ]; then
     # Paths go through host_path: PyCharm runs on the host GUI, which under WSL
