@@ -99,6 +99,29 @@ else
     COMPOSE=(docker compose)
 fi
 
+# ── Starting and restarting go through stack-lib.sh ───────
+# svc_start and svc_restart recreate a container that docker refuses to
+# start, instead of failing on it. The usual case here: after a Docker
+# Desktop restart a single file mount (odoo-N.conf) no longer resolves and
+# every start ends in "not a directory", exit 127. Data volumes are kept.
+# They act on the compose files chosen above, so nothing else changes.
+# shellcheck source=stack-lib.sh
+source scripts/stack-lib.sh
+ODOO_SVC="$service"
+# EPHEM_MODE here only picks the command text stack-lib prints.
+if [ -n "$NAME" ]; then
+    EPHEM_MODE=dev-multi
+    COMPOSE_FILES=("${COMPOSE[@]:2}")
+else
+    EPHEM_MODE=dev
+    # What a plain `docker compose` loads. Never empty: bash 3.2 (macOS)
+    # treats an empty array as unbound under set -u.
+    COMPOSE_FILES=(-f docker-compose.yml)
+    if [ -f docker-compose.override.yml ]; then
+        COMPOSE_FILES+=(-f docker-compose.override.yml)
+    fi
+fi
+
 # ── Did the user pass a -u/-i (one-shot run requested)? ───
 needs_oneshot=0
 if [ ${#ODOO_ARGS[@]} -gt 0 ]; then
@@ -130,7 +153,7 @@ restore_service() {
     if [ "$STOPPED_BY_US" -eq 1 ]; then
         STOPPED_BY_US=0
         echo "▶ Starting $service back up…"
-        "${COMPOSE[@]}" start "$service" >/dev/null 2>&1 || "${COMPOSE[@]}" up -d "$service"
+        svc_start "$service" || echo "✗ $service did not start (see above)."
     fi
 }
 trap restore_service EXIT
@@ -228,7 +251,12 @@ if [ "$needs_oneshot" -eq 1 ]; then
     fi
 else
     echo "↻ Restarting $service…"
-    "${COMPOSE[@]}" restart "$service"
+    # A removed container is created; restart would silently do nothing.
+    if [ "$(svc_state "$service")" = absent ]; then
+        svc_start "$service"
+    else
+        svc_restart "$service"
+    fi
 fi
 
 if [ "$FOLLOW" -eq 0 ]; then
