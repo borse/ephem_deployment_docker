@@ -270,12 +270,178 @@ run_batch_update() {
         sh -c "odoo $FLAG $MODULES_CSV -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER --db_password \$PASSWORD --stop-after-init --no-http" \
         </dev/null 2>&1 | \
         tee -a "$LOG_FILE" | \
-        grep --line-buffered -E "INFO|WARNING|ERROR|CRITICAL|Loading|loading|Updat|updat|instal" | \
-        sed 's/^/    /'
+        filter_output
 
     # Check exit code from the pipe
     local EXIT_CODE=${PIPESTATUS[0]}
     return $EXIT_CODE
+}
+
+# ── Timing and the progress bar ──────────────
+# Each database is timed; the time left is the average of the databases done
+# so far times the ones still to go. On a terminal a status line is pinned to
+# the bottom row (a scroll region keeps the log scrolling above it), redrawn
+# twice a second by a background ticker. Not a terminal (piped, cron, CI):
+# no bar, the times are printed on the completion lines only.
+fmt_dur() {
+    local s=$1
+    if [ "$s" -ge 3600 ]; then printf '%dh %02dm' $((s/3600)) $((s%3600/60))
+    elif [ "$s" -ge 60 ]; then printf '%dm %02ds' $((s/60)) $((s%60))
+    else printf '%ds' "$s"; fi
+}
+
+PROGRESS_ON=false
+PROGRESS_STATE=""
+TICKER_PID=""
+if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ] && [ -z "${NO_PROGRESS:-}" ] \
+   && stty size </dev/tty >/dev/null 2>&1; then
+    PROGRESS_ON=true
+fi
+
+# Odoo's log, filtered for the screen as before. "Loading module X (i/N)" is
+# what Odoo prints for each module it updates: it also goes to the bar.
+filter_output() {
+    local line re_mod='Loading module ([^ ]+) \(([0-9]+)/([0-9]+)\)'
+    local re_show='INFO|WARNING|ERROR|CRITICAL|Loading|loading|Updat|updat|instal'
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -n "$PROGRESS_STATE" ]; then
+            if [[ $line =~ $re_mod ]]; then
+                printf 'module %s/%s %s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" > "$PROGRESS_STATE"
+            elif [[ $line == *"Modules loaded."* ]]; then
+                printf 'finishing\n' > "$PROGRESS_STATE"
+            fi
+        fi
+        [[ $line =~ $re_show ]] && printf '    %s\n' "$line"
+    done
+    return 0
+}
+
+# Size of the terminal: "rows cols".
+term_size() { stty size </dev/tty 2>/dev/null || echo "24 80"; }
+
+progress_setup() {
+    [ "$PROGRESS_ON" = true ] || return 0
+    PROGRESS_STATE=$(mktemp)
+    local rows _c
+    read -r rows _c < <(term_size)
+    # One blank line so the cursor is never on the row the bar takes, then
+    # the scroll region rows 1..rows-1 (setting it moves the cursor, hence
+    # the save and restore around it).
+    printf '\n\033[1A\x1b7\033[1;%dr\x1b8' $((rows-1))
+    trap progress_teardown EXIT
+    trap 'progress_teardown; exit 130' INT TERM
+}
+
+progress_teardown() {
+    [ "$PROGRESS_ON" = true ] || return 0
+    progress_stop_ticker
+    local rows _c
+    read -r rows _c < <(term_size)
+    # Whole terminal scrolls again; wipe the bar row.
+    printf '\x1b7\033[r\x1b8\x1b7\033[%d;1H\033[2K\x1b8' "$rows"
+    rm -f "$PROGRESS_STATE"
+    PROGRESS_STATE=""
+    PROGRESS_ON=false
+}
+
+progress_stop_ticker() {
+    if [ -n "$TICKER_PID" ]; then
+        kill "$TICKER_PID" 2>/dev/null || true
+        wait "$TICKER_PID" 2>/dev/null || true
+        TICKER_PID=""
+    fi
+}
+
+# Background redraw of the bottom row for the database being updated.
+# Args: index total db db_start run_start done_seconds done_count
+progress_ticker() {
+    set +e
+    local idx=$1 total=$2 db=$3 db_start=$4 run_start=$5 done_sum=$6 done_n=$7
+    local frames='|/-\' f=0 rows cols last_rows=0 last_cols=0 status="starting Odoo" st
+    while :; do
+        read -r rows cols < <(term_size)
+        if [ "$rows" != "$last_rows" ] || [ "$cols" != "$last_cols" ]; then
+            printf '\x1b7\033[1;%dr\x1b8' $((rows-1))   # resized: move the region
+            last_rows=$rows; last_cols=$cols
+        fi
+        st=$(cat "$PROGRESS_STATE" 2>/dev/null); [ -n "$st" ] && status=$st
+
+        local now el_db el_run frac pct eta_txt
+        now=$(date +%s); el_db=$((now-db_start)); el_run=$((now-run_start))
+        # Share of the run done: finished databases, plus the current one
+        # estimated from the average (capped at 95% of it).
+        frac=$(( (idx-1)*1000 ))
+        if [ "$done_n" -gt 0 ]; then
+            local avg=$((done_sum/done_n)) cur
+            cur=$(( el_db*1000/(avg>0?avg:1) )); [ $cur -gt 950 ] && cur=950
+            frac=$((frac+cur))
+            local left=$(( avg-el_db )); [ $left -lt 0 ] && left=0
+            left=$(( left + avg*(total-idx) ))
+            eta_txt="~$(fmt_dur $left) left"
+        else
+            eta_txt="time left after the first database"
+        fi
+        pct=$(( frac/total/10 ))
+
+        local barw=20 fill bar
+        fill=$(( pct*barw/100 ))
+        bar=$(printf '%*s' "$fill" '' | tr ' ' '#')$(printf '%*s' $((barw-fill)) '' | tr ' ' '.')
+        local plain=" ${frames:f%4:1} DB $idx/$total $db [$bar] $pct%  this db $(fmt_dur $el_db)  total $(fmt_dur $el_run)  $eta_txt  | $status"
+        # Never reach the last column: a wrap on the bottom row scrolls the screen.
+        plain=${plain:0:$((cols-1))}
+        printf '\x1b7\033[%d;1H\033[7m%s\033[K\033[0m\x1b8' "$rows" "$plain"
+        f=$((f+1))
+        sleep 0.5
+    done
+}
+
+# ── Run the update on every database in RUN_DBS ──
+# Args: the modules. Fills FAILED_DBS; prints the time each database took
+# and the time left.
+run_databases() {
+    local total=${#RUN_DBS[@]} idx=0 run_start db_start dur done_sum=0 done_n=0
+    run_start=$(date +%s)
+    FAILED_DBS=()
+    progress_setup
+
+    for DB in "${RUN_DBS[@]}"; do
+        idx=$((idx+1))
+        echo ""
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${CYAN}  Database: $DB  ($idx/$total)${NC}"
+        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+
+        echo "--- $DB ---" >> "$LOG_FILE"
+        db_start=$(date +%s)
+        if [ "$PROGRESS_ON" = true ]; then
+            : > "$PROGRESS_STATE"
+            progress_ticker "$idx" "$total" "$DB" "$db_start" "$run_start" "$done_sum" "$done_n" &
+            TICKER_PID=$!
+        fi
+
+        local ok=true
+        run_batch_update "$DB" "$@" || ok=false
+        progress_stop_ticker
+
+        dur=$(( $(date +%s) - db_start ))
+        done_sum=$((done_sum+dur)); done_n=$((done_n+1))
+        local avg=$((done_sum/done_n)) left_n=$((total-idx)) tail=""
+        if [ "$left_n" -gt 0 ]; then
+            tail="  ·  $idx/$total done, ~$(fmt_dur $((avg*left_n))) left (avg $(fmt_dur $avg) per database)"
+        fi
+        echo ""
+        if [ "$ok" = true ]; then
+            echo -e "  ${GREEN}✓ $DB completed in $(fmt_dur $dur)${NC}$tail"
+        else
+            echo -e "  ${RED}✗ $DB had errors after $(fmt_dur $dur) (check log)${NC}$tail"
+            FAILED_DBS+=("$DB")
+        fi
+        echo "--- $DB: $([ "$ok" = true ] && echo ok || echo errors) in $(fmt_dur $dur) ---" >> "$LOG_FILE"
+    done
+
+    progress_teardown
+    RUN_SECONDS=$(( $(date +%s) - run_start ))
 }
 
 # ── Print header ─────────────────────────────
@@ -320,31 +486,13 @@ if [ "$AUTO_MODE" = true ]; then
     echo -e "${BOLD}Modules:${NC}   ${#MODULES[@]} modules (batch)"
     echo ""
 
-    FAILED_DBS=()
     odoo_pause
-
-    for DB in "${DATABASES[@]}"; do
-        echo ""
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${CYAN}  Database: $DB${NC}"
-        echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
-
-        echo "--- $DB ---" >> "$LOG_FILE"
-
-        if run_batch_update "$DB" "${MODULES[@]}"; then
-            echo ""
-            echo -e "  ${GREEN}✓ $DB completed${NC}"
-        else
-            echo ""
-            echo -e "  ${RED}✗ $DB had errors (check log)${NC}"
-            FAILED_DBS+=("$DB")
-        fi
-    done
+    RUN_DBS=("${DATABASES[@]}")
+    run_databases "${MODULES[@]}"
 
     echo ""
     echo "========================================="
-    echo -e "${GREEN}✓ Update complete${NC}"
+    echo -e "${GREEN}✓ Update complete${NC} in $(fmt_dur $RUN_SECONDS)"
 
     if [ ${#FAILED_DBS[@]} -gt 0 ]; then
         echo -e "${RED}  Databases with errors: ${FAILED_DBS[*]}${NC}"
@@ -448,33 +596,15 @@ fi
 # Step 5: Execute (batch per database)
 echo ""
 
-FAILED_DBS=()
+SPECIFIC_ACTION="$ACTION"
 odoo_pause
-
-for DB in "${SELECTED_DBS[@]}"; do
-    echo ""
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${CYAN}  Database: $DB${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-
-    SPECIFIC_ACTION="$ACTION"
-    echo "--- $DB ---" >> "$LOG_FILE"
-
-    if run_batch_update "$DB" "${SELECTED_MODULES[@]}"; then
-        echo ""
-        echo -e "  ${GREEN}✓ $DB completed${NC}"
-    else
-        echo ""
-        echo -e "  ${RED}✗ $DB had errors (check log)${NC}"
-        FAILED_DBS+=("$DB")
-    fi
-done
+RUN_DBS=("${SELECTED_DBS[@]}")
+run_databases "${SELECTED_MODULES[@]}"
 
 # Summary
 echo ""
 echo "========================================="
-echo -e "${GREEN}✓ Update complete${NC}"
+echo -e "${GREEN}✓ Update complete${NC} in $(fmt_dur $RUN_SECONDS)"
 
 if [ ${#FAILED_DBS[@]} -gt 0 ]; then
     echo -e "${RED}  Databases with errors: ${FAILED_DBS[*]}${NC}"
