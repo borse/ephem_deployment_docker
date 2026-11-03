@@ -158,6 +158,7 @@ MODULES=(
   "eoc_togo"
   "eoc_uganda"
   "eoc_yemen"
+  "eoc_georgia"
   "ephem_api_base"
   "ephem_theme_push"
   "ephem_survey"
