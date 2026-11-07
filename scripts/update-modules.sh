@@ -187,6 +187,7 @@ MODULES=(
   "mail"
   "web_hierarchy"
   "ephem_documents"
+  "ephem_custom_views"
 )
 
 # ── Auto-include the rest ───────────────────────────────────────────
