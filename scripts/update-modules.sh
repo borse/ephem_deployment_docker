@@ -8,6 +8,18 @@
 #   ./scripts/update-modules.sh --auto       (update all modules on all databases)
 #   ./scripts/update-modules.sh --auto --db training-server
 #   ./scripts/update-modules.sh --auto --stop-odoo   (Odoo stopped for the run)
+#   ./scripts/update-modules.sh --auto --changed     (only what changed, per database)
+#   ./scripts/update-modules.sh --auto --ask-odoo    (asks whether to stop Odoo first)
+#
+# What changed: every database keeps a small table, ephem_update_state, with a
+# fingerprint of each module's code as it was when that database last updated
+# it. "Only what changed" (menu c, or --changed) compares those with the code on
+# disk and updates exactly the installed modules that differ, database by
+# database. Every successful run records the modules Odoo updated, whatever
+# was picked. A database with no record yet updates every installed module
+# once, which starts the record. The fingerprint is git's own hash of the
+# module folder; a folder with uncommitted changes, or outside git, is hashed
+# file by file.
 #
 # Server mode: by default Odoo keeps serving while the update runs inside its
 # container, and is restarted at the end. --stop-odoo stops it first instead
@@ -62,6 +74,9 @@ SPECIFIC_DB=""
 SPECIFIC_ACTION=""
 INSTANCE=""
 STOP_ODOO=""            # server mode: yes / no; empty = ask (manual) or no (auto)
+CHANGED_MODE=false      # only the modules whose code changed, per database
+ALL_MODE=false          # manual "0": every listed module installed on each database
+ASK_ODOO=false          # --auto, but ask whether to stop Odoo (manage.sh after a pull)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -71,6 +86,8 @@ while [[ $# -gt 0 ]]; do
         --instance) INSTANCE="$2"; shift 2 ;;
         --stop-odoo)    STOP_ODOO=yes; shift ;;
         --keep-running) STOP_ODOO=no; shift ;;
+        --changed)      CHANGED_MODE=true; shift ;;
+        --ask-odoo)     ASK_ODOO=true; shift ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -348,6 +365,187 @@ run_batch_update() {
     return $EXIT_CODE
 }
 
+# ── What changed, and what Odoo will update ──
+# Odoo updates each module once per run, and with it every installed module
+# that depends on it (their views and data build on it). Picking eoc_base
+# therefore updates nearly all of ePHEM; picking eoc_signals beside it adds
+# nothing. These helpers ask the database itself, so the answer fits each
+# database's own installed modules.
+
+declare -A FP=()          # module -> fingerprint of its code on disk
+declare -A DB_MODULES=()  # database -> its own module list (changed mode)
+FP_DONE=false
+
+db_sql() {  # db_sql DB SQL → rows, one per line ('' on any error)
+    compose exec -T db psql -U "$DB_USER" -d "$1" -t -A -q -c "$2" </dev/null 2>/dev/null | tr -d '\r' || true
+}
+
+dir_fingerprint() {  # every file but compiled Python, in a fixed order
+    (cd "$1" && find . -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0 \
+        | LC_ALL=C sort -z | xargs -0 sha1sum 2>/dev/null) | sha1sum | cut -c1-40
+}
+
+compute_fingerprints() {
+    [ "$FP_DONE" = true ] && return 0
+    local src prefix name _mode type hash path dirty
+    while IFS= read -r src; do
+        [ -d "$src" ] || continue
+        if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            prefix=$(git -C "$src" rev-parse --show-prefix 2>/dev/null)
+            # Committed content: git's tree hash of each folder, all in one call.
+            while read -r _mode type hash name; do
+                [ "$type" = tree ] && [ -f "$src/$name/__manifest__.py" ] && FP[$name]="$hash"
+            done < <(git -C "$src" ls-tree "HEAD:$prefix" 2>/dev/null || true)
+            # Folders with uncommitted or new files: their files, hashed.
+            dirty=$(git -C "$src" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null \
+                | sed -E 's/^.{3}//; s/^.* -> //; s/^"//' | sed "s#^$prefix##" | cut -d/ -f1 | sort -u || true)
+            for name in $dirty; do
+                [ -f "$src/$name/__manifest__.py" ] && FP[$name]=$(dir_fingerprint "$src/$name")
+            done
+        else
+            for path in "$src"/*/; do
+                name=$(basename "$path")
+                [ -f "$path/__manifest__.py" ] && FP[$name]=$(dir_fingerprint "$path")
+            done
+        fi
+    done < <(addons_module_dirs "$ADDONS_DIR")
+    FP_DONE=true
+}
+
+# Installed modules covered by a pick, as "module origin" rows: the pick
+# itself and every installed module depending on it, directly or not.
+db_coverage() {  # db_coverage DB MODULE...
+    local db="$1" csv m; shift
+    csv=""
+    for m in "$@"; do [[ "$m" =~ ^[A-Za-z0-9_]+$ ]] && csv="$csv,$m"; done
+    csv="${csv#,}"
+    [ -n "$csv" ] || return 0
+    db_sql "$db" "WITH RECURSIVE dep AS (
+          SELECT m.name AS module, d.name AS parent
+            FROM ir_module_module m JOIN ir_module_module_dependency d ON d.module_id = m.id
+           WHERE m.state IN ('installed', 'to upgrade')),
+        picks(name) AS (SELECT unnest(string_to_array('$csv', ','))),
+        cov(name, origin) AS (
+          SELECT p.name, p.name FROM picks p
+            JOIN ir_module_module m ON m.name = p.name AND m.state IN ('installed', 'to upgrade')
+          UNION
+          SELECT dep.module, cov.origin FROM dep JOIN cov ON dep.parent = cov.name)
+        SELECT name || ' ' || origin FROM cov"
+}
+
+show_scope() {  # show_scope DB MODULE...: what Odoo will update there, and why
+    local db="$1"; shift
+    local rows covered redundant=() missing=() m n
+    rows=$(db_coverage "$db" "$@")
+    covered=$(awk '{print $1}' <<< "$rows" | grep . | sort -u || true)
+    n=$(grep -c . <<< "$covered" || true)
+    for m in "$@"; do
+        if ! grep -qx "$m $m" <<< "$rows"; then
+            missing+=("$m")
+        elif awk -v m="$m" '$1 == m && $2 != m {f=1} END {exit !f}' <<< "$rows"; then
+            redundant+=("$m")
+        fi
+    done
+    echo -e "  ${BOLD}$db${NC}: Odoo updates ${BOLD}$n${NC} installed module(s) for this selection."
+    if [ ${#redundant[@]} -gt 5 ]; then
+        echo "    ${#redundant[@]} of these picks are already covered by another one (${redundant[*]:0:5} ...): harmless, each module runs once."
+    elif [ ${#redundant[@]} -gt 0 ]; then
+        echo "    Already covered by another pick: $(echo "${redundant[*]}" | tr ' ' ',' | sed 's/,/, /g')"
+    fi
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "    Not installed here, skipped: $(echo "${missing[*]}" | tr ' ' ',' | sed 's/,/, /g')"
+    fi
+    echo "--- scope on $db: $(echo $covered | tr ' ' ',') ---" >> "$LOG_FILE"
+}
+
+# The installed modules whose code changed since this database last recorded
+# them (every installed module when it has no record yet).
+changed_modules() {  # changed_modules DB → module names, one per line
+    local db="$1" m
+    compute_fingerprints
+    local installed state
+    installed=$(db_sql "$db" "SELECT name FROM ir_module_module WHERE state = 'installed' ORDER BY name")
+    if [ "$(db_sql "$db" "SELECT to_regclass('ephem_update_state') IS NOT NULL")" != t ]; then
+        for m in $installed; do [ -n "${FP[$m]:-}" ] && echo "$m"; done
+        return 0
+    fi
+    declare -A known=()
+    while read -r m state; do [ -n "$m" ] && known[$m]="$state"; done \
+        < <(db_sql "$db" "SELECT module || ' ' || fingerprint FROM ephem_update_state")
+    for m in $installed; do
+        [ -n "${FP[$m]:-}" ] && [ "${known[$m]:-}" != "${FP[$m]}" ] && echo "$m"
+    done
+    return 0
+}
+
+# "All": every module installed on this database whose code is in our own
+# folders (ePHEM-core and the repositories added from manage.sh → Addons),
+# the listed ones first in list order. Odoo's official addons (base, mail...)
+# are never in those folders, so they never count, even where the list names
+# one; nor does an entry whose code is gone.
+installed_from_list() {  # installed_from_list DB → module names, one per line
+    local m
+    compute_fingerprints
+    declare -A here=() seen=()
+    for m in $(db_sql "$1" "SELECT name FROM ir_module_module WHERE state = 'installed'"); do here[$m]=1; done
+    for m in "${MODULES[@]}"; do
+        [ -n "${here[$m]:-}" ] && [ -n "${FP[$m]:-}" ] && { echo "$m"; seen[$m]=1; }
+    done
+    for m in $(printf '%s\n' "${!FP[@]}" | sort); do
+        [ -n "${here[$m]:-}" ] && [ -z "${seen[$m]:-}" ] && echo "$m"
+    done
+    return 0
+}
+
+plan_all() {  # plan_all DB...
+    local db list
+    for db in "$@"; do
+        list=$(installed_from_list "$db" | tr '\n' ' ' | sed 's/ *$//')
+        DB_MODULES[$db]="$list"
+        echo -e "  ${BOLD}$db${NC}: $(wc -w <<< "$list") of our modules are installed there, and only those run (never Odoo's own)."
+    done
+}
+
+has_update_state() { [ "$(db_sql "$1" "SELECT to_regclass('ephem_update_state') IS NOT NULL")" = t ]; }
+
+# Changed mode: each database gets its own list, shown before the run.
+plan_changed() {  # plan_changed DB...
+    local db list n
+    for db in "$@"; do
+        list=$(changed_modules "$db" | tr '\n' ' ' | sed 's/ *$//')
+        DB_MODULES[$db]="$list"
+        n=$(wc -w <<< "$list")
+        if [ "$n" -eq 0 ]; then
+            echo -e "  ${BOLD}$db${NC}: nothing changed since its last update, skipped."
+            continue
+        fi
+        if ! has_update_state "$db"; then
+            echo -e "  ${BOLD}$db${NC}: no record of an earlier update yet: all $n installed modules this once."
+        else
+            echo -e "  ${BOLD}$db${NC}: $n changed: $(echo "$list" | sed 's/ /, /g')"
+        fi
+        show_scope "$db" $list | sed '1s/^  [^:]*: /    /' 
+    done
+}
+
+# After a successful run: the database records the code it now runs, for
+# every module Odoo updated (the picks and what depends on them).
+record_state() {  # record_state DB MODULE...
+    local db="$1"; shift
+    compute_fingerprints
+    local m values=""
+    for m in $(db_coverage "$db" "$@" | awk '{print $1}' | sort -u); do
+        [[ "$m" =~ ^[A-Za-z0-9_]+$ ]] && [[ "${FP[$m]:-}" =~ ^[0-9a-f]{40}$ ]] && values="$values,('$m','${FP[$m]}')"
+    done
+    [ -n "$values" ] || return 0
+    db_sql "$db" "CREATE TABLE IF NOT EXISTS ephem_update_state (
+            module varchar PRIMARY KEY, fingerprint varchar NOT NULL,
+            updated_on timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'));
+        INSERT INTO ephem_update_state (module, fingerprint) VALUES ${values#,}
+        ON CONFLICT (module) DO UPDATE SET fingerprint = EXCLUDED.fingerprint,
+            updated_on = now() AT TIME ZONE 'UTC'" >/dev/null
+}
+
 # ── Timing and the progress bar ──────────────
 # Each database is timed; the time left is the average of the databases done
 # so far times the ones still to go. On a terminal a status line is pinned to
@@ -491,9 +689,21 @@ run_databases() {
             TICKER_PID=$!
         fi
 
+        local -a mods=("$@")
+        if [ -n "${DB_MODULES[$DB]+x}" ]; then
+            read -ra mods <<< "${DB_MODULES[$DB]}"
+        fi
+        if [ ${#mods[@]} -eq 0 ]; then
+            progress_stop_ticker
+            echo "  Nothing changed since its last update: skipped."
+            echo "--- $DB: nothing changed, skipped ---" >> "$LOG_FILE"
+            continue
+        fi
+
         local ok=true
-        run_batch_update "$DB" "$@" || ok=false
+        run_batch_update "$DB" "${mods[@]}" || ok=false
         progress_stop_ticker
+        [ "$ok" = true ] && record_state "$DB" "${mods[@]}"
 
         dur=$(( $(date +%s) - db_start ))
         done_sum=$((done_sum+dur)); done_n=$((done_n+1))
@@ -551,10 +761,17 @@ ACTION="${SPECIFIC_ACTION:-update}"
 
 # ── AUTO MODE ────────────────────────────────
 if [ "$AUTO_MODE" = true ]; then
+    [ "$ASK_ODOO" = true ] && ask_stop_odoo && echo ""
     echo -e "${BOLD}Mode:${NC}      Auto"
     echo -e "${BOLD}Action:${NC}    ${ACTION}"
     echo -e "${BOLD}Databases:${NC} ${DATABASES[*]}"
-    echo -e "${BOLD}Modules:${NC}   ${#MODULES[@]} modules (batch)"
+    if [ "$CHANGED_MODE" = true ]; then
+        echo -e "${BOLD}Modules:${NC}   only what changed, per database:"
+        plan_changed "${DATABASES[@]}"
+    else
+        echo -e "${BOLD}Modules:${NC}   all our modules installed on each database:"
+        plan_all "${DATABASES[@]}"
+    fi
     echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
     echo ""
 
@@ -623,15 +840,30 @@ fi
 # Step 3: Choose modules
 echo ""
 echo "Available modules:"
-echo "  0) All modules (in sequence)"
+echo "  c) Only what changed since each database's last update"
+echo "  0) All our modules installed on each database (never Odoo's own)"
 for i in "${!MODULES[@]}"; do
     printf "  %2d) %s\n" $((i+1)) "${MODULES[i]}"
 done
 echo ""
-read -p "Select modules (comma-separated, e.g. 1,5,6,8 or 0 for all): " MOD_SELECTION
+read -p "Select modules (comma-separated, e.g. 1,5,6,8, 0 for all, c for what changed): " MOD_SELECTION
 
 SELECTED_MODULES=()
-if [ "$MOD_SELECTION" = "0" ]; then
+if [[ "$MOD_SELECTION" =~ ^[cC]$ ]]; then
+    if [ "$ACTION" != update ]; then
+        echo -e "${RED}✗${NC} \"Only what changed\" updates installed modules: choose 1) Update modules."
+        exit 1
+    fi
+    CHANGED_MODE=true
+    echo ""
+    echo "What changed, database by database:"
+    plan_changed "${SELECTED_DBS[@]}"
+    SELECTED_MODULES=("(changed)")
+elif [ "$MOD_SELECTION" = "0" ]; then
+    ALL_MODE=true
+    echo ""
+    echo "All our modules, database by database:"
+    plan_all "${SELECTED_DBS[@]}"
     SELECTED_MODULES=("${MODULES[@]}")
 else
     IFS=',' read -ra MOD_INDICES <<< "$MOD_SELECTION"
@@ -648,6 +880,13 @@ if [ ${#SELECTED_MODULES[@]} -eq 0 ]; then
     exit 1
 fi
 
+# What Odoo will really update: the picks and everything built on them.
+if [ "$CHANGED_MODE" != true ] && [ "$ALL_MODE" != true ] && [ "$ACTION" = update ]; then
+    echo ""
+    echo "What Odoo will update (each module once, with every installed module built on it):"
+    for _db in "${SELECTED_DBS[@]}"; do show_scope "$_db" "${SELECTED_MODULES[@]}"; done
+fi
+
 # Step 4: Odoo during the run (server mode)
 ask_stop_odoo
 
@@ -657,7 +896,13 @@ echo ""
 echo "─────────────────────────────────────────"
 echo -e "${BOLD}Action:${NC}    ${ACTION}"
 echo -e "${BOLD}Databases:${NC} ${SELECTED_DBS[*]}"
-echo -e "${BOLD}Modules:${NC}   $MODULES_CSV"
+if [ "$CHANGED_MODE" = true ]; then
+    echo -e "${BOLD}Modules:${NC}   only what changed, per database (listed above)"
+elif [ "$ALL_MODE" = true ]; then
+    echo -e "${BOLD}Modules:${NC}   all our modules installed on each database (listed above)"
+else
+    echo -e "${BOLD}Modules:${NC}   $MODULES_CSV"
+fi
 echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
 echo "─────────────────────────────────────────"
 echo ""
@@ -675,7 +920,11 @@ echo ""
 SPECIFIC_ACTION="$ACTION"
 odoo_pause
 RUN_DBS=("${SELECTED_DBS[@]}")
-run_databases "${SELECTED_MODULES[@]}"
+if [ "$CHANGED_MODE" = true ] || [ "$ALL_MODE" = true ]; then
+    run_databases
+else
+    run_databases "${SELECTED_MODULES[@]}"
+fi
 
 # Summary
 echo ""

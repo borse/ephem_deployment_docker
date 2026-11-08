@@ -1126,13 +1126,19 @@ addons_fix_legacy() {
 addons_apply_prompt() {
     echo ""
     if [ "$EPHEM_MODE" = server ]; then
-        read -r -p "  Apply the new code now (update modules on all databases + restart)? [Y/n]: " U
-        if [[ ! "${U:-Y}" =~ ^[Nn]$ ]]; then
-            bash scripts/update-modules.sh --auto
-        else
-            echo "  Remember: the new code is NOT active until modules are updated"
-            echo "  (menu item 6) and Odoo is restarted (Advanced → 1)."
-        fi
+        echo "  Apply the new code now (update modules, then restart)?"
+        echo "    1) Only what changed on each database (recommended)"
+        echo "       Each database updates the modules whose code differs from its last"
+        echo "       update. The first time, a database updates every installed module once."
+        echo "    2) All our modules on every database (never Odoo's own)"
+        echo "    3) Later"
+        read -r -p "  Choose [1-3] (default: 1): " U
+        case "${U:-1}" in
+            1) bash scripts/update-modules.sh --auto --changed --ask-odoo ;;
+            2) bash scripts/update-modules.sh --auto --ask-odoo ;;
+            *) echo "  Remember: the new code is NOT active until modules are updated"
+               echo "  (menu item 6) and Odoo is restarted (Advanced → 1)." ;;
+        esac
     else
         echo "  Apply the new code to $ODOO_SVC now?"
         echo "    1) Restart and follow the log"
