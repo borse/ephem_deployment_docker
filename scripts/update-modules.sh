@@ -10,6 +10,13 @@
 #   ./scripts/update-modules.sh --auto --stop-odoo   (Odoo stopped for the run)
 #   ./scripts/update-modules.sh --auto --changed     (only what changed, per database)
 #   ./scripts/update-modules.sh --auto --ask-odoo    (asks whether to stop Odoo first)
+#   ./scripts/update-modules.sh --auto --changed --install-too eoc_rrt
+#                                     (update, and install eoc_rrt in the same run)
+#
+# Update and install in one run: Odoo accepts -u and -i together, and a module
+# that must arrive in the same run as another's update (as eoc_rrt once had to
+# beside eoc_actors, to keep its rows) goes in --install-too, or in the
+# question after the module menu. An installed one is left as it is.
 #
 # What changed: every database keeps a small table, ephem_update_state, with a
 # fingerprint of each module's code as it was when that database last updated
@@ -77,6 +84,7 @@ STOP_ODOO=""            # server mode: yes / no; empty = ask (manual) or no (aut
 CHANGED_MODE=false      # only the modules whose code changed, per database
 ALL_MODE=false          # manual "0": every listed module installed on each database
 ASK_ODOO=false          # --auto, but ask whether to stop Odoo (manage.sh after a pull)
+INSTALL_TOO=""          # modules installed in the same run as the update (comma separated)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -88,9 +96,15 @@ while [[ $# -gt 0 ]]; do
         --keep-running) STOP_ODOO=no; shift ;;
         --changed)      CHANGED_MODE=true; shift ;;
         --ask-odoo)     ASK_ODOO=true; shift ;;
+        --install-too)  INSTALL_TOO="$2"; shift 2 ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+if [ -n "$INSTALL_TOO" ] && ! [[ "$INSTALL_TOO" =~ ^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$ ]]; then
+    echo -e "${RED}✗${NC} --install-too takes module names separated by commas: $INSTALL_TOO"
+    exit 1
+fi
 
 stack_init "$INSTANCE" || { echo -e "${RED}✗${NC} $STACK_ERROR"; exit 1; }
 
@@ -340,9 +354,18 @@ run_batch_update() {
 
     # Join modules with comma for Odoo CLI
     local MODULES_CSV=$(echo "$MODULE_LIST" | tr ' ' ',')
+    local ODOO_FLAGS=""
+    [ -n "$MODULES_CSV" ] && ODOO_FLAGS="$FLAG $MODULES_CSV"
+    # Install too, in the same run (an update only: an install run installs anyway).
+    if [ -n "$INSTALL_TOO" ] && [ "$ACTION" != install ]; then
+        ODOO_FLAGS="$ODOO_FLAGS -i $INSTALL_TOO"
+    fi
 
-    echo -e "  ${BOLD}Modules:${NC} $MODULES_CSV"
+    echo -e "  ${BOLD}Modules:${NC} ${MODULES_CSV:-(none)}"
     echo -e "  ${BOLD}Action:${NC}  $ACTION"
+    if [ -n "$INSTALL_TOO" ] && [ "$ACTION" != install ]; then
+        echo -e "  ${BOLD}Install too:${NC} $INSTALL_TOO (same run)"
+    fi
     echo ""
 
     # Run with live output. sh -c so the command inherits the container's
@@ -355,7 +378,7 @@ run_batch_update() {
         RUNNER=(compose run --rm -T --no-deps "$ODOO_SVC")
     fi
     "${RUNNER[@]}" \
-        sh -c "odoo $FLAG $MODULES_CSV -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER --db_password \$PASSWORD --stop-after-init --no-http" \
+        sh -c "odoo $ODOO_FLAGS -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER --db_password \$PASSWORD --stop-after-init --no-http" \
         </dev/null 2>&1 | \
         tee -a "$LOG_FILE" | \
         filter_output
@@ -693,7 +716,7 @@ run_databases() {
         if [ -n "${DB_MODULES[$DB]+x}" ]; then
             read -ra mods <<< "${DB_MODULES[$DB]}"
         fi
-        if [ ${#mods[@]} -eq 0 ]; then
+        if [ ${#mods[@]} -eq 0 ] && [ -z "$INSTALL_TOO" ]; then
             progress_stop_ticker
             echo "  Nothing changed since its last update: skipped."
             echo "--- $DB: nothing changed, skipped ---" >> "$LOG_FILE"
@@ -703,7 +726,7 @@ run_databases() {
         local ok=true
         run_batch_update "$DB" "${mods[@]}" || ok=false
         progress_stop_ticker
-        [ "$ok" = true ] && record_state "$DB" "${mods[@]}"
+        [ "$ok" = true ] && record_state "$DB" "${mods[@]}" ${INSTALL_TOO//,/ }
 
         dur=$(( $(date +%s) - db_start ))
         done_sum=$((done_sum+dur)); done_n=$((done_n+1))
@@ -772,6 +795,7 @@ if [ "$AUTO_MODE" = true ]; then
         echo -e "${BOLD}Modules:${NC}   all our modules installed on each database:"
         plan_all "${DATABASES[@]}"
     fi
+    [ -n "$INSTALL_TOO" ] && echo -e "${BOLD}Install too:${NC} $INSTALL_TOO (same run)"
     echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
     echo ""
 
@@ -887,6 +911,24 @@ if [ "$CHANGED_MODE" != true ] && [ "$ALL_MODE" != true ] && [ "$ACTION" = updat
     for _db in "${SELECTED_DBS[@]}"; do show_scope "$_db" "${SELECTED_MODULES[@]}"; done
 fi
 
+# Install too, in the same run (update only)
+if [ "$ACTION" = update ] && [ -z "$INSTALL_TOO" ]; then
+    echo ""
+    echo "Also install modules in the same run? Needed only when a module must arrive"
+    echo "together with an update (one module handing its records to another)."
+    read -p "Numbers from the list above, comma-separated (Enter for none): " INST_SELECTION
+    _inst=()
+    IFS=',' read -ra _idx <<< "${INST_SELECTION:-}"
+    for idx in "${_idx[@]}"; do
+        idx=$(echo "$idx" | xargs)
+        if [ -n "$idx" ] && [ "$idx" -ge 1 ] 2>/dev/null && [ "$idx" -le ${#MODULES[@]} ]; then
+            _inst+=("${MODULES[$((idx-1))]}")
+        fi
+    done
+    INSTALL_TOO=$(IFS=,; echo "${_inst[*]:-}")
+    unset _inst _idx
+fi
+
 # Step 4: Odoo during the run (server mode)
 ask_stop_odoo
 
@@ -903,6 +945,7 @@ elif [ "$ALL_MODE" = true ]; then
 else
     echo -e "${BOLD}Modules:${NC}   $MODULES_CSV"
 fi
+[ -n "$INSTALL_TOO" ] && echo -e "${BOLD}Install too:${NC} $INSTALL_TOO (same run)"
 echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
 echo "─────────────────────────────────────────"
 echo ""
