@@ -470,6 +470,9 @@ ADDONS_MOUNT="/mnt/extra-addons"
 ODOO_STOCK_ADDONS="/usr/lib/python3/dist-packages/odoo/addons"
 CORE_NAME="$(env_get EPHEM_CORE_NAME)"; CORE_NAME="${CORE_NAME:-ePHEM-core}"
 CORE_REPO="borse/ePHEM"                    # owner/name, GitHub
+# The branch of $CORE_NAME that setup.sh and manage.sh recommend, and fall
+# back to when none is chosen.
+CORE_BRANCH="18_ephem_2"
 
 # DIR directly holds Odoo modules (name/__manifest__.py).
 dir_has_modules() { local m; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && return 0; done; return 1; }
@@ -803,7 +806,7 @@ inst_branch()       { src_branch "$(inst_core_dir "$1")"; }          # of the co
 inst_last_commit()  { src_last_commit "$(inst_core_dir "$1")"; }
 inst_dirty_count()  { src_dirty_count "$(inst_core_dir "$1")"; }
 inst_source_count() { addons_source_count "$EPHEM_ROOT/odca$1"; }
-# "18_national_dev +2": the core branch, and how many other sources there are.
+# "18_ephem_2 +2": the core branch, and how many other sources there are.
 inst_branch_label() {
     local n; n=$(inst_source_count "$1")
     if [ "${n:-0}" -gt 1 ]; then echo "$(inst_branch "$1") +$((n - 1))"; else inst_branch "$1"; fi

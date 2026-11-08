@@ -26,7 +26,7 @@
 #
 # Examples:
 #   bash scripts/dev-instances.sh up a b c
-#   bash scripts/dev-instances.sh up a:18_national_dev b:16_national_dev c
+#   bash scripts/dev-instances.sh up a:18_ephem_2 b:16_national_dev c
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -112,7 +112,7 @@ ensure_addons() {
         fi
     elif [ -z "$(ls -A "$core" 2>/dev/null)" ]; then
         echo -e "  ${YELLOW}!${NC} $core is missing — the instance will start with no ePHEM modules."
-        echo "      Put the clone there, or re-run with a branch:  $name:18_national_dev"
+        echo "      Put the clone there, or re-run with a branch:  $name:$CORE_BRANCH"
     else
         echo -e "  ${GREEN}✓${NC} $core (existing folder, not a git clone)"
     fi
@@ -317,7 +317,8 @@ cmd_status() {
             i=$(( i + 1 ))
         done < "$INSTANCES_FILE"
         echo ""
-        echo "Restart + tail one instance:  bash scripts/dev-logs.sh <name>   (e.g. dev-logs.sh a)"
+        local first; first=$(grep -m1 . "$INSTANCES_FILE" 2>/dev/null || echo 1)
+        echo "Restart + tail one instance:  bash scripts/dev-logs.sh <name>   (e.g. dev-logs.sh $first)"
     fi
 }
 

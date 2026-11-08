@@ -74,19 +74,19 @@ echo ""
 # ── Step 2: Ask for branch ───────────────────
 echo "Which branch do you want to use?"
 echo ""
-echo "  1) 18_national_dev       — Odoo 18 development (recommended)"
-echo "  2) 18_national_master    — Odoo 18 stable"
-echo "  3) 16_national_dev       — Odoo 16 development"
-echo "  4) 16_national_master    — Odoo 16 stable"
+echo "  1) 18_ephem_2            Odoo 18, current (recommended)"
+echo "  2) 18_national_master    Odoo 18 stable"
+echo "  3) 16_national_dev       Odoo 16 development"
+echo "  4) 16_national_master    Odoo 16 stable"
 echo ""
 read -p "Choose [1-4] (default: 1): " BRANCH_CHOICE
 
 case "${BRANCH_CHOICE:-1}" in
-    1) BRANCH="18_national_dev" ;;
+    1) BRANCH="18_ephem_2" ;;
     2) BRANCH="18_national_master" ;;
     3) BRANCH="16_national_dev" ;;
     4) BRANCH="16_national_master" ;;
-    *) BRANCH="18_national_dev" ;;
+    *) BRANCH="18_ephem_2" ;;
 esac
 
 echo ""

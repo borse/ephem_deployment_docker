@@ -319,7 +319,7 @@ EOF
 sudo -u odoo chmod 600 /opt/odoo/.ssh/config
 
 sudo -u odoo git clone git@github.com:borse/ePHEM.git \
-  --depth 1 --branch 18_national_dev --single-branch /opt/odoo/custom-addons
+  --depth 1 --branch 18_ephem_2 --single-branch /opt/odoo/custom-addons
 ```
 
 > Use the branch you run in production. Keep development branches on development machines.

@@ -952,10 +952,10 @@ if [ "$MODE" = "developer" ]; then
                 echo "  It goes to $(odca_names "$MISSING"), copied from an existing clone (no re-download)."
             fi
             echo ""
-            echo "    1) 18_national_dev    — Odoo 18 development (recommended)"
-            echo "    2) 18_national_master — Odoo 18 stable"
-            echo "    3) 16_national_dev    — Odoo 16 development"
-            echo "    4) 16_national_master — Odoo 16 stable"
+            echo "    1) $CORE_BRANCH          Odoo 18, current (recommended)"
+            echo "    2) 18_national_master  Odoo 18 stable"
+            echo "    3) 16_national_dev     Odoo 16 development"
+            echo "    4) 16_national_master  Odoo 16 stable"
             echo "    5) Other (type a branch name)"
             echo ""
             read -p "  Choose [1-5] (default: 1): " BRANCH_CHOICE
@@ -963,8 +963,8 @@ if [ "$MODE" = "developer" ]; then
                 2) BRANCH="18_national_master" ;;
                 3) BRANCH="16_national_dev" ;;
                 4) BRANCH="16_national_master" ;;
-                5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-18_national_dev}" ;;
-                *) BRANCH="18_national_dev" ;;
+                5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-$CORE_BRANCH}" ;;
+                *) BRANCH="$CORE_BRANCH" ;;
             esac
 
             # ── Clone once, copy to the rest ────────────────────────────────
@@ -1196,17 +1196,17 @@ if [ "$MODE" = "developer" ]; then
         echo ""
         echo "Which branch do you want to work on?"
         echo ""
-        echo "  1) 18_national_dev    — Odoo 18 development (recommended)"
-        echo "  2) 18_national_master — Odoo 18 stable"
-        echo "  3) 16_national_dev    — Odoo 16 development"
-        echo "  4) 16_national_master — Odoo 16 stable"
+        echo "  1) $CORE_BRANCH          Odoo 18, current (recommended)"
+        echo "  2) 18_national_master  Odoo 18 stable"
+        echo "  3) 16_national_dev     Odoo 16 development"
+        echo "  4) 16_national_master  Odoo 16 stable"
         echo ""
         read -p "Choose [1-4] (default: 1): " BRANCH_CHOICE
         case "${BRANCH_CHOICE:-1}" in
             2) BRANCH="18_national_master" ;;
             3) BRANCH="16_national_dev" ;;
             4) BRANCH="16_national_master" ;;
-            *) BRANCH="18_national_dev" ;;
+            *) BRANCH="$CORE_BRANCH" ;;
         esac
 
         echo ""
@@ -1447,7 +1447,7 @@ if [ "$MODE" != "developer" ]; then
                 if GIT_SSH_COMMAND="ssh -o ConnectTimeout=30" \
                    git clone "$(git_url_ssh github-ephem-addons "$CORE_REPO")" \
                        --depth 1 \
-                       --branch 18_national_dev \
+                       --branch "$CORE_BRANCH" \
                        --single-branch \
                        "$CORE_TARGET" \
                        --progress; then
@@ -2072,7 +2072,7 @@ if [ "$MODE" = "developer" ]; then
     echo "  bash manage.sh    (status, addons: pull/switch/add a repository, restart + logs, module updates, doctor, databases)"
     echo ""
     echo -e "${CYAN}${BOLD}Need several Odoo servers at once?${NC}"
-    echo "  Re-run:  bash setup.sh → 3 (Developer) → y (already set up) → 8 (Multi-instance)"
+    echo "  Re-run:  bash setup.sh → 3 (Developer) → y (already set up) → 2 (Re-run setup) → 2 (Multi-instance)"
     echo "  Each instance then gets its own ▶ — same script path, its name as the first option:"
     echo -e "         ${BOLD}1${NC}                                      restart + tail instance 1"
     echo -e "         ${BOLD}1 -u eoc_signals${NC}                       update a module on instance 1"

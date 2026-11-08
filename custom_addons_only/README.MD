@@ -105,10 +105,10 @@ If it detects your Odoo installation, just press `Enter`. Otherwise, type the fu
 ```
 Which branch do you want to use?
 
-  1) 18_national_dev       — Odoo 18 development (recommended)
-  2) 18_national_master    — Odoo 18 stable
-  3) 16_national_dev       — Odoo 16 development
-  4) 16_national_master    — Odoo 16 stable
+  1) 18_ephem_2            Odoo 18, current (recommended)
+  2) 18_national_master    Odoo 18 stable
+  3) 16_national_dev       Odoo 16 development
+  4) 16_national_master    Odoo 16 stable
 
 Choose [1-4] (default: 1):
 ```
@@ -226,7 +226,7 @@ The ePHEM repository has branches for different Odoo versions and environments:
 
 | Option | Branch | Odoo Version | Purpose |
 |--------|--------|-------------|---------|
-| 1 | `18_national_dev` | 18 | Development (default) |
+| 1 | `18_ephem_2` | 18 | Current (default) |
 | 2 | `18_national_master` | 18 | Stable / production |
 | 3 | `16_national_dev` | 16 | Development |
 | 4 | `16_national_master` | 16 | Stable / production |

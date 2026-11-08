@@ -430,7 +430,7 @@ Re-running setup (choice 2) is for the installation itself: refreshing the conta
 When you choose mode 3, `setup.sh`:
 
 1. Verifies your GitHub SSH access
-2. Asks which branch to work on (`18_national_dev` recommended)
+2. Asks which branch to work on (`18_ephem_2` recommended)
 3. Clones the addons repo with **full write access** (not depth-limited)
 4. Creates `docker-compose.override.yml` with:
    - `addons/` mounted **read-write** (live editing — no container rebuild needed); the ePHEM clone is `addons/ePHEM-core/`, and other repositories added later sit next to it (see [Adding more addons repositories](#adding-more-addons-repositories))
@@ -550,7 +550,7 @@ The first command rewrites the clone's refspec so future `git fetch` calls pick 
 
 ### Multi-Instance Dev — Several Odoo Servers Side by Side
 
-When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_national_dev`, or running a per-developer sandbox — choose the multi-instance layout in setup:
+When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_ephem_2`, or running a per-developer sandbox — choose the multi-instance layout in setup:
 
 ```bash
 bash setup.sh    # → 3 (Developer), then 2 (Multi-instance) at the layout question
@@ -571,7 +571,7 @@ The same ports are open on the LAN by default, so a phone or a colleague on the 
 Pin each instance to a branch when you start it:
 
 ```bash
-bash scripts/dev-instances.sh up 1:18_national_dev 2:16_national_dev 3
+bash scripts/dev-instances.sh up 1:18_ephem_2 2:16_national_dev 3
 bash scripts/dev-instances.sh status      # ports + URLs + health
 bash scripts/dev-instances.sh down        # stop (keep data)
 bash scripts/dev-instances.sh down -v     # stop + wipe DB / filestore
@@ -631,7 +631,7 @@ bash scripts/dev-logs.sh 1                                 # multi-instance: res
 bash scripts/dev-logs.sh 1 -u eoc_base,eoc_incident_management   # update modules on instance 1 (db auto)
 ```
 
-> **Don't point the run config at `dev-instances.sh`.** That's the multi-instance *orchestrator* and needs a subcommand (`up`, `down`, `status`, `logs`) — running it with just a name prints usage. Bring the stack up once with `bash scripts/dev-instances.sh up <names…>` (or setup menu → 8); the per-instance ▶ always uses `dev-logs.sh <name>`.
+> **Don't point the run config at `dev-instances.sh`.** That's the multi-instance *orchestrator* and needs a subcommand (`up`, `down`, `status`, `logs`) — running it with just a name prints usage. Bring the stack up once with `bash scripts/dev-instances.sh up <names…>` (or `bash setup.sh` → 3 Developer → y → 2 Re-run setup → 2 Multi-instance); the per-instance ▶ always uses `dev-logs.sh <name>`.
 
 > Logs not colored? View them via `docker logs -f ephem-app` (or this script), not `docker compose logs` — the latter adds an `ephem-app |` prefix some viewers mis-parse. The colors come from Odoo, so they show in a plain terminal too.
 
@@ -1057,7 +1057,7 @@ bash manage.sh 2      # pin odca2 / ephem_2 / :8020 for this run, and remember i
 
 ```
 ePHEM developer menu   developer, multi-instance
-  Instance 2: odca2 on 18_national_dev   http://localhost:8020   (running)
+  Instance 2: odca2 on 18_ephem_2        http://localhost:8020   (running)
 
   1) Status                        every instance: state, port, branch, uncommitted work
   2) Switch instance

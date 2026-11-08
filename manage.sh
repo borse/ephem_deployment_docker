@@ -1198,7 +1198,7 @@ menu_addons() {
     if [ ! -d "$parent" ]; then
         echo -e "  ${RED}✗${NC} $pname/ does not exist yet."
         [ "$EPHEM_MODE" = dev-multi ] && \
-            echo "     Populate it:  bash scripts/dev-instances.sh up $EPHEM_INSTANCE:18_national_dev" || \
+            echo "     Populate it:  bash scripts/dev-instances.sh up $EPHEM_INSTANCE:$CORE_BRANCH" || \
             echo "     bash setup.sh creates it and clones ePHEM into $pname/$CORE_NAME."
         return 1
     fi
@@ -1328,7 +1328,12 @@ addons_source_menu() {  # addons_source_menu PARENT NAME
             ADDONS_CHANGED=1
             ;;
         2)
-            read -r -p "  Branch name on origin: " BR
+            if [ "$2" = "$CORE_NAME" ] && [ "$cur" != "$CORE_BRANCH" ]; then
+                read -r -p "  Branch name on origin [$CORE_BRANCH, recommended]: " BR
+                BR="${BR:-$CORE_BRANCH}"
+            else
+                read -r -p "  Branch name on origin: " BR
+            fi
             [ -z "${BR:-}" ] && { echo "  Cancelled."; return 0; }
             # Validate FIRST: nothing is changed until the branch is known
             # to exist under exactly this name.
@@ -3185,7 +3190,7 @@ menu_stack_roster() {
     echo "  Give the complete new list. Keep the existing names in their current"
     echo "  order: the position in the list gives the ports. A new name gets an"
     echo "  odcaN/ folder; add :branch to clone ePHEM into odcaN/$CORE_NAME"
-    echo "  (4:18_national_dev), otherwise it starts empty. A name left out keeps its database, data"
+    echo "  (4:$CORE_BRANCH), otherwise it starts empty. A name left out keeps its database, data"
     echo "  volume and folder, it just stops being part of the stack."
     echo ""
     read -r -p "  New roster [${INSTANCES[*]}] (Enter = cancel): " NEW
