@@ -7,6 +7,15 @@
 #   ./scripts/update-modules.sh              (interactive — pick modules & databases)
 #   ./scripts/update-modules.sh --auto       (update all modules on all databases)
 #   ./scripts/update-modules.sh --auto --db training-server
+#   ./scripts/update-modules.sh --auto --stop-odoo   (Odoo stopped for the run)
+#
+# Server mode: by default Odoo keeps serving while the update runs inside its
+# container, and is restarted at the end. --stop-odoo stops it first instead
+# (every tenant offline until the run ends), --keep-running says the default
+# out loud; without either, manual mode asks. Stopping avoids the update
+# fighting the live server for the database (a "deadlock detected" when a
+# migration drops a column of a busy table, as on pheoc on 7 Nov 2026), and
+# the run is often faster for it.
 #
 # The modules come from every source folder of the Odoo acted on (the
 # addons/ parent: ePHEM-core plus whatever manage.sh → Addons added).
@@ -52,6 +61,7 @@ AUTO_MODE=false
 SPECIFIC_DB=""
 SPECIFIC_ACTION=""
 INSTANCE=""
+STOP_ODOO=""            # server mode: yes / no; empty = ask (manual) or no (auto)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,6 +69,8 @@ while [[ $# -gt 0 ]]; do
         --db)       SPECIFIC_DB="$2"; shift 2 ;;
         --install)  SPECIFIC_ACTION="install"; shift ;;
         --instance) INSTANCE="$2"; shift 2 ;;
+        --stop-odoo)    STOP_ODOO=yes; shift ;;
+        --keep-running) STOP_ODOO=no; shift ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -215,31 +227,84 @@ get_databases() { list_dbs; }
 # file changes, so the one-shot runs against a stopped instance, as
 # scripts/dev-logs.sh does. A production server keeps serving: the update
 # runs inside the live container, and Odoo is restarted at the end.
+# On a server the operator may stop it too (STOP_ODOO, asked in manual mode).
 ODOO_WAS_RUNNING=false
 [ "$(svc_state "$ODOO_SVC")" = "running" ] && ODOO_WAS_RUNNING=true
+ODOO_STOPPED=false      # this run stopped Odoo and has not started it again
 
 odoo_pause() {
-    if [ "$EPHEM_MODE" != server ] && [ "$ODOO_WAS_RUNNING" = true ]; then
+    [ "$ODOO_WAS_RUNNING" = true ] || return 0
+    if [ "$EPHEM_MODE" != server ] || [ "$STOP_ODOO" = yes ]; then
         echo "Stopping $ODOO_SVC for the run..."
         compose stop "$ODOO_SVC" >/dev/null
+        ODOO_STOPPED=true
+        # Whatever ends the run (an error, Ctrl+C), Odoo comes back.
+        trap exit_cleanup EXIT
+        trap 'exit_cleanup; exit 130' INT TERM
     fi
 }
 
 odoo_resume() {
     echo ""
-    if [ "$EPHEM_MODE" != server ]; then
-        if [ "$ODOO_WAS_RUNNING" = true ]; then
-            svc_start "$ODOO_SVC" >/dev/null 2>&1 || svc_start "$ODOO_SVC"
-        else
-            echo "$ODOO_SVC was not running before; leaving it stopped."
-            echo "  Start it:  bash scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
-        fi
+    if [ "$ODOO_STOPPED" = true ]; then
+        echo "Starting $ODOO_SVC again..."
+        svc_start "$ODOO_SVC" >/dev/null 2>&1 || svc_start "$ODOO_SVC"
+        ODOO_STOPPED=false
+    elif [ "$EPHEM_MODE" != server ]; then
+        echo "$ODOO_SVC was not running before; leaving it stopped."
+        echo "  Start it:  bash scripts/dev-logs.sh ${EPHEM_INSTANCE:-}"
     else
         echo "Restarting Odoo..."
         svc_restart "$ODOO_SVC"
     fi
     echo -e "${GREEN}✓${NC} Done."
     echo ""
+}
+
+# The run ended before odoo_resume (an error under set -e, Ctrl+C): never
+# leave a server offline because the update did not finish.
+odoo_safety_start() {
+    [ "$ODOO_STOPPED" = true ] || return 0
+    ODOO_STOPPED=false
+    echo ""
+    echo -e "${YELLOW}!${NC} The run ended early: starting $ODOO_SVC again..."
+    svc_start "$ODOO_SVC" >/dev/null 2>&1 || svc_start "$ODOO_SVC" || true
+}
+
+exit_cleanup() {
+    progress_teardown
+    odoo_safety_start
+}
+
+# Server mode, manual run: keep Odoo serving during the update, or stop it.
+ask_stop_odoo() {
+    [ "$EPHEM_MODE" = server ] && [ "$ODOO_WAS_RUNNING" = true ] && [ -z "$STOP_ODOO" ] || return 0
+    echo ""
+    echo "Odoo during the update:"
+    echo "  1) Keep it running (default)"
+    echo "     Users keep working while the update runs, and Odoo restarts at the end"
+    echo "     (a few seconds offline). Fine for a routine update: views, data,"
+    echo "     translations, small fixes."
+    echo "  2) Stop it first"
+    echo "     Every tenant on this server is offline until the update ends, usually"
+    echo "     one to three minutes per database. Nothing else uses the database while"
+    echo "     it runs, so the update cannot collide with users or scheduled jobs, and"
+    echo "     it is often faster. Choose this when the update changes the database"
+    echo "     structure (migrations, new or removed modules or fields), or after a"
+    echo "     \"deadlock detected\" error."
+    echo ""
+    read -p "Choose [1-2] (default: 1): " STOP_CHOICE
+    case "$STOP_CHOICE" in
+        2) STOP_ODOO=yes ;;
+        *) STOP_ODOO=no ;;
+    esac
+}
+
+odoo_plan_label() {
+    if [ "$EPHEM_MODE" != server ]; then echo "stopped for the run (developer mode)"
+    elif [ "$ODOO_WAS_RUNNING" != true ]; then echo "not running"
+    elif [ "$STOP_ODOO" = yes ]; then echo "stopped for the update, started again at the end"
+    else echo "keeps running, restarted at the end"; fi
 }
 
 # ── Update modules on a database (batch) ─────
@@ -334,8 +399,8 @@ progress_setup() {
     # the scroll region rows 1..rows-1 (setting it moves the cursor, hence
     # the save and restore around it).
     printf '\n\033[1A\x1b7\033[1;%dr\x1b8' $((rows-1))
-    trap progress_teardown EXIT
-    trap 'progress_teardown; exit 130' INT TERM
+    trap exit_cleanup EXIT
+    trap 'exit_cleanup; exit 130' INT TERM
 }
 
 progress_teardown() {
@@ -490,6 +555,7 @@ if [ "$AUTO_MODE" = true ]; then
     echo -e "${BOLD}Action:${NC}    ${ACTION}"
     echo -e "${BOLD}Databases:${NC} ${DATABASES[*]}"
     echo -e "${BOLD}Modules:${NC}   ${#MODULES[@]} modules (batch)"
+    echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
     echo ""
 
     odoo_pause
@@ -582,13 +648,17 @@ if [ ${#SELECTED_MODULES[@]} -eq 0 ]; then
     exit 1
 fi
 
-# Step 4: Confirm
+# Step 4: Odoo during the run (server mode)
+ask_stop_odoo
+
+# Step 5: Confirm
 MODULES_CSV=$(echo "${SELECTED_MODULES[*]}" | tr ' ' ',')
 echo ""
 echo "─────────────────────────────────────────"
 echo -e "${BOLD}Action:${NC}    ${ACTION}"
 echo -e "${BOLD}Databases:${NC} ${SELECTED_DBS[*]}"
 echo -e "${BOLD}Modules:${NC}   $MODULES_CSV"
+echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
 echo "─────────────────────────────────────────"
 echo ""
 read -p "Proceed? (y/n) " -n 1 -r
@@ -599,7 +669,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# Step 5: Execute (batch per database)
+# Step 6: Execute (batch per database)
 echo ""
 
 SPECIFIC_ACTION="$ACTION"
