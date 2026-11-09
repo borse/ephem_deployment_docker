@@ -1507,7 +1507,7 @@ v2_db_table() {
 v2_db_copy() {  # v2_db_copy SOURCE
     local src="$1" t
     local -a targets=()
-    v2_title "Copy $src"
+    v2_title "Duplicate $src"
     read -r -a targets -p "  New database name(s), separated by spaces (Enter cancels): "
     [ "${#targets[@]}" -eq 0 ] && { v2_cancel; return 0; }
     for t in "${targets[@]}"; do
@@ -1535,7 +1535,7 @@ v2_orphan_delete() {  # v2_orphan_delete NAME: files whose database is already g
 v2_db_verb() {  # v2_db_verb VERB INDEX: 1 when not a database action
     local db="${V2_DBN[$2]}" owner="${V2_DBO[$2]}" orphan=0
     [ "${V2_DBS[$2]}" = "no database" ] && orphan=1
-    case "$1" in s|S|c|C|k|K) ;; *) return 1 ;; esac
+    case "$1" in s|S|d|D|k|K) ;; *) return 1 ;; esac
     if ! existing_db_name "$db"; then
         v2_bad "'$db' is not a name this menu can act on (letters, digits, . _ - and ,)."
         return 0
@@ -1543,8 +1543,8 @@ v2_db_verb() {  # v2_db_verb VERB INDEX: 1 when not a database action
     [ -n "$owner" ] && v2_use_instance "$owner"
     case "$1" in
         s|S) v2_do snapshot_create "$db" ;;
-        c|C)
-            if [ "$orphan" = 1 ]; then v2_bad "$db has no database, only files: nothing to copy."
+        d|D)
+            if [ "$orphan" = 1 ]; then v2_bad "$db has no database, only files: nothing to duplicate."
             else v2_do v2_db_copy "$db"; fi
             ;;
         k|K)
@@ -1574,7 +1574,7 @@ v2_db_screen() {  # v2_db_screen INDEX
         v2_t_draw
         v2_head "This database"
         v2_opt s "Snapshot: database + files into backups/"
-        [ "$orphan" = 1 ] || v2_opt c "Copy into new database(s), for example training copies"
+        [ "$orphan" = 1 ] || v2_opt d "Duplicate into new database(s), for example training copies"
         v2_opt k "Delete (takes a snapshot first)"
         v2_nav
         v2_prompt
@@ -1642,7 +1642,7 @@ v2_databases() {
         v2_db_table
         v2_head "One database"
         v2_opt s "Snapshot: database + files into backups/"
-        v2_opt c "Copy into new database(s), for example training copies"
+        v2_opt d "Duplicate into new database(s), for example training copies"
         v2_opt k "Delete (takes a snapshot first)"
         v2_head "All databases"
         v2_opt n "New empty database"
@@ -1664,7 +1664,7 @@ v2_databases() {
             elif v2_db_verb "$V2_VERB" "$i"; then
                 reload=1
             else
-                v2_bad "For a database: s snapshot, c copy, k delete."
+                v2_bad "For a database: s snapshot, d duplicate, k delete."
             fi
             continue
         fi
@@ -1672,7 +1672,7 @@ v2_databases() {
             b|B) return 0 ;;
             x|X) v2_bye ;;
             s|S) if v2_pick_db "Snapshot a database"; then v2_db_verb s "$V2_PICK_DB"; fi ;;
-            c|C) if v2_pick_db "Copy a database"; then v2_db_verb c "$V2_PICK_DB"; reload=1; fi ;;
+            d|D) if v2_pick_db "Duplicate a database"; then v2_db_verb d "$V2_PICK_DB"; reload=1; fi ;;
             k|K) if v2_pick_db "Delete a database"; then v2_db_verb k "$V2_PICK_DB"; reload=1; fi ;;
             n|N) if v2_pick_instance "New empty database: which instance creates it"; then v2_do menu_db_create; reload=1; fi ;;
             r|R) if v2_pick_instance "Restore a backup: which instance gets its files"; then v2_do menu_db_restore; reload=1; fi ;;
@@ -2109,7 +2109,7 @@ v2_home_options() {
         v2_run_options
     fi
     v2_head "More"
-    v2_opt d "Databases and backups"
+    v2_opt d "Databases and backups: duplicate, restore, create, delete"
     [ "$EPHEM_MODE" = server ] && v2_opt w "Web access: domains, certificates, upload limit, RPC"
     v2_opt m "Maintenance"
     v2_opt v "Status and checks"
