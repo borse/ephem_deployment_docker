@@ -94,6 +94,24 @@ run_case domain_a    ""                                          "a.example.org"
 run_case domain_mix  "203.0.113.55"                              "b.example.org, not..a.domain"   "allow 203.0.113.55; deny all;" "allow 203.0.113.55; deny all;" ""
 run_case domain_both ""                                          "a.example.org b.example.org"    "deny all;"    ""             ""
 
+echo; echo "Database manager block (ODOO_LIST_DB)"
+dbmgr_of() {  # dbmgr_of FILE → how many database manager locations, how many of them refuse
+    awk '/^[[:space:]]*location[[:space:]]/ && index($0, "/web/database/") { n++; inb = 1; next }
+         inb && /deny all;/ { d++ }
+         inb && /^    }/ { inb = 0 }
+         END { printf "%d %d", n, d }' "$1"
+}
+for state in "True:0" ":0" "False:1"; do
+    v="${state%%:*}"; want="${state##*:}"
+    printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nODOO_LIST_DB=%s\n' "$v" > "$T/.env"
+    render_http_only_conf >/dev/null; f="$T/out/dbmgr_http.conf"; cp "$NGINX_ACTIVE" "$f"
+    [ "$(dbmgr_of "$f")" = "2 $((2 * want))" ] && ok "ODOO_LIST_DB='$v' / http: 2 locations, $((2 * want)) refusing" || bad "ODOO_LIST_DB='$v' / http: $(dbmgr_of "$f")"
+    out="$(nginx_t "$f")" && ok "ODOO_LIST_DB='$v' / http: nginx -t" || { bad "ODOO_LIST_DB='$v' / http: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
+    render_active_conf a.example.org b.example.org >/dev/null; f="$T/out/dbmgr_https.conf"; cp "$NGINX_ACTIVE" "$f"
+    [ "$(dbmgr_of "$f")" = "4 $((4 * want))" ] && ok "ODOO_LIST_DB='$v' / https: 4 locations, $((4 * want)) refusing" || bad "ODOO_LIST_DB='$v' / https: $(dbmgr_of "$f")"
+    out="$(nginx_t "$f")" && ok "ODOO_LIST_DB='$v' / https: nginx -t" || { bad "ODOO_LIST_DB='$v' / https: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
+done
+
 echo; echo "A config from before the language prefix fix is told apart"
 printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' > "$T/.env"
 render_active_conf a.example.org b.example.org >/dev/null
@@ -243,6 +261,12 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
         c="$(code_of "https://a.example.org:$P$u")"
         { [ "$c" = 200 ] || [ "$c" = 429 ]; } && ok "not caught by the RPC pattern: $u" || bad "$u answered $c"
     done
+    # Database manager open (ODOO_LIST_DB unset here): passed on, throttled,
+    # and throttled under a language code too (10 a minute, burst 10).
+    c="$(code_of "https://a.example.org:$P/web/database/manager")"
+    [ "$c" = 200 ] && ok "database manager open: passed on to Odoo" || bad "database manager open: answered $c"
+    n=0; for i in $(seq 1 30); do [ "$(code_of -X POST "https://a.example.org:$P/en/web/database/backup")" = 429 ] && n=$((n + 1)); done
+    [ "$n" -ge 10 ] && ok "database manager under a language code: throttled ($n of 30 refused)" || bad "database manager under a language code: only $n of 30 refused"
     # A Host that is not one of ours, on a connection made for a real domain.
     # HTTP/2: nginx answers 421 itself. HTTP/1.1: the catch-all drops it (444).
     # Either way Odoo never sees the forged name.
@@ -260,6 +284,16 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
     printf '%s\n' "$out" | grep -q 'TLSv1.3' && ok "TLS 1.3: accepted" || bad "TLS 1.3 was refused"
     out="$(openssl s_client -connect "127.0.0.1:$P" -servername a.example.org -tls1_2 -cipher 'AES256-SHA:AES256-GCM-SHA384@SECLEVEL=0' </dev/null 2>&1)"
     printf '%s\n' "$out" | grep -q 'BEGIN CERTIFICATE' && bad "a CBC / non forward-secret suite was accepted" || ok "CBC and non forward-secret suites: refused"
+    # Database manager closed (ODOO_LIST_DB=False): refused by nginx itself.
+    printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\nODOO_LIST_DB=False\n' > "$T/.env"
+    render_active_conf a.example.org b.example.org >/dev/null
+    docker exec "$TC" nginx -s reload >/dev/null 2>&1; sleep 1
+    for u in /web/database/manager /web/database/selector /en/web/database/manager /fr/web/database/backup /web/database/x/static/y; do
+        c="$(code_of "https://a.example.org:$P$u")"
+        { [ "$c" = 403 ] || [ "$c" = 429 ]; } && ok "database manager closed: $u refused ($c)" || bad "database manager closed: $u answered $c"
+    done
+    c="$(code_of "https://a.example.org:$P/web/login")"
+    [ "$c" = 200 ] && ok "database manager closed: the rest of the site answers" || bad "database manager closed: /web/login answered $c"
     docker rm -f "$TC" >/dev/null 2>&1
 else
     bad "could not start the nginx container for the client checks"
@@ -356,6 +390,7 @@ if docker run -d --name "$PC" -p 127.0.0.1::443 \
     [ "$(code "$B/website/info")" = 404 ] && ok "proxy: /website/info hidden (404)" || bad "proxy: /website/info answered"
     [ "$(code -X POST "$B/en/xmlrpc/2/common")" = 403 ] && ok "proxy: /en/xmlrpc refused under a language code (403)" || bad "proxy: /en/xmlrpc/2/common answered $(code -X POST "$B/en/xmlrpc/2/common")"
     [ "$(code -X POST "$B/fr/jsonrpc")" = 403 ] && ok "proxy: /fr/jsonrpc refused under a language code (403)" || bad "proxy: /fr/jsonrpc answered"
+    [ "$(code "$B/en/web/database/manager")" = 403 ] && ok "proxy: database manager refused under a language code (403)" || bad "proxy: /en/web/database/manager answered $(code "$B/en/web/database/manager")"
     [ "$(curl -sk $A "$B/websocket")" = gevent ] && ok "proxy: /websocket goes to port 8072" || bad "proxy: /websocket not routed to 8072"
     seen="$(curl -sk -D - -o /dev/null $A -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Forwarded-Host: evil.example.com' "$B/echo" | grep -i '^x-seen' | tr -d '\r' | cut -d' ' -f2-)"
     case "$seen" in
@@ -387,6 +422,12 @@ sed -i '/location ~ ^\/(\[^\/\]+\/)?(xmlrpc|jsonrpc)/,/^    }/d' "$T/nginx/defau
 grep -q 'xmlrpc|jsonrpc) {' "$T/nginx/default.conf" && bad "test setup: the RPC block is still in the template copy"
 render_http_only_conf >/dev/null 2>&1 && bad "template without an RPC block: rendered anyway" \
                                      || ok "template without an RPC block: refused"
+cp "$T/out/template.keep" "$T/nginx/default.conf"
+sed -i '/location ^~ \/web\/database\//,/^    }/d; /location ~ ^\/\[^\/\]+\/web\/database\//,/^    }/d' "$T/nginx/default.conf"
+grep -q 'web/database/ {' "$T/nginx/default.conf" && bad "test setup: a database manager block is still in the template copy"
+render_http_only_conf >/dev/null 2>&1 && bad "template without a database manager block: rendered anyway" \
+                                     || ok "template without a database manager block: refused"
+cp "$T/out/template.keep" "$T/nginx/default.conf"
 
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

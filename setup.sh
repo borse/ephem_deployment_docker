@@ -2264,6 +2264,13 @@ if [ "$MODE" = "server" ]; then
             if docker compose restart odoo >/dev/null 2>&1; then
                 echo -e "  ${GREEN}✓${NC} Database manager disabled. Create databases from bash manage.sh"
                 echo "     (d, then n); to open it again set ODOO_LIST_DB=True in .env and re-run setup."
+                # nginx refuses /web/database/ itself while the manager is
+                # closed: Odoo alone still serves the page and its forms. The
+                # config was written above, before this answer was known.
+                if [ "$SERVER_ACCESS" = nginx ] && [ -f nginx/active.conf ]; then
+                    ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; rerender_active_conf ) >/dev/null 2>&1 \
+                        || echo -e "  ${YELLOW}!${NC} nginx kept its previous config: run this setup once more to write it again."
+                fi
             else
                 echo -e "  ${RED}✗${NC} Database manager disabled in odoo.conf, but Odoo did not restart."
                 echo "     Start it: docker compose up -d --force-recreate odoo   (then: docker compose restart nginx)"

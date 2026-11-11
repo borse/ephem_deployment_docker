@@ -1563,6 +1563,21 @@ addons_rename_source() {  # addons_rename_source PARENT
 }
 
 # ── 9) Database manager lock ──────────────────
+# Open or close the web database manager everywhere it is decided: .env (what
+# setup.sh writes the next time), odoo.conf in place (what Odoo reads, after
+# a restart), and on a server with nginx its config, which refuses
+# /web/database/ itself while the manager is closed (Odoo alone still serves
+# the page and its forms, it only refuses what they submit).
+db_manager_set() {  # db_manager_set True|False
+    set_env_key ODOO_LIST_DB "$1"
+    odoo_conf_set_key "$ODOO_CONF" list_db "$1"
+    compose restart "$ODOO_SVC" >/dev/null 2>&1 && echo "  Odoo restarted."
+    if [ "$EPHEM_MODE" = server ] && [ "$(server_access)" = nginx ] && [ -f "$NGINX_ACTIVE" ]; then
+        rerender_active_conf \
+            || echo -e "  ${YELLOW}!${NC} nginx kept its previous config: run bash setup.sh, which writes it again."
+    fi
+}
+
 menu_db_manager() {
     echo -e "${CYAN}${BOLD}Web database manager${NC} (/web/database/manager)"
     echo ""
@@ -1576,17 +1591,14 @@ menu_db_manager() {
     if [ "${CUR:-True}" = "False" ]; then
         read -r -p "  Enable it temporarily? [y/N]: " E
         [[ "${E:-N}" =~ ^[Yy]$ ]] || { echo "  Left disabled."; return 0; }
-        set_env_key ODOO_LIST_DB True
-        odoo_conf_set_key "$ODOO_CONF" list_db True
+        db_manager_set True
         echo -e "  ${YELLOW}!${NC} Enabled. Come back and DISABLE it as soon as you are done."
     else
         read -r -p "  Disable it now (recommended)? [Y/n]: " D
         [[ "${D:-Y}" =~ ^[Nn]$ ]] && { echo "  Left enabled."; return 0; }
-        set_env_key ODOO_LIST_DB False
-        odoo_conf_set_key "$ODOO_CONF" list_db False
+        db_manager_set False
         echo -e "  ${GREEN}✓${NC} Disabled."
     fi
-    compose restart "$ODOO_SVC" >/dev/null 2>&1 && echo "  Odoo restarted."
 }
 
 # ── Database routing (dbfilter) ───────────────
@@ -2506,6 +2518,24 @@ menu_db_create() {
     echo "    • change the admin password to one of your own"
     echo "    • enable two-factor authentication for admin"
     echo "    • Settings → General Settings → Customer Account: 'On invitation'"
+    # The server now has a database, and this menu made it: the manager in the
+    # browser is not needed for it, and while it is open it lists every
+    # database to anyone and takes the master password from the internet.
+    # setup.sh asks the same thing, but only the next time someone runs it.
+    if [ "$EPHEM_MODE" = server ] && [ "$(env_get ODOO_LIST_DB)" != False ]; then
+        echo ""
+        echo -e "  ${YELLOW}!${NC} The database manager in the browser (/web/database/manager) is still open:"
+        echo "     it lists the databases of this server to anyone, and can create, drop and"
+        echo "     download them with the master password alone."
+        local LOCK
+        read -r -p "  Disable it now (recommended)? [Y/n]: " LOCK
+        if [[ "${LOCK:-Y}" =~ ^[Nn]$ ]]; then
+            echo "  Left enabled. Disable it later from the Database manager item of this menu."
+        else
+            db_manager_set False
+            echo -e "  ${GREEN}✓${NC} Disabled."
+        fi
+    fi
 }
 
 # ── 13.2.1) Backup ────────────────────────────

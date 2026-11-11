@@ -400,6 +400,54 @@ _apply_rpc_block() {  # _apply_rpc_block FILE
         { print }' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
+# ── Database manager (/web/database/...) ──────
+#
+# Create, drop, back up and restore every database, guarded only by the
+# master password. Two locations, because Odoo answers the same pages under a
+# language code (/en/web/database/backup) wherever the portal or website app
+# is installed: the prefix one, and a regex for one leading path segment.
+#
+#   ODOO_LIST_DB=True    passed on to Odoo, throttled hard (10 a minute)
+#   ODOO_LIST_DB=False   refused here as well (403). Odoo refuses every action
+#                        by itself then, but it still serves the page and its
+#                        forms, which is what a scanner reports.
+#
+# The switch is bash manage.sh (Database manager) and bash setup.sh; both
+# re-render this config after changing it.
+db_manager_open() { [ "$(_env_val ODOO_LIST_DB)" != False ]; }
+
+_render_dbmgr_block() {  # _render_dbmgr_block [UPSTREAM [ZONE]]
+    local up="${1:-odoo-backend}" zone="${2:-ephem_db_mgr}" loc
+    for loc in '^~ /web/database/' '~ ^/[^/]+/web/database/'; do
+        echo "    location $loc {"
+        if ! db_manager_open; then
+            echo '        # Closed (ODOO_LIST_DB=False in .env)'
+            echo '        deny all;'
+        fi
+        echo "        limit_req zone=$zone burst=10 nodelay;"
+        echo '        proxy_redirect off;'
+        echo "        proxy_pass http://$up;"
+        echo '    }'
+    done
+}
+
+# Swap the database manager locations of FILE (the template) for the current
+# ones. Fails (1) when the file has none.
+_apply_dbmgr_block() {  # _apply_dbmgr_block FILE
+    local f="$1" block tmp
+    grep -q '^[[:space:]]*location[[:space:]]*\^~[[:space:]]*/web/database/' "$f" || return 1
+    block="$(_render_dbmgr_block)"
+    tmp="$(mktemp)"
+    BLOCK="$block" awk '
+        /^[[:space:]]*location[[:space:]]/ && index($0, "/web/database/") {
+            if (!done) { print ENVIRON["BLOCK"]; done = 1 }
+            skip = 1; next
+        }
+        skip && /^[[:space:]]*}[[:space:]]*$/ { skip = 0; next }
+        skip { next }
+        { print }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
 # One HTTPS server block. Everything domain-specific is the server_name and
 # the two certificate paths; the rest is identical for every tenant.
 _render_https_block() {  # _render_https_block DOMAIN LINEAGE MAX_UPLOAD
@@ -486,12 +534,12 @@ $(_render_rpc_block "$d")
         proxy_pass http://odoo-backend;
     }
 
-    # ^~ so no regex location below can take a URL under it.
-    location ^~ /web/database/ {
-        proxy_redirect off;
-        proxy_pass http://odoo-backend;
-        limit_req zone=ephem_db_mgr burst=10 nodelay;
-    }
+    # The database manager, twice: ^~ so no regex location below can take a
+    # URL under it, and the same pages under a language code
+    # (/en/web/database/backup), which went round the throttle. Both are
+    # closed here as well (403) once ODOO_LIST_DB=False in .env: Odoo then
+    # refuses every action, but still serves the page and its forms.
+$(_render_dbmgr_block)
 
     location / {
         proxy_redirect off;
@@ -711,6 +759,11 @@ render_http_only_conf() {
     if ! _apply_rpc_block "$tmp"; then
         rm -f "$tmp"
         echo -e "  ${RED}✗${NC} nginx/default.conf has no RPC block. Is the repo up to date? (git pull)"
+        return 1
+    fi
+    if ! _apply_dbmgr_block "$tmp"; then
+        rm -f "$tmp"
+        echo -e "  ${RED}✗${NC} nginx/default.conf has no database manager block. Is the repo up to date? (git pull)"
         return 1
     fi
     _install_active_conf "$tmp"
@@ -1008,6 +1061,10 @@ server {
     # target of credential stuffing. The Odoo web client never uses them.
     # Opened per address from manage.sh on the Odoo server (Web access, RPC
     # endpoints), which rewrites this file.
+    # One leading path segment is allowed for, here and in the locations
+    # after this one: with the portal or website app, which every ePHEM
+    # database has, Odoo answers the same pages under a language code
+    # (/en/xmlrpc/2/common, /en/web/database/backup).
 @RPC@
 
     # ── Database manager: closed ──────────────
@@ -1016,6 +1073,10 @@ server {
     # manage.sh on the Odoo server does all of this (Databases and backups).
     # ^~ so no regex location below can take a URL under it.
     location ^~ /web/database/ {
+        deny all;
+        proxy_pass http://@P@_odoo;
+    }
+    location ~ ^/[^/]+/web/database/ {
         deny all;
         proxy_pass http://@P@_odoo;
     }
