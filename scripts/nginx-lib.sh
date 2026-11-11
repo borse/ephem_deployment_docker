@@ -457,7 +457,10 @@ $(_render_rpc_block "$d")
     # Slow down repeated login attempts (POST-only zone above). Password
     # reset and sign-up are the same kind of target (guessing, and mailing
     # strangers); /web/login also covers /web/login/totp, the 2FA code.
-    location ~ ^/(web/login|web/session/authenticate|web/reset_password|web/signup) {
+    # One leading path segment is allowed for: with the website app, Odoo
+    # answers the same pages under a language code (/fr/web/login), and
+    # those would otherwise go round this limit.
+    location ~ ^/([^/]+/)?(web/login|web/session/authenticate|web/reset_password|web/signup) {
         limit_req zone=odoo_login burst=20 nodelay;
         proxy_redirect off;
         proxy_pass http://odoo-backend;
@@ -1005,7 +1008,10 @@ server {
     # ── Credential submissions: throttled ─────
     # Password reset and sign up are the same kind of target (guessing, and
     # mailing strangers); /web/login also covers /web/login/totp, the 2FA code.
-    location ~ ^/(web/login|web/session/authenticate|web/reset_password|web/signup) {
+    # One leading path segment is allowed for: with the website app, Odoo
+    # answers the same pages under a language code (/fr/web/login), and
+    # those would otherwise go round this limit.
+    location ~ ^/([^/]+/)?(web/login|web/session/authenticate|web/reset_password|web/signup) {
         limit_req zone=@P@_login burst=20 nodelay;
         proxy_pass http://@P@_odoo;
     }

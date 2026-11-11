@@ -345,6 +345,9 @@ if docker run -d --name "$PC" -p 127.0.0.1::443 \
     [ "$(hit /web/image/res.partner/1/avatar_128)" -eq 0 ] && ok "proxy: /web/image never cached" || bad "proxy: /web/image came from the cache"
     n=0; for i in $(seq 1 25); do [ "$(code -X POST -d 'login=x' "$B/web/login")" = 429 ] && n=$((n + 1)); done
     [ "$n" -ge 1 ] && ok "proxy: login POSTs throttled ($n of 25 refused)" || bad "proxy: login POSTs not throttled"
+    # With the website app Odoo answers /fr/web/login as well: same throttle.
+    n=0; for i in $(seq 1 25); do [ "$(code -X POST -d 'login=x' "$B/fr/web/login")" = 429 ] && n=$((n + 1)); done
+    [ "$n" -ge 1 ] && ok "proxy: login POSTs under a language prefix throttled too ($n of 25 refused)" || bad "proxy: /fr/web/login goes round the login throttle"
     docker rm -f "$PC" >/dev/null 2>&1
 else
     bad "could not start the nginx container for the proxy checks"
