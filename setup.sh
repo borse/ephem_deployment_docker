@@ -623,6 +623,8 @@ PROXY_BIND_HOST=""
 PROXY_FROM=""
 PROXY_DOMAIN=""
 OFFICE_CONVERTER_CHOICE=""   # server mode: 1 or 0, saved in .env below
+HOST_UPDATES_CHOICE=""       # server mode: 1 or 0, empty where it cannot apply
+HOST_REBOOT_TIME_CHOICE=""   # HH:MM on the server's clock, with choice 1
 # The address and domain checks live in nginx-lib.sh; a subshell keeps its
 # names out of this script.
 nginx_lib() { ( source "$EPHEM_ROOT/scripts/nginx-lib.sh"; "$@" ); }
@@ -786,6 +788,41 @@ if [ "$MODE" = "server" ]; then
         echo -e "${GREEN}✓${NC} The document converter will run (OFFICE_CONVERTER=1)"
     else
         echo -e "${GREEN}✓${NC} No document converter (OFFICE_CONVERTER=0); run setup again to add it"
+    fi
+    # Updates of the server itself (HOST_AUTO_UPDATES and HOST_REBOOT_TIME in
+    # .env, put in force by scripts/host-updates.sh once the stack is up,
+    # further down). Asked on Debian and Ubuntu servers only; Enter keeps the
+    # last answer, so a server that said no is not switched on by a later run.
+    if bash "$EPHEM_ROOT/scripts/host-updates.sh" supported; then
+        HOST_REBOOT_TIME_CHOICE=$(env_get HOST_REBOOT_TIME)
+        [[ "$HOST_REBOOT_TIME_CHOICE" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || HOST_REBOOT_TIME_CHOICE=04:00
+        echo ""
+        echo "Automatic updates of this server (the operating system's security updates):"
+        echo "  the system installs them by itself every night. When one needs a restart"
+        echo "  (a new kernel), the server restarts at the time you give, and ePHEM comes"
+        echo "  back by itself about two minutes later. Other nights: no restart."
+        if [ "$(env_get HOST_AUTO_UPDATES)" = 0 ]; then
+            read -p "Turn on automatic updates? [y/N]: " HOST_ANSWER
+            [[ "${HOST_ANSWER:-N}" =~ ^[Yy] ]] && HOST_UPDATES_CHOICE=1 || HOST_UPDATES_CHOICE=0
+        else
+            read -p "Turn on automatic updates? [Y/n]: " HOST_ANSWER
+            [[ "${HOST_ANSWER:-Y}" =~ ^[Nn] ]] && HOST_UPDATES_CHOICE=0 || HOST_UPDATES_CHOICE=1
+        fi
+        if [ "$HOST_UPDATES_CHOICE" = 1 ]; then
+            while :; do
+                read -p "Restart time on this server's clock, which now shows $(date '+%H:%M %Z') [Enter keeps $HOST_REBOOT_TIME_CHOICE]: " HOST_ANSWER
+                HOST_ANSWER="${HOST_ANSWER:-$HOST_REBOOT_TIME_CHOICE}"
+                if ! [[ "$HOST_ANSWER" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+                    echo -e "${RED}✗${NC} A time on the 24 hour clock, like 04:00."
+                    continue
+                fi
+                HOST_REBOOT_TIME_CHOICE="$HOST_ANSWER"
+                break
+            done
+            echo -e "${GREEN}✓${NC} Updates every night, a restart at $HOST_REBOOT_TIME_CHOICE when one needs it"
+        else
+            echo -e "${GREEN}✓${NC} No automatic updates from here (HOST_AUTO_UPDATES=0); run setup again to turn them on"
+        fi
     fi
 fi
 
@@ -1995,6 +2032,28 @@ if [ "$MODE" = "server" ]; then
             echo "  Left enabled — disable it later by setting ODOO_LIST_DB=False in .env"
             echo "  and re-running: bash setup.sh"
         fi
+    fi
+fi
+
+# ── Server mode: the server updates itself and comes back by itself ──
+# The answer given at the top. Nothing is asked of sudo when the server is
+# already set the way .env says, so a later run of setup passes silently.
+if [ -n "$HOST_UPDATES_CHOICE" ]; then
+    echo ""
+    set_env_key HOST_AUTO_UPDATES "$HOST_UPDATES_CHOICE"
+    if [ "$HOST_UPDATES_CHOICE" = 1 ]; then
+        set_env_key HOST_REBOOT_TIME "$HOST_REBOOT_TIME_CHOICE"
+        if bash "$EPHEM_ROOT/scripts/host-updates.sh" in-force; then
+            echo -e "${GREEN}✓${NC} Automatic updates of this server are on, restart at $HOST_REBOOT_TIME_CHOICE when one needs it"
+        else
+            echo "Turning on automatic updates of this server (asks for sudo)…"
+            bash "$EPHEM_ROOT/scripts/host-updates.sh" apply \
+                || echo -e "${YELLOW}!${NC} Not turned on. Once the cause above is fixed: bash scripts/host-updates.sh apply"
+        fi
+    elif [ -f /etc/apt/apt.conf.d/90ephem-host-updates ]; then
+        echo "Automatic updates were turned on from here before: removing our settings (asks for sudo)…"
+        bash "$EPHEM_ROOT/scripts/host-updates.sh" remove \
+            || echo -e "${YELLOW}!${NC} Remove them later: bash scripts/host-updates.sh remove"
     fi
 fi
 

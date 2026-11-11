@@ -230,6 +230,11 @@ services:
   certbot:
     image: certbot/certbot
     container_name: ephem-certbot
+    # Without it the renewal loop does not come back after the server
+    # restarts, and the certificates run out some weeks later with nothing
+    # looking broken until then. One-off runs (docker compose run, the
+    # domain scripts) are not restarted: compose drops the policy for those.
+    restart: unless-stopped
     volumes:
       - certbot-etc:/etc/letsencrypt
       - certbot-www:/var/www/certbot

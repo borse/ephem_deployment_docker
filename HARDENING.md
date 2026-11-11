@@ -72,12 +72,34 @@ sudo systemctl enable --now fail2ban
 ## 3. Automatic security updates
 
 The app image is updated by the ePHEM team, but the host OS and Docker
-itself are yours to patch:
+itself are yours to patch. On Debian and Ubuntu, `bash setup.sh` (Server
+deploy) asks about it and sets it up; the same thing by hand:
 
 ```bash
-sudo apt install -y unattended-upgrades
-sudo dpkg-reconfigure -plow unattended-upgrades    # answer "Yes"
+bash scripts/host-updates.sh apply     # asks for sudo
+bash scripts/host-updates.sh status    # what is in force, next run, last runs
 ```
+
+What it does:
+
+- The system's own updater (`unattended-upgrades`) installs the
+  distribution's security updates every night, one hour before the restart
+  time.
+- When an update needs a restart (a new kernel), the server restarts at
+  `HOST_REBOOT_TIME` (`.env`, 04:00 when empty, **on the server's clock**:
+  a server on UTC restarts at 07:00 in a country at UTC+3, so pick the time
+  with that in mind). Nights with nothing that needs it: no restart.
+- A restart takes ePHEM down for about two minutes. Docker starts with the
+  server and starts every container again, the certificate renewal
+  (certbot) included. `bash manage.sh` → Security check shows whether any
+  container would stay down.
+
+Docker Engine installed from Docker's own repository is not part of those
+updates: a new Docker restarts every container, so run that one yourself at
+a chosen moment (`sudo apt update && sudo apt upgrade`).
+
+`bash scripts/host-updates.sh remove` takes the two settings files out
+again. On other distributions, turn on the system's own automatic updates.
 
 ## 4. Correct time
 

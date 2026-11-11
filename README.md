@@ -1336,7 +1336,7 @@ ephem-deploy/
 
 **Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode listens on every interface by default (`DEV_BIND_HOST=0.0.0.0` in `.env`) so phones and colleagues on the LAN can open it; set it to `127.0.0.1` for a local only setup.
 
-**Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes.
+**Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes. Automatic OS updates, with a restart at a set time when one is needed, are offered by `bash setup.sh` on Debian and Ubuntu (`scripts/host-updates.sh`).
 
 ---
 

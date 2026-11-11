@@ -2030,6 +2030,11 @@ menu_security() {
             && echo -e "  ${GREEN}✓${NC} nginx answers no one who connects by IP address or with an unknown name" \
             || echo -e "  ${YELLOW}!${NC} nginx has no catch-all HTTPS server (config from before the hardening): run bash setup.sh, or change any nginx setting here"
     fi
+    if [ "$EPHEM_MODE" = server ]; then
+        echo ""
+        echo -e "${BOLD}This server (updates, coming back after a restart):${NC}"
+        bash "$SCRIPT_DIR/scripts/host-updates.sh" check || true
+    fi
     echo ""
     echo "  Host-level checklist (SSH, firewall, OS updates): see HARDENING.md"
 }

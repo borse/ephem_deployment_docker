@@ -1,3 +1,51 @@
+# Updating an Existing Server (November 2026: certificate renewal after a restart, automatic updates)
+
+Code and configuration only: no new image, no data, no module update.
+
+What changes:
+
+1. **The certificate renewal comes back after a restart of the server**
+   (servers with `SERVER_ACCESS=nginx`). The `certbot` container was the only
+   one without a restart policy: after a reboot it stayed down, nothing
+   looked broken, and the certificates ran out some weeks later. Check a
+   server that was restarted since its last `docker compose up -d`:
+   `docker ps` must list `ephem-certbot`.
+2. **The server can install its own security updates** (Debian and Ubuntu).
+   `bash setup.sh` asks; with yes, updates install every night and the server
+   restarts at the chosen time (04:00 by default, on the server's clock) on
+   the nights an update needs it. HARDENING.md, section 3.
+
+## Steps
+
+```bash
+cd ~/ephem-deploy
+git pull --ff-only
+
+# 1. Recreates the certbot container with its restart policy; the other
+#    containers are not touched.
+docker compose up -d
+
+# 2. Automatic updates: answer the new question in setup, or directly
+bash scripts/host-updates.sh apply      # asks for sudo
+```
+
+Servers reached directly or behind another machine's nginx
+(`SERVER_ACCESS=direct` or `proxy`) have no certbot: step 2 only.
+
+## Verify afterwards
+
+```bash
+docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' ephem-certbot   # unless-stopped
+bash scripts/host-updates.sh status
+```
+
+`bash manage.sh` → Security check has the same lines under "This server".
+
+## Rolling back
+
+`bash scripts/host-updates.sh remove` deletes the two settings files it
+wrote; the restart policy has nothing to roll back.
+
 # Updating an Existing Server (October 2026: nginx fixes, proxy mode)
 
 Code and configuration only: no new image, no data, no module update.
