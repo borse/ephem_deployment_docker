@@ -281,7 +281,13 @@ bash setup.sh
 
 ### Set Up SSL
 
-After setup completes, if you set a domain, enable HTTPS:
+`bash setup.sh` asks for the domain name and the email, and gets the
+certificate at the end of the same run, so the site is on HTTPS before
+anyone opens it. Create the first database only then: on plain HTTP its
+passwords cross the network readable.
+
+When that attempt could not work yet (the DNS record was not there), run
+setup again once it is, or do it by hand:
 
 ```bash
 bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx

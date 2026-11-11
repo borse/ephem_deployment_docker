@@ -692,6 +692,9 @@ esac
 # choosing nginx again brings the domains and HTTPS back as they were.
 SERVER_ACCESS=""
 DIRECT_PORT=""
+CERT_ASKED=false             # nginx, no certificate yet: the HTTPS question was asked
+CERT_DOMAIN=""               # its answers, saved as DOMAIN and SSL_EMAIL in .env
+CERT_EMAIL=""
 PROXY_BIND_HOST=""
 PROXY_FROM=""
 PROXY_DOMAIN=""
@@ -841,6 +844,60 @@ if [ "$MODE" = "server" ]; then
             echo -e "${GREEN}✓${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072, for $PROXY_FROM only; the proxy serves https://$PROXY_DOMAIN"
         else
             echo -e "${YELLOW}!${NC} Odoo will answer $PROXY_BIND_HOST:8069 and :8072 for any machine that reaches it, until PROXY_FROM is set; the proxy serves https://$PROXY_DOMAIN"
+        fi
+    fi
+    # HTTPS in this same run (nginx on this server, no certificate yet). The
+    # domain and the email are asked here, saved as DOMAIN and SSL_EMAIL once
+    # .env exists, and scripts/ssl-setup.sh runs at the end, when nginx is up.
+    # Before this a new server started on plain HTTP and the first database,
+    # with its passwords, could be created before anyone ran ssl-setup.sh.
+    if [ "$SERVER_ACCESS" = nginx ] && ! grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
+        CERT_ASKED=true
+        CERT_EMAIL=$(env_get SSL_EMAIL)
+        # An older .env may hold the server's IP address as DOMAIN: not a name
+        # a certificate can be issued for.
+        for d in $(env_get DOMAIN | tr ',' ' '); do
+            if nginx_lib valid_domain "$d" && ! nginx_lib valid_ipv4 "$d"; then CERT_DOMAIN="${CERT_DOMAIN:+$CERT_DOMAIN,}$d"; fi
+        done
+        echo ""
+        echo "HTTPS (a free Let's Encrypt certificate, renewed by itself):"
+        echo "  it needs a domain name whose DNS record points at this server, and ports"
+        echo "  80 and 443 reachable from the internet. Without a domain the site is plain"
+        echo "  HTTP on the server's address: every password crosses the network readable."
+        if [ -n "$CERT_DOMAIN" ]; then HINT="Enter keeps $CERT_DOMAIN, 'none' for plain HTTP"; else HINT="Enter = none yet, plain HTTP"; fi
+        while :; do
+            read -p "Domain name of this server [$HINT]: " ANSWER
+            case "$ANSWER" in none|NONE) CERT_DOMAIN=""; break ;; esac
+            ANSWER="$(printf '%s' "${ANSWER:-$CERT_DOMAIN}" | tr ',' ' ' | xargs)"
+            if [ -z "$ANSWER" ]; then
+                CERT_DOMAIN=""
+                break
+            fi
+            BAD=""
+            for d in $ANSWER; do
+                { nginx_lib valid_domain "$d" && ! nginx_lib valid_ipv4 "$d"; } || BAD="$BAD $d"
+            done
+            if [ -n "$BAD" ]; then
+                echo -e "${RED}✗${NC} Not a domain name:$BAD  (like ephem.health.gov.xx: no http://, no address)"
+                continue
+            fi
+            CERT_DOMAIN="$(printf '%s' "$ANSWER" | tr ' ' ',')"
+            break
+        done
+        if [ -n "$CERT_DOMAIN" ]; then
+            while :; do
+                read -p "Email for the certificate's expiry notices (a team mailbox)${CERT_EMAIL:+ [Enter keeps $CERT_EMAIL]}: " ANSWER
+                ANSWER="${ANSWER:-$CERT_EMAIL}"
+                if ! [[ "$ANSWER" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+                    echo -e "${RED}✗${NC} An email address, like admin@health.gov.xx."
+                    continue
+                fi
+                CERT_EMAIL="$ANSWER"
+                break
+            done
+            echo -e "${GREEN}✓${NC} HTTPS for $CERT_DOMAIN is set up at the end of this run"
+        else
+            echo -e "${YELLOW}!${NC} No domain: plain HTTP. Run setup again once the server has one."
         fi
     fi
     # The office converter (OFFICE_CONVERTER in .env, written once .env
@@ -1431,6 +1488,8 @@ if [ -f ".env" ]; then
     fi
 
     ENV_DOMAIN=$(grep "^DOMAIN=" .env | cut -d'=' -f2- | xargs)
+    # The HTTPS question at the top replaces what .env said (saved below).
+    if [ "$CERT_ASKED" = true ]; then ENV_DOMAIN="$CERT_DOMAIN"; fi
     if [ -n "$ENV_DOMAIN" ]; then
         echo -e "${GREEN}✓${NC} Domain: $ENV_DOMAIN"
     else
@@ -1440,15 +1499,7 @@ if [ -f ".env" ]; then
         elif [ "$SERVER_ACCESS" = proxy ]; then
             echo -e "${GREEN}✓${NC} Domain on the proxy machine: $PROXY_DOMAIN (DOMAIN in .env is for nginx on this server)"
         elif [ "$MODE" = "server" ]; then
-            echo -e "${YELLOW}!${NC} No domain set — running in IP mode ($SERVER_IP)"
-            echo ""
-            echo "  For production, set a domain in .env:"
-            echo "    DOMAIN=$SERVER_IP   →   DOMAIN=ephem.health.gov.xx"
-            echo "    SSL_EMAIL=          →   SSL_EMAIL=admin@health.gov.xx"
-            echo ""
-            echo "  Then run: bash setup.sh"
-            echo "  And after that: bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
-            echo ""
+            echo -e "${YELLOW}!${NC} No domain: plain HTTP on http://$SERVER_IP  (run setup again once the server has a domain name)"
         else
             echo -e "${GREEN}✓${NC} Local mode — will run on http://localhost"
         fi
@@ -1505,6 +1556,11 @@ if [ -f .env ]; then
     office_converter_normalize
     if [ -n "$OFFICE_CONVERTER_CHOICE" ]; then
         office_converter_set "$OFFICE_CONVERTER_CHOICE"
+    fi
+    # The answers of the HTTPS question (server, nginx on this server).
+    if [ "$CERT_ASKED" = true ]; then
+        set_env_key DOMAIN "$CERT_DOMAIN"
+        if [ -n "$CERT_EMAIL" ]; then set_env_key SSL_EMAIL "$CERT_EMAIL"; fi
     fi
 fi
 
@@ -2204,6 +2260,41 @@ if [ "$MODE" != server ]; then
     fi
 fi
 
+# ── Server, nginx: HTTPS in this same run ──
+# The domain given at the top. A name with no DNS record at all is not sent
+# to Let's Encrypt: that attempt is certain to fail, and it counts the
+# failures (five an hour for one name).
+if [ "$MODE" = "server" ] && [ "$SERVER_ACCESS" = nginx ] && [ -n "$CERT_DOMAIN" ] \
+   && ! grep -Eq '^[^#]*ssl_certificate' nginx/active.conf 2>/dev/null; then
+    echo ""
+    CERT_READY=""; CERT_WAIT=""
+    for d in $(printf '%s' "$CERT_DOMAIN" | tr ',' ' '); do
+        if command -v dig >/dev/null 2>&1 \
+           && [ -z "$(dig +short "$d" 2>/dev/null </dev/null | grep -E '^[0-9a-fA-F.:]+$' | head -n1)" ]; then
+            CERT_WAIT="$CERT_WAIT $d"
+        else
+            CERT_READY="${CERT_READY:+$CERT_READY,}$d"
+        fi
+    done
+    if [ -n "$CERT_WAIT" ]; then
+        echo -e "${YELLOW}!${NC} No DNS record yet for:$CERT_WAIT"
+        echo "   Not asked of Let's Encrypt now. Create the record (type A, this server's"
+        echo "   public address), wait until  dig +short$CERT_WAIT  gives that address, then:"
+        if [ -n "$CERT_READY" ]; then
+            echo "   bash manage.sh, Web access (w), then a (add a domain)."
+        else
+            echo "   bash setup.sh"
+        fi
+    fi
+    if [ -n "$CERT_READY" ]; then
+        echo "Getting the HTTPS certificate for $CERT_READY (Let's Encrypt)…"
+        if ! bash scripts/ssl-setup.sh "$CERT_READY" "$CERT_EMAIL"; then
+            echo -e "${YELLOW}!${NC} No certificate yet: the site stays on plain HTTP. When the cause above is"
+            echo "   fixed, run setup again; it asks Let's Encrypt again."
+        fi
+    fi
+fi
+
 echo ""
 echo "========================================="
 echo -e "${GREEN}ePHEM is running!${NC}   (EPHEM_MODE=$EPHEM_MODE in .env)"
@@ -2330,27 +2421,19 @@ else
         echo "  • Set up automatic backups: crontab -e   (README → Backups)"
     elif [ -n "$ENV_DOMAIN" ]; then
         echo "Your site is available at:"
-        echo "  http://$ENV_DOMAIN  (HTTP only)"
+        echo "  http://$ENV_DOMAIN  (plain HTTP: the certificate was not issued, see above)"
         echo ""
-        echo "Next step — enable HTTPS:"
-        echo "  bash scripts/ssl-setup.sh $ENV_DOMAIN $ENV_EMAIL"
-        echo ""
-        echo "Then run setup again to apply any remaining config:"
-        echo "  bash setup.sh"
+        echo -e "${YELLOW}Until it is, every password crosses the network readable:${NC} do not create"
+        echo "the database or log in yet. Once the DNS record points at this server and"
+        echo "ports 80 and 443 are open, run this setup again: it asks Let's Encrypt again."
     else
         echo "Your site is available at:"
-        echo "  http://$SERVER_IP  (no domain, no SSL)"
+        echo "  http://$SERVER_IP  (no domain, plain HTTP)"
         echo ""
-        echo -e "${YELLOW}For production, set a domain and SSL:${NC}"
-        echo "  1. Edit .env:"
-        echo "       DOMAIN=$SERVER_IP   →   DOMAIN=ephem.health.gov.xx"
-        echo "       SSL_EMAIL=          →   SSL_EMAIL=admin@health.gov.xx"
-        echo ""
-        echo "  2. Run setup again:"
-        echo "       bash setup.sh"
-        echo ""
-        echo "  3. Then set up SSL:"
-        echo "       bash scripts/ssl-setup.sh ephem.health.gov.xx admin@health.gov.xx"
+        echo -e "${YELLOW}Plain HTTP: every password crosses the network readable.${NC} Keep this"
+        echo "server on a closed network, and create its databases from bash manage.sh"
+        echo "(d, then n) rather than in the browser. Once it has a domain name, run this"
+        echo "setup again: it asks for the name and sets up HTTPS in the same run."
     fi
 
     echo ""
