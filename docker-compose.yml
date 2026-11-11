@@ -119,6 +119,17 @@ services:
     # Workers, scheduled jobs, the PDF renderer and request threads stay in
     # the hundreds even on a large server; see the database for why a bound.
     pids_limit: 4096
+    # Open files and connections. Docker's default (1024) is what one Odoo
+    # process may hold, and live updates are served by a single process that
+    # keeps one connection per open browser plus its own files: at about 340
+    # browsers it had none left ("Too many open files") and live updates
+    # stopped for everyone, logged in or not. nginx bounds how many one
+    # address may hold (limit_conn in nginx/default.conf); this is the room
+    # for all of them together.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     # When the SERVER runs out of memory the kernel has to stop something.
     # This makes it an Odoo worker, which Odoo starts again by itself, and
     # not the database or the SSH service.
@@ -290,6 +301,13 @@ services:
     # changed from inside.
     read_only: true
     pids_limit: 512
+    # Each visitor takes two (the browser's connection and the one to Odoo):
+    # above Docker's default of 1024, so a busy hour does not end in
+    # "Too many open files".
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
     # The access log is the record of who asked for what: same keeping as Odoo.
     logging: *long-logging
     # Reload nginx every 6h so certificates renewed by certbot are actually

@@ -122,6 +122,7 @@ rpc_block_present && ok "the old spelling still counts as an RPC block" || bad "
 rpc_block_current && bad "the old spelling passes as current" || ok "the old spelling is reported as out of date"
 mapfile -t _doms < <(active_domains)
 render_active_conf "${_doms[@]}" >/dev/null && rpc_block_current && ok "a re-render brings the current block back" || bad "a re-render left the old block"
+[ "$(grep -c 'limit_conn conn_limit 200;' "$NGINX_ACTIVE")" -eq 2 ] && ok "live updates: a bound per address in each domain's block" || bad "live updates: bound missing"
 
 echo; echo ".env editing"
 printf 'FOO=1\nNGINX_RPC_OPEN=a.example.org b.example.org\nBAR=2\n' > "$T/.env"
@@ -391,6 +392,7 @@ if docker run -d --name "$PC" -p 127.0.0.1::443 \
     [ "$(code -X POST "$B/en/xmlrpc/2/common")" = 403 ] && ok "proxy: /en/xmlrpc refused under a language code (403)" || bad "proxy: /en/xmlrpc/2/common answered $(code -X POST "$B/en/xmlrpc/2/common")"
     [ "$(code -X POST "$B/fr/jsonrpc")" = 403 ] && ok "proxy: /fr/jsonrpc refused under a language code (403)" || bad "proxy: /fr/jsonrpc answered"
     [ "$(code "$B/en/web/database/manager")" = 403 ] && ok "proxy: database manager refused under a language code (403)" || bad "proxy: /en/web/database/manager answered $(code "$B/en/web/database/manager")"
+    grep -q 'limit_conn ephem_ephem_example_org_conn 200;' "$PF" && ok "proxy: live updates bounded per address" || bad "proxy: no bound on live update connections"
     [ "$(curl -sk $A "$B/websocket")" = gevent ] && ok "proxy: /websocket goes to port 8072" || bad "proxy: /websocket not routed to 8072"
     seen="$(curl -sk -D - -o /dev/null $A -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Forwarded-Host: evil.example.com' "$B/echo" | grep -i '^x-seen' | tr -d '\r' | cut -d' ' -f2-)"
     case "$seen" in

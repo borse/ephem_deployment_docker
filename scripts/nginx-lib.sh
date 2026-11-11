@@ -500,7 +500,15 @@ server {
     proxy_connect_timeout 10s;
     proxy_send_timeout 720s;
 
+    # Live updates. Each open browser holds one connection here for as long as
+    # it is open, and Odoo serves all of them from a single process: without a
+    # bound, one address opening a few hundred used up every connection that
+    # process can hold and live updates stopped for everyone. 200 at a time
+    # per address (an office behind one address: one per open browser), and
+    # new ones no faster than any other request.
     location /websocket {
+        limit_conn conn_limit 200;
+        limit_req zone=ephem_limit burst=60 nodelay;
         proxy_pass http://odoo-chat;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection \$connection_upgrade;
@@ -621,6 +629,8 @@ map \$request_method \$odoo_login_limit_key {
 }
 limit_req_zone \$odoo_login_limit_key zone=odoo_login:10m rate=30r/m;
 limit_req_status 429;
+# The same answer when one address holds too many live update connections.
+limit_conn_status 429;
 
 # ── Upstreams ─────────────────────────────────
 upstream odoo-backend {
@@ -911,6 +921,8 @@ map $request_method $@P@_login_key {
     POST    $binary_remote_addr;
 }
 limit_req_zone $@P@_login_key zone=@P@_login:10m rate=30r/m;
+# Live update connections held open at once, per client address (see /websocket).
+limit_conn_zone $binary_remote_addr zone=@P@_conn:10m;
 
 # ── Odoo ──────────────────────────────────────
 # No upstream keepalive on purpose: Odoo's web workers close the connection
@@ -1029,6 +1041,7 @@ server {
     proxy_read_timeout 720s;
 
     limit_req_status 429;
+    limit_conn_status 429;
 
     access_log /var/log/nginx/@D@.access.log @P@_timing;
     error_log  /var/log/nginx/@D@.error.log warn;
@@ -1044,7 +1057,14 @@ server {
     # ── Live updates (bus, chat, notifications) ──
     # A location with its own proxy_set_header inherits none of the server
     # ones, so they are all repeated here.
+    # Each open browser holds one connection here for as long as it is open,
+    # and Odoo serves all of them from a single process: without a bound, one
+    # address opening a few hundred used up every connection that process can
+    # hold and live updates stopped for everyone. 200 at a time per address,
+    # and new ones no faster than any other request.
     location /websocket {
+        limit_conn @P@_conn 200;
+        limit_req zone=@P@_general burst=60 nodelay;
         proxy_pass http://@P@_odoo_ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade           $http_upgrade;
