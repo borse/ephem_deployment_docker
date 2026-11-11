@@ -43,7 +43,16 @@ What this means in practice:
   set `PROXY_FROM` as soon as the proxy's address is known (it may wait,
   `bash scripts/proxy-firewall.sh detect` finds it once the proxy is in use)
   and run `apply`; until then any machine that reaches the address can skip
-  the proxy.
+  the proxy. The rules are put in before Docker starts and stay through a
+  shutdown and a Docker restart, so there is no moment in which Odoo
+  answers another machine. They also drop a connection sent for the
+  container's own address through the server, which Docker before version
+  28 lets through from a machine on the same network segment.
+- **Keep Docker at version 28 or later.** Before it, such a machine reaches
+  a published container port whatever address the port is published on: a
+  port on `127.0.0.1`, on a VPN address (`DIRECT_BIND_HOST`) or behind the
+  proxy firewall of an older ephem-deploy is open to the neighbours. The
+  Security check names the version.
 
 ```bash
 sudo apt install -y ufw
@@ -124,11 +133,18 @@ timedatectl    # "NTP service: active" must appear
 
 ## 5. Application-level settings (after the databases exist)
 
-- **Disable the database manager:** set `ODOO_LIST_DB=False` in `.env` and
-  re-run `bash setup.sh` (server mode offers this automatically). Until
-  then, `/web/database/manager` can create, drop and **download** databases
+- **Disable the database manager:** `bash manage.sh` offers it as soon as it
+  has created a database, and so does `bash setup.sh` once one exists
+  (`ODOO_LIST_DB=False` in `.env`). Until then, `/web/database/manager` lists
+  the databases to anyone and can create, drop and **download** them
   protected only by the master password. `setup.sh` generates that password
-  at random on a new server and offers to replace a short one.
+  at random on a new server and offers to replace a short one. Once
+  disabled, nginx refuses every address under `/web/database/` itself (403).
+- **Password reset tells whether a login exists** ("No account found for
+  this login" against "instructions sent"), which is Odoo's own behaviour;
+  nginx only slows it down (30 a minute for one address). Where every user
+  signs in through single sign on, turn it off: *Settings → General Settings
+  → Permissions → Password Reset*.
 - **Two-factor authentication** for every admin user: *Preferences →
   Account Security → Enable two-factor authentication*. Make it policy.
 - **Password policy:** install the `auth_password_policy` module and set a
@@ -167,12 +183,18 @@ scanner will and will not find.
 
 - **No capabilities** beyond the few the database and nginx need to start,
   and no way to gain new ones (`no-new-privileges`), on every container.
-- **Read only images** for the database, nginx, the converter and its gate:
-  nothing in them can be changed from inside. Their data and scratch space
-  are volumes and memory. Odoo is not read only: it runs as an unprivileged
-  user that cannot change the image either, and the documented quick patch
-  (`pip install` as root for a module your own addons need) has to keep
-  working.
+  certbot, which holds every private key and talks to the internet, has
+  none at all.
+- **Read only images** for the database, nginx, certbot, the converter and
+  its gate: nothing in them can be changed from inside. Their data and
+  scratch space are volumes and memory. Odoo is not read only: it runs as an
+  unprivileged user that cannot change the image either, and the documented
+  quick patch (`pip install` as root for a module your own addons need) has
+  to keep working.
+- **Live updates have a bound per address.** Every open browser holds one
+  connection to `/websocket`; one address may hold 200, and the Odoo
+  container may hold 65536 open files, so neither one machine nor a few
+  hundred users can use up what the live update process can hold.
 - **A bound on processes** for every container, so one that multiplies
   without end cannot use up every process the server has.
 - **When the server runs out of memory** the kernel stops an Odoo worker,
@@ -231,9 +253,13 @@ curl -s -D - -o /dev/null https://YOUR.DOMAIN/web/login | grep -i '^set-cookie: 
 bash manage.sh        # v (Status and checks), then c (Security check)
 
 # RPC endpoints blocked (expect 403, unless you opened them for this domain
-# or your address in manage.sh, Web access (w), then p), database manager throttled/disabled
-curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/xmlrpc/2/common
+# or your address in manage.sh, Web access (w), then p), also under a language
+# code, which is how they were reached until November 2026
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR.DOMAIN/xmlrpc/2/common
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR.DOMAIN/en/xmlrpc/2/common
+# Database manager: 403 once disabled, throttled (429 after ten) while enabled
 curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/web/database/manager
+curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/en/web/database/manager
 
 # Login throttle: repeated POSTs must start returning 429
 for i in {1..40}; do curl -s -o /dev/null -w '%{http_code} ' -X POST https://YOUR.DOMAIN/web/login; done; echo
@@ -241,3 +267,37 @@ for i in {1..40}; do curl -s -o /dev/null -w '%{http_code} ' -X POST https://YOU
 # A recent backup exists and (if configured) is encrypted
 ls -lh backups/ | tail
 ```
+
+## 8. What a scanner will still report, and why
+
+A penetration test of a server set up this way comes back with a short
+list. These are the lines to expect, checked in November 2026 with ZAP,
+nuclei and testssl against a test server; none of them is a way in.
+
+- **Content-Security-Policy has only `frame-ancestors`** (reported as
+  unsafe-inline, wildcard directive, missing fallback). Odoo's web client is
+  built on inline scripts and compiled templates, so a strict policy breaks
+  it. nginx adds the one directive that is safe everywhere, and Odoo keeps
+  `default-src 'none'` on the files it serves.
+- **Cross-Origin-Opener, Embedder and Resource-Policy headers are absent.**
+  The resource policy would stop the images of ePHEM emails from loading in
+  webmail; the other two bring nothing without it.
+- **The cookie `frontend_lang` is not HttpOnly.** Odoo's own scripts read
+  it. It holds a language code. The session cookie is HttpOnly.
+- **Odoo's version is readable** at `/web/webclient/version_info`. Odoo's
+  mobile app and some public pages ask for it; hiding it breaks them and
+  hides little, since every page shows that this is Odoo 18. What it does
+  tell is the date of the build: keep the app image current.
+- **gzip with HTTPS (BREACH).** Compression stays on: the attack needs a
+  secret and attacker chosen text in the same answer, thousands of times,
+  and many ePHEM users are on slow links.
+- **Error answers of the JSON endpoints carry a Python traceback.** Odoo
+  writes it into every error it returns, with or without debug mode.
+- **Password reset tells whether a login exists.** See section 5.
+- **The certificate chain and OCSP lines** depend on the certificate
+  authority, not on this server.
+
+What must NOT be on the list: an answer from `/xmlrpc`, `/jsonrpc` or
+`/web/database/` (with or without `/en/` in front), a certificate handed to
+a request by IP address, TLS below 1.2, a cookie without Secure, or any open
+port besides 80 and 443 (and 22).

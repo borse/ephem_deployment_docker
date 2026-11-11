@@ -1,3 +1,118 @@
+# Updating an Existing Server (November 2026: after the security test)
+
+Code and configuration only: no new image, no data, no module update.
+**Take this one soon.** Item 1 is a way round a protection every server with
+nginx relies on, found by attacking a test server from another machine.
+
+What changes:
+
+1. **The RPC endpoints are blocked under a language code as well.** nginx
+   refused `/xmlrpc` and `/jsonrpc`, but Odoo answers the same endpoints as
+   `/en/xmlrpc/2/common` or `/en/jsonrpc` in every database that has the
+   portal or website app, which is every ePHEM database. A blocked server
+   took passwords that way, four guesses a second from one address, and
+   Odoo's own limit on failed logins does not apply to these endpoints.
+   Setup writes the nginx config again with the fix. **Proxy mode:** the
+   block lives on the proxy machine, so copy `nginx/proxy/DOMAIN.conf` there
+   again and reload its nginx; until then that server is still open this way.
+2. **The database manager is covered the same way, and closed at nginx once
+   it is disabled.** Its limit of 10 requests a minute did not apply to
+   `/en/web/database/...`. And with `ODOO_LIST_DB=False` Odoo refused every
+   action but still served the page and its forms, which is what a scanner
+   reports: nginx now answers 403 for all of it. Creating a database from
+   `bash manage.sh` now ends by offering to disable the manager, instead of
+   leaving that to the next run of setup. In proxy mode the manager was
+   meant to be closed outright and was reachable under a language code:
+   same fix, same file to copy.
+3. **Live updates cannot be taken down by one address.** Every open browser
+   holds one connection to `/websocket`, and Odoo serves them all from one
+   process that could hold about 340 (Docker gives a process 1024 open files).
+   One machine opening that many, logged in or not, stopped live updates for
+   everyone. nginx now lets one address hold 200, and the Odoo container may
+   hold 65536 files, so a few hundred users are no longer the ceiling either.
+4. **Proxy mode: the firewall is there before Odoo is, and stays.** Its unit
+   ran after Docker and took its rules out when it stopped, so Odoo answered
+   any machine for a moment at every boot, every shutdown and every Docker
+   restart (a machine that should have been refused got an answer in the
+   test). The rules now go in before Docker starts and only `remove` takes
+   them out. A second way in is shut too: a machine on the same network
+   segment could send packets for the container's own address through the
+   server, which Docker before version 28 lets through to a published port.
+   Setup applies both when it runs.
+5. **A database with a crafted name can no longer break the nightly backup.**
+   The application's database role may create databases. One named
+   `../../x` made `scripts/backup.sh` write its dump outside `backups/`, and
+   one named `--version` stopped the run before the filestore was saved.
+   Such a database is now skipped out loud, everything else is saved, and
+   the run ends as failed, so the monitor is not pinged.
+6. **Every cookie is Secure and says SameSite=Lax** (HTTPS). Odoo sets
+   neither; the session cookie already had Secure and HttpOnly from nginx,
+   the others had nothing.
+7. **Port 80 sends only our own names on to HTTPS.** The redirect repeated
+   whatever name a request carried. A request by IP address or under a name
+   this server does not serve now gets no answer (the Let's Encrypt check
+   still does).
+8. **`/website/info` is hidden** (it lists the installed apps and their
+   versions to anyone when the website app is installed), also under a
+   language code. It was hidden in proxy mode only.
+9. **The certbot container is held like the others:** no capability, an
+   image nothing can be changed in. It holds every private key and talks to
+   the internet. Issuing, renewing and deleting certificates were run this
+   way against a test ACME server before the change.
+10. **The Security check asks the running server.** New lines: the RPC block
+    and the closed database manager are requested through nginx itself, a
+    config from before this fix is named, a container published beyond what
+    the setup uses is reported, and so are a Docker older than 28, images of
+    nginx, PostgreSQL and certbot older than two months, a clock that is not
+    synchronised and SSH that accepts passwords.
+
+## Steps (run on each server)
+
+```bash
+cd ~/ephem-deploy
+git pull --ff-only
+bash setup.sh          # Enter keeps every answer
+```
+
+Setup recreates the Odoo, nginx and certbot containers (about a minute
+offline, no data is touched) and writes the nginx config again.
+
+**Proxy mode, one more step, on the proxy machine:** install the new
+`nginx/proxy/DOMAIN.conf` the way its first lines say, then
+`sudo nginx -t && sudo systemctl reload nginx`.
+
+## Verify afterwards
+
+```bash
+# The RPC block holds under a language code (expect 403 twice)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR.DOMAIN/xmlrpc/2/common
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR.DOMAIN/en/xmlrpc/2/common
+
+# The disabled database manager is refused by nginx (expect 403 twice)
+curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/web/database/manager
+curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/en/web/database/manager
+
+# Cookies (expect Secure and SameSite=Lax on each line)
+curl -s -D - -o /dev/null https://YOUR.DOMAIN/web/login | grep -i '^set-cookie'
+
+# Open files for Odoo, and certbot held (expect 65536, then true [ALL])
+docker inspect -f '{{range .HostConfig.Ulimits}}{{.Soft}}{{end}}' ephem-app
+docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}}' ephem-certbot
+
+# Proxy mode: the unit is the new one (expect a ✓ line)
+bash scripts/proxy-firewall.sh check
+```
+
+`bash manage.sh`, Status and checks (`v`), then `c` (Security check) asks
+the first four itself, on the server.
+
+## Rolling back
+
+Go back to the previous commit and run its `bash setup.sh`: it writes the
+older nginx config and recreates the containers without the new limits.
+Proxy mode: its `bash scripts/proxy-firewall.sh apply` puts the older unit
+back. The certbot log volume (`certbot-log`) stays and does no harm.
+
 # Updating an Existing Server (November 2026: second hardening pass)
 
 Code and configuration only: no new image, no data, no module update.
