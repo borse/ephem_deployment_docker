@@ -85,5 +85,37 @@ else
         && ok "no DOCKER-USER chain (Docker down): refuses with a reason" || bad "without DOCKER-USER: $(printf '%s\n' "$nochain" | xargs)"
 fi
 
+# The machines connected to Odoo (peers, which setup.sh reads to propose the
+# proxy's address), from a made up socket table: /proc/net/tcp holds the
+# addresses in hex with the bytes reversed, then the port. docker is a
+# function here, only inside the subshell.
+echo; echo "Connected machines (peers)"
+PEERS="$(
+    docker() {
+        case "$1" in
+            exec) cat <<'TCP'
+  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 020011AC:1F88 0500A8C0:C001 01 00000000:00000000 00:00000000 00000000   100        0 1 1 0
+   1: 020011AC:1F88 0500A8C0:C002 01 00000000:00000000 00:00000000 00000000   100        0 2 1 0
+   2: 020011AC:1F88 0500A8C0:C003 01 00000000:00000000 00:00000000 00000000   100        0 3 1 0
+   3: 020011AC:1F85 0500A8C0:C004 01 00000000:00000000 00:00000000 00000000   100        0 4 1 0
+   4: 020011AC:1F85 0909090A:C005 01 00000000:00000000 00:00000000 00000000   100        0 5 1 0
+   5: 020011AC:1F85 010011AC:C006 01 00000000:00000000 00:00000000 00000000   100        0 6 1 0
+   6: 0100007F:1F85 0100007F:C007 01 00000000:00000000 00:00000000 00000000   100        0 7 1 0
+   7: 00000000:1F85 00000000:0000 0A 00000000:00000000 00:00000000 00000000   100        0 8 1 0
+   8: 020011AC:0050 0700A8C0:C008 01 00000000:00000000 00:00000000 00000000   100        0 9 1 0
+TCP
+                ;;
+            inspect) echo "172.17.0.1 " ;;
+        esac
+    }
+    cmd_peers
+)"
+[ "$PEERS" = "4 192.168.0.5
+1 10.9.9.9" ] && ok "peers: the two outside machines, most connections first" \
+            || bad "peers printed: $(printf '%s' "$PEERS" | tr '\n' '|')"
+case "$PEERS" in *172.17.0.1*|*127.0.0.1*|*192.168.0.7*) bad "peers lists this server, itself or another port" ;;
+                 *) ok "peers: not Docker's own address, not the container itself, not other ports" ;; esac
+
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

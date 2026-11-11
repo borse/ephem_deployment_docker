@@ -692,6 +692,8 @@ esac
 # choosing nginx again brings the domains and HTTPS back as they were.
 SERVER_ACCESS=""
 DIRECT_PORT=""
+DIRECT_BIND_HOST=""          # direct: the address Odoo is published on, empty = every one
+PROXY_SEEN=""                # proxy: the one machine connected to Odoo now, proposed as PROXY_FROM
 CERT_ASKED=false             # nginx, no certificate yet: the HTTPS question was asked
 CERT_DOMAIN=""               # its answers, saved as DOMAIN and SSL_EMAIL in .env
 CERT_EMAIL=""
@@ -752,7 +754,40 @@ if [ "$MODE" = "server" ]; then
             DIRECT_PORT="$PORT_CHOICE"
             break
         done
-        echo -e "${GREEN}✓${NC} Odoo will be published on port $DIRECT_PORT  (http://SERVER_IP:$DIRECT_PORT)"
+        # Which address of the server answers (DIRECT_BIND_HOST in .env). It
+        # used to be every address without a word: on a server with a public
+        # address that is the internet, and no firewall setting changes it
+        # (Docker publishes ports past ufw). Asked on a Linux server only:
+        # under Docker Desktop the ports belong to the Windows or macOS host.
+        DIRECT_BIND_HOST=$(env_get DIRECT_BIND_HOST)
+        echo ""
+        echo "  Reached this way Odoo has no HTTPS and no login throttle, and its RPC"
+        echo "  endpoints are open: every password crosses the network readable. That is"
+        echo "  for a closed network, a VPN or a training room. On the internet, choose"
+        echo "  nginx (2) instead."
+        if [ "$(detect_platform)" = linux ] && command -v ip >/dev/null 2>&1; then
+            LOCAL_IPS=()
+            mapfile -t LOCAL_IPS < <(ip -o -4 addr show 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4}')
+            echo ""
+            echo "  Which address of this server should answer? It has: ${LOCAL_IPS[*]:-(none found)}"
+            if [ -n "$DIRECT_BIND_HOST" ]; then HINT="Enter keeps $DIRECT_BIND_HOST, 'all' for every address"; else HINT="Enter keeps every address"; fi
+            while :; do
+                read -p "Address [$HINT]: " ANSWER
+                ANSWER="${ANSWER:-${DIRECT_BIND_HOST:-all}}"
+                case "$ANSWER" in all|ALL|0.0.0.0) DIRECT_BIND_HOST=""; break ;; esac
+                if ! nginx_lib valid_ipv4 "$ANSWER"; then
+                    echo -e "${RED}✗${NC} One IPv4 address of this server, or 'all'."
+                    continue
+                fi
+                if [ "${#LOCAL_IPS[@]}" -gt 0 ] && ! nginx_lib in_list "$ANSWER" "${LOCAL_IPS[@]}"; then
+                    echo -e "${RED}✗${NC} $ANSWER is not an address of this server (it has: ${LOCAL_IPS[*]}). Docker can only publish on one of those."
+                    continue
+                fi
+                DIRECT_BIND_HOST="$ANSWER"
+                break
+            done
+        fi
+        echo -e "${GREEN}✓${NC} Odoo will be published on ${DIRECT_BIND_HOST:-every address of this server}, port $DIRECT_PORT  (http://${DIRECT_BIND_HOST:-SERVER_IP}:$DIRECT_PORT)"
     fi
     if [ "$SERVER_ACCESS" = proxy ]; then
         # Three answers, saved in .env with the override below:
@@ -799,10 +834,28 @@ if [ "$MODE" = "server" ]; then
         echo "  bash scripts/proxy-firewall.sh apply  (its 'detect' finds the address once"
         echo "  the proxy is in use). Until then Odoo answers any machine that reaches it."
         if [ -n "$PROXY_FROM" ]; then HINT="Enter keeps $PROXY_FROM, 'none' empties it"; else HINT="Enter leaves it empty"; fi
+        # Still open, and the proxy is already in use: the machines connected
+        # to Odoo's ports are on screen, and when there is exactly one, Enter
+        # takes it. An open server then closes at the next run of setup
+        # instead of waiting for someone to edit .env.
+        if [ -z "$PROXY_FROM" ]; then
+            SEEN=$(bash "$EPHEM_ROOT/scripts/proxy-firewall.sh" peers 2>/dev/null </dev/null || true)
+            if [ -n "$SEEN" ]; then
+                echo ""
+                echo "  Connected to Odoo's ports right now (connections, address):"
+                printf '%s\n' "$SEEN" | sed 's/^/    /'
+                if [ "$(printf '%s\n' "$SEEN" | grep -c .)" -eq 1 ]; then
+                    PROXY_SEEN=$(printf '%s\n' "$SEEN" | awk '{print $2}')
+                    HINT="Enter takes $PROXY_SEEN, the only machine connected; 'none' leaves it open"
+                else
+                    echo "  More than one: type the proxy's (it holds most of the connections)."
+                fi
+            fi
+        fi
         while :; do
             read -p "Address of the proxy machine, as this server sees it [$HINT]: " ANSWER
             case "$ANSWER" in none|NONE) PROXY_FROM=""; break ;; esac
-            ANSWER="$(printf '%s' "${ANSWER:-$PROXY_FROM}" | tr ',' ' ' | xargs)"
+            ANSWER="$(printf '%s' "${ANSWER:-${PROXY_FROM:-$PROXY_SEEN}}" | tr ',' ' ' | xargs)"
             if [ -z "$ANSWER" ]; then
                 PROXY_FROM=""
                 break
@@ -1983,6 +2036,7 @@ OVERRIDE
     # The override reads the port from .env, so it must be there before the
     # first `docker compose up` below.
     set_env_key DIRECT_PORT "$DIRECT_PORT"
+    set_env_key DIRECT_BIND_HOST "$DIRECT_BIND_HOST"
     # A disabled service keeps running if it was up: stop it, or it holds
     # ports 80/443 and keeps serving a site that no longer reaches Odoo.
     # Its config and certificates are volumes and files, kept for a switch back.
@@ -2380,7 +2434,7 @@ elif [ "$MODE" = "demo" ]; then
 else
     if [ "$SERVER_ACCESS" = direct ]; then
         echo "Your site is available at:"
-        echo "  http://$SERVER_IP:$DIRECT_PORT  (directly, no nginx, no SSL)"
+        echo "  http://${DIRECT_BIND_HOST:-$SERVER_IP}:$DIRECT_PORT  (directly, no nginx, no SSL)"
         echo ""
         echo "  Open port $DIRECT_PORT in the server's firewall if other machines cannot reach it."
         echo "  Another port later: run this setup again (DIRECT_PORT in .env; the port inside"

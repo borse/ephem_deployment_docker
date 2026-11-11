@@ -30,6 +30,8 @@
 #
 # Usage:
 #   bash scripts/proxy-firewall.sh detect   which machines are connected to Odoo now
+#   bash scripts/proxy-firewall.sh peers    the same, for scripts: "COUNT ADDRESS" per
+#                                           line, machines other than this server only
 #   bash scripts/proxy-firewall.sh apply    write the rules and put them in force (sudo)
 #   bash scripts/proxy-firewall.sh remove   take them out and delete them (sudo)
 #   bash scripts/proxy-firewall.sh status   what is in force (sudo for the rule listing)
@@ -246,16 +248,12 @@ cmd_status() {
 # byte reversed, then the port). Docker keeps the caller's address when it
 # forwards a published port, so the far end of a connection to 8069 or 8072
 # is the machine that opened it, whatever proxy_mode makes of the headers.
-cmd_detect() {
-    local gw found
-    if ! docker inspect "$CTN" >/dev/null 2>&1; then
-        echo -e "${RED}✗${NC} The Odoo container ($CTN) is not running."
-        exit 1
-    fi
-    gw=" $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "$CTN" 2>/dev/null || true) "
+# "COUNT ADDRESS" per line, most connections first ("" when nobody is
+# connected or the container is not there).
+connected_peers() {
     # 1F85 = 8069, 1F88 = 8072; state 01 = established; 127.x is the
     # container talking to itself (its health check).
-    found="$(docker exec "$CTN" cat /proc/net/tcp 2>/dev/null \
+    docker exec "$CTN" cat /proc/net/tcp 2>/dev/null </dev/null \
         | awk 'NR > 1 && $4 == "01" { print $2, $3 }' \
         | while read -r loc rem; do
               case "${loc##*:}" in 1F85|1F88) ;; *) continue ;; esac
@@ -263,7 +261,35 @@ cmd_detect() {
               ip="$(printf '%d.%d.%d.%d' "0x${h:6:2}" "0x${h:4:2}" "0x${h:2:2}" "0x${h:0:2}")"
               case "$ip" in 127.*) continue ;; esac
               echo "$ip"
-          done | sort | uniq -c | sort -rn || true)"
+          done | sort | uniq -c | sort -rn || true
+}
+
+# Docker's own addresses on the Odoo container's networks: a connection
+# from one of them was made on this server (an SSH tunnel, a local call).
+container_gateways() {
+    printf ' %s ' "$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' "$CTN" 2>/dev/null || true)"
+}
+
+# For setup.sh, which proposes the address when exactly one machine is
+# connected: other machines only, nothing printed around them, always exit 0.
+cmd_peers() {
+    local gw n ip
+    gw="$(container_gateways)"
+    connected_peers | while read -r n ip; do
+        [ -n "$ip" ] || continue
+        [[ "$gw" == *" $ip "* ]] || printf '%s %s\n' "$n" "$ip"
+    done
+    return 0
+}
+
+cmd_detect() {
+    local gw found
+    if ! docker inspect "$CTN" >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} The Odoo container ($CTN) is not running."
+        exit 1
+    fi
+    gw="$(container_gateways)"
+    found="$(connected_peers)"
     if [ -z "$found" ]; then
         echo "  No machine is connected to Odoo right now. Open the site through the"
         echo "  proxy in a browser and log in, then run this again."
@@ -285,9 +311,10 @@ cmd_detect() {
 
 case "${1:-}" in
     detect) cmd_detect ;;
+    peers)  cmd_peers ;;
     apply)  cmd_apply ;;
     remove) cmd_remove ;;
     check)  cmd_check ;;
     status) cmd_status ;;
-    *)      sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *)      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
