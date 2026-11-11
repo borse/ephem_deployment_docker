@@ -327,11 +327,26 @@ rpc_forget_domains() {  # rpc_forget_domains DOMAIN...
     env_write_key NGINX_RPC_OPEN "${keep[*]:-}"
 }
 
+# The line that opens an RPC location, in both spellings: ^/(xmlrpc|jsonrpc)
+# until November 2026, ^/([^/]+/)?(xmlrpc|jsonrpc) since.
+_RPC_LOC_RE='^[[:space:]]*location[[:space:]]*~[[:space:]]*\^/.*\(xmlrpc\|jsonrpc\)'
+_RPC_LOC_NOW='location ~ ^/([^/]+/)?(xmlrpc|jsonrpc)'
+
 # Does the live config carry an RPC block at all? Configs rendered before the
 # August 2026 hardening have none, and then nothing is blocked whatever .env
 # says. Any re-render adds it.
 rpc_block_present() {
-    [ -f "$NGINX_ACTIVE" ] && grep -q '^[[:space:]]*location[[:space:]]*~[[:space:]]*\^/(xmlrpc|jsonrpc)' "$NGINX_ACTIVE"
+    [ -f "$NGINX_ACTIVE" ] && grep -Eq "$_RPC_LOC_RE" "$NGINX_ACTIVE"
+}
+
+# Is every RPC block of the live config the current one? Until November 2026
+# the block matched /xmlrpc and /jsonrpc only, and Odoo answers the same
+# endpoints under a language code (/en/xmlrpc/2/common) in every database
+# that has the portal or website app: a blocked server was open that way.
+# Any re-render writes the current block.
+rpc_block_current() {
+    rpc_block_present || return 1
+    [ "$(grep -Ec "$_RPC_LOC_RE" "$NGINX_ACTIVE")" = "$(grep -Fc "$_RPC_LOC_NOW" "$NGINX_ACTIVE")" ]
 }
 
 # The location block itself, indented for a server { } body. The single
@@ -340,7 +355,7 @@ rpc_block_present() {
 # upstream and rate limit zone carry names of their own.
 _render_rpc_block() {  # _render_rpc_block [DOMAIN [UPSTREAM [ZONE]]]
     local d="${1:-}" up="${2:-odoo-backend}" zone="${3:-ephem_limit}" allow a
-    echo '    location ~ ^/(xmlrpc|jsonrpc) {'
+    echo "    $_RPC_LOC_NOW {"
     if [ -n "$d" ] && rpc_domain_open "$d"; then
         echo "        # $d is listed in NGINX_RPC_OPEN (.env): every address may call in"
         echo "        limit_req zone=$zone burst=60 nodelay;"
@@ -374,11 +389,12 @@ _render_rpc_block() {  # _render_rpc_block [DOMAIN [UPSTREAM [ZONE]]]
 # config that predates the block.
 _apply_rpc_block() {  # _apply_rpc_block FILE
     local f="$1" block tmp
-    grep -q '^[[:space:]]*location[[:space:]]*~[[:space:]]*\^/(xmlrpc|jsonrpc)' "$f" || return 1
+    grep -Eq "$_RPC_LOC_RE" "$f" || return 1
     block="$(_render_rpc_block)"
     tmp="$(mktemp)"
-    awk -v block="$block" '
-        /^[[:space:]]*location[[:space:]]*~[[:space:]]*\^\/\(xmlrpc\|jsonrpc\)/ { print block; skip = 1; next }
+    # ENVIRON, not awk -v: -v would read the backslashes of a block as escapes.
+    BLOCK="$block" awk '
+        /^[[:space:]]*location[[:space:]]*~[[:space:]]*\^\// && index($0, "(xmlrpc|jsonrpc)") { print ENVIRON["BLOCK"]; skip = 1; next }
         skip && /^[[:space:]]*}[[:space:]]*$/ { skip = 0; next }
         skip { next }
         { print }' "$f" > "$tmp" && mv "$tmp" "$f"
@@ -452,6 +468,10 @@ server {
     # call in is decided in .env, per domain (NGINX_RPC_OPEN) or server-wide
     # (NGINX_RPC_ALLOW), from bash manage.sh, Web access, RPC endpoints;
     # a hand edit here is lost on the next re-render.
+    # One leading path segment is allowed for: with the portal or website
+    # app, which every ePHEM database has, Odoo answers the same endpoints
+    # under a language code (/en/xmlrpc/2/common), and those went round this
+    # block. Its own limit on failed logins does not cover these endpoints.
 $(_render_rpc_block "$d")
 
     # Slow down repeated login attempts (POST-only zone above). Password

@@ -1944,6 +1944,10 @@ menu_security() {
             || echo -e "  ${YELLOW}!${NC} proxy_mode is off in odoo.conf: Odoo sees every user as the proxy's address (bash setup.sh fixes it)"
     elif ! rpc_block_present; then
         echo -e "  ${YELLOW}!${NC} nginx config has no RPC block (predates the hardening): apply one via Advanced → 4"
+    elif ! rpc_block_current; then
+        echo -e "  ${YELLOW}!${NC} RPC endpoints are blocked at /xmlrpc and /jsonrpc only: Odoo answers the same under a language"
+        echo "     code (/en/xmlrpc/2/common), so they are OPEN that way. A config from before November 2026:"
+        echo "     run bash setup.sh (it writes the config again), or change any nginx setting here"
     elif [ -z "$RPC" ]; then
         echo -e "  ${GREEN}✓${NC} RPC endpoints blocked (/xmlrpc, /jsonrpc)"
     elif [ "$RPC" = all ]; then

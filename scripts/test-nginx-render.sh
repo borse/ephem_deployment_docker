@@ -53,7 +53,7 @@ block_of() {  # block_of FILE DOMAIN|"" → allow/deny lines of that server bloc
     awk -v d="$2" '
         /^server[[:space:]]*\{/ { hit = (d == "") }
         d != "" && $0 ~ ("server_name[[:space:]]+" d ";") { hit = 1 }
-        hit && /location ~ \^\/\(xmlrpc\|jsonrpc\)/ { inb = 1 }
+        hit && /location ~ \^\// && index($0, "(xmlrpc|jsonrpc)") { inb = 1 }
         inb { print }
         inb && /^    }/ { exit }' "$1" | grep -E '^\s*(allow|deny)' | xargs
 }
@@ -63,7 +63,7 @@ run_case() {  # run_case LABEL ALLOW OPEN WANT_HTTP WANT_A WANT_B
     # HTTP-only: one block, the server-wide default only
     if render_http_only_conf >/dev/null; then
         f="$T/out/http_${label}.conf"; cp "$NGINX_ACTIVE" "$f"
-        n="$(grep -c 'location ~ ^/(xmlrpc|jsonrpc)' "$f")"
+        n="$(grep -Fc 'location ~ ^/([^/]+/)?(xmlrpc|jsonrpc)' "$f")"
         [ "$n" -eq 1 ] && ok "$label / http: 1 RPC block" || bad "$label / http: $n RPC blocks"
         got="$(block_of "$f" "")"
         [ "$got" = "$want_http" ] && ok "$label / http: '$want_http'" || bad "$label / http: '$got', wanted '$want_http'"
@@ -73,7 +73,7 @@ run_case() {  # run_case LABEL ALLOW OPEN WANT_HTTP WANT_A WANT_B
     # HTTPS: one block per domain, each decided on its own
     if render_active_conf a.example.org b.example.org >/dev/null; then
         f="$T/out/https_${label}.conf"; cp "$NGINX_ACTIVE" "$f"
-        n="$(grep -c 'location ~ ^/(xmlrpc|jsonrpc)' "$f")"
+        n="$(grep -Fc 'location ~ ^/([^/]+/)?(xmlrpc|jsonrpc)' "$f")"
         [ "$n" -eq 2 ] && ok "$label / https: 2 RPC blocks" || bad "$label / https: $n RPC blocks"
         got="$(block_of "$f" a.example.org)"
         [ "$got" = "$want_a" ] && ok "$label / https a: '$want_a'" || bad "$label / https a: '$got', wanted '$want_a'"
@@ -93,6 +93,17 @@ run_case invalid     "203.0.113.55 bogus;evil 1.2.3"             ""             
 run_case domain_a    ""                                          "a.example.org"                  "deny all;"    ""             "deny all;"
 run_case domain_mix  "203.0.113.55"                              "b.example.org, not..a.domain"   "allow 203.0.113.55; deny all;" "allow 203.0.113.55; deny all;" ""
 run_case domain_both ""                                          "a.example.org b.example.org"    "deny all;"    ""             ""
+
+echo; echo "A config from before the language prefix fix is told apart"
+printf 'NGINX_MAX_UPLOAD=250M\nNGINX_RPC_ALLOW=\nNGINX_RPC_OPEN=\n' > "$T/.env"
+render_active_conf a.example.org b.example.org >/dev/null
+rpc_block_present && rpc_block_current && ok "a fresh render: RPC block present and current" || bad "a fresh render is not seen as current"
+sed -i 's|location ~ ^/(\[^/\]+/)?(xmlrpc\|jsonrpc) {|location ~ ^/(xmlrpc\|jsonrpc) {|' "$NGINX_ACTIVE"
+[ "$(grep -Fc 'location ~ ^/(xmlrpc|jsonrpc) {' "$NGINX_ACTIVE")" -eq 2 ] || bad "test setup: could not write the old spelling"
+rpc_block_present && ok "the old spelling still counts as an RPC block" || bad "the old spelling is not recognised"
+rpc_block_current && bad "the old spelling passes as current" || ok "the old spelling is reported as out of date"
+mapfile -t _doms < <(active_domains)
+render_active_conf "${_doms[@]}" >/dev/null && rpc_block_current && ok "a re-render brings the current block back" || bad "a re-render left the old block"
 
 echo; echo ".env editing"
 printf 'FOO=1\nNGINX_RPC_OPEN=a.example.org b.example.org\nBAR=2\n' > "$T/.env"
@@ -219,6 +230,19 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
         && ok "session_id cookie is Secure and HttpOnly" || bad "session_id cookie flags: $(printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id')"
     printf '%s\n' "$hdrs" | grep -i '^set-cookie: cids' | grep -qi 'httponly' \
         && bad "cids cookie was made HttpOnly (the web client reads it)" || ok "other cookies left alone (the web client reads them)"
+    # Odoo answers every route under a language code as well (/en/xmlrpc/2/common)
+    # wherever the portal or website app is installed: the block, the closed
+    # database manager and the hidden page hold there too.
+    code_of() { curl -sk -o /dev/null -w '%{http_code}' $A "$@"; }
+    for u in /xmlrpc/2/common /en/xmlrpc/2/common /fr_BE/xmlrpc/2/object /jsonrpc /ar/jsonrpc /en/jsonrpc/; do
+        c="$(code_of -X POST "https://a.example.org:$P$u")"
+        [ "$c" = 403 ] && ok "RPC refused: POST $u" || bad "RPC: POST $u answered $c"
+    done
+    # (429 is the general rate limit, used up by the bursts above: still passed on.)
+    for u in /odoo/action-1 /en/odoo /web/dataset/call_kw/res.partner/read /en/contactus; do
+        c="$(code_of "https://a.example.org:$P$u")"
+        { [ "$c" = 200 ] || [ "$c" = 429 ]; } && ok "not caught by the RPC pattern: $u" || bad "$u answered $c"
+    done
     # A Host that is not one of ours, on a connection made for a real domain.
     # HTTP/2: nginx answers 421 itself. HTTP/1.1: the catch-all drops it (444).
     # Either way Odoo never sees the forged name.
@@ -330,6 +354,8 @@ if docker run -d --name "$PC" -p 127.0.0.1::443 \
     [ "$(code "$B/web/database/manager")" = 403 ] && ok "proxy: database manager refused (403)" || bad "proxy: database manager answered"
     [ "$(code "$B/web/database/x/static/y")" = 403 ] && ok "proxy: no static location takes a database manager URL" || bad "proxy: /web/database/x/static/y got through"
     [ "$(code "$B/website/info")" = 404 ] && ok "proxy: /website/info hidden (404)" || bad "proxy: /website/info answered"
+    [ "$(code -X POST "$B/en/xmlrpc/2/common")" = 403 ] && ok "proxy: /en/xmlrpc refused under a language code (403)" || bad "proxy: /en/xmlrpc/2/common answered $(code -X POST "$B/en/xmlrpc/2/common")"
+    [ "$(code -X POST "$B/fr/jsonrpc")" = 403 ] && ok "proxy: /fr/jsonrpc refused under a language code (403)" || bad "proxy: /fr/jsonrpc answered"
     [ "$(curl -sk $A "$B/websocket")" = gevent ] && ok "proxy: /websocket goes to port 8072" || bad "proxy: /websocket not routed to 8072"
     seen="$(curl -sk -D - -o /dev/null $A -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Forwarded-Host: evil.example.com' "$B/echo" | grep -i '^x-seen' | tr -d '\r' | cut -d' ' -f2-)"
     case "$seen" in
@@ -356,7 +382,9 @@ fi
 echo; echo "Template itself"
 out="$(nginx_t "$REPO/nginx/default.conf")" && ok "nginx/default.conf: nginx -t" || { bad "nginx/default.conf: nginx -t"; printf '%s\n' "$out" | sed 's/^/      /'; }
 
-sed -i '/location ~ ^\/(xmlrpc|jsonrpc)/,/^    }/d' "$T/nginx/default.conf"
+cp "$T/nginx/default.conf" "$T/out/template.keep"
+sed -i '/location ~ ^\/(\[^\/\]+\/)?(xmlrpc|jsonrpc)/,/^    }/d' "$T/nginx/default.conf"
+grep -q 'xmlrpc|jsonrpc) {' "$T/nginx/default.conf" && bad "test setup: the RPC block is still in the template copy"
 render_http_only_conf >/dev/null 2>&1 && bad "template without an RPC block: rendered anyway" \
                                      || ok "template without an RPC block: refused"
 
