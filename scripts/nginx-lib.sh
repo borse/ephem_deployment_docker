@@ -478,9 +478,13 @@ server {
     proxy_hide_header X-Frame-Options;
 
     # The login session is never sent over plain HTTP and never readable by a
-    # script, whatever Odoo itself decides. Only this cookie: the web client
-    # reads the others (cids, tz, color_scheme).
-    proxy_cookie_flags session_id secure httponly;
+    # script, whatever Odoo itself decides. HttpOnly on this cookie only: the
+    # web client reads the others (cids, tz, color_scheme, frontend_lang).
+    # Every cookie is Secure, and SameSite=Lax said out loud (Odoo sets none,
+    # so each browser fell back to its own default): sent when someone
+    # follows a link here, never with a request another site makes on its own.
+    proxy_cookie_flags session_id secure httponly samesite=lax;
+    proxy_cookie_flags ~ secure samesite=lax;
 
     proxy_set_header X-Forwarded-Host  \$host;
     proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
@@ -548,6 +552,12 @@ $(_render_rpc_block "$d")
     # closed here as well (403) once ODOO_LIST_DB=False in .env: Odoo then
     # refuses every action, but still serves the page and its forms.
 $(_render_dbmgr_block)
+
+    # With the website app this page lists the installed apps and their
+    # versions to anyone.
+    location ~ ^/([^/]+/)?website/info\$ {
+        return 404;
+    }
 
     location / {
         proxy_redirect off;
@@ -669,9 +679,12 @@ ssl_session_cache shared:SSL:10m;
 ssl_session_timeout 1d;
 ssl_session_tickets off;
 
-# ── HTTP → HTTPS, and the ACME challenge ──────
+# ── Port 80 for a name that is not ours: the ACME challenge only ──
 # default_server, so a domain being added answers the Let's Encrypt check
-# before it has an HTTPS block of its own.
+# before it has an HTTPS block of its own. Anything else asked by IP address
+# or under a name this server does not serve gets no answer at all. (The
+# redirect to HTTPS used to live here and repeated whatever Host a request
+# carried; it is now at the end of this file, for our own domains only.)
 server {
     listen 80 default_server;
     server_name _;
@@ -682,7 +695,7 @@ server {
     }
 
     location / {
-        return 301 https://\$host\$request_uri;
+        return 444;
     }
 }
 
@@ -721,12 +734,14 @@ NGINXEOF
         return 1
     fi
 
+    local served=()
     for d in "${domains[@]}"; do
         if ! lin="$(lineage_for_domain "$d")"; then
             echo -e "  ${YELLOW}!${NC} $d has no certificate — dropped (EPHEM_ALLOW_DROP=1)"
             continue
         fi
         _render_https_block "$d" "$lin" "$max" >> "$tmp"
+        served+=("$d")
         rendered=$((rendered + 1))
     done
 
@@ -735,6 +750,26 @@ NGINXEOF
         echo -e "  ${RED}✗${NC} No domain had a usable certificate — nginx config left untouched."
         return 1
     fi
+
+    # Plain HTTP for the domains served above: on to HTTPS, same name. Last in
+    # the file, so the first server_name a reader meets is an HTTPS one.
+    cat >> "$tmp" <<NGINXEOF
+
+# ── HTTP → HTTPS, for the domains above only ──
+server {
+    listen 80;
+    server_name ${served[*]};
+    server_tokens off;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINXEOF
 
     _install_active_conf "$tmp"
 }
@@ -1003,10 +1038,11 @@ server {
     # copy only, the one above, so no scanner reports a duplicate header.
     proxy_hide_header X-Content-Type-Options;
     proxy_hide_header X-Frame-Options;
-    # Odoo 18 never marks its cookies Secure (session_id is already
-    # HttpOnly). This adds Secure to every cookie it sets on path /, which is
-    # all of them.
-    proxy_cookie_path / "/; Secure";
+    # Odoo 18 never marks its cookies Secure and sets no SameSite
+    # (session_id is already HttpOnly). This adds both to every cookie it sets
+    # on path /, which is all of them. Lax: sent when someone follows a link
+    # to the site, never with a request another site makes on its own.
+    proxy_cookie_path / "/; Secure; SameSite=Lax";
 
     # ── To Odoo ───────────────────────────────
     # X-Forwarded-Host is what makes Odoo apply proxy_mode: without it Odoo
@@ -1102,7 +1138,7 @@ server {
     }
 
     # Lists installed apps and versions when the website app is installed.
-    location = /website/info {
+    location ~ ^/([^/]+/)?website/info$ {
         return 404;
     }
 

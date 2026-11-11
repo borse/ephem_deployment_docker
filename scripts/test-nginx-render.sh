@@ -121,7 +121,9 @@ sed -i 's|location ~ ^/(\[^/\]+/)?(xmlrpc\|jsonrpc) {|location ~ ^/(xmlrpc\|json
 rpc_block_present && ok "the old spelling still counts as an RPC block" || bad "the old spelling is not recognised"
 rpc_block_current && bad "the old spelling passes as current" || ok "the old spelling is reported as out of date"
 mapfile -t _doms < <(active_domains)
+[ "${_doms[*]}" = "a.example.org b.example.org" ] && ok "active_domains: the two HTTPS domains, the port 80 block not counted twice" || bad "active_domains: ${_doms[*]}"
 render_active_conf "${_doms[@]}" >/dev/null && rpc_block_current && ok "a re-render brings the current block back" || bad "a re-render left the old block"
+grep -Eq '^[[:space:]]*server_name a.example.org b.example.org;' "$NGINX_ACTIVE" && ok "port 80: one redirect server naming both domains" || bad "port 80: no redirect server for the domains"
 [ "$(grep -c 'limit_conn conn_limit 200;' "$NGINX_ACTIVE")" -eq 2 ] && ok "live updates: a bound per address in each domain's block" || bad "live updates: bound missing"
 
 echo; echo ".env editing"
@@ -213,7 +215,7 @@ server {
 FAKE
 TC="ephem-tls-test-$$"
 trap 'docker rm -f "$TC" >/dev/null 2>&1; rm -rf "$T"' EXIT
-if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
+if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 -p 127.0.0.1::80 \
        -v "$NGINX_ACTIVE:/etc/nginx/conf.d/default.conf:ro" \
        -v "$T/out/fake-odoo.conf:/etc/nginx/conf.d/fake-odoo.conf:ro" \
        -v "$T/le:/etc/letsencrypt:ro" nginx:alpine >/dev/null 2>&1; then
@@ -248,7 +250,12 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
         && printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'httponly' \
         && ok "session_id cookie is Secure and HttpOnly" || bad "session_id cookie flags: $(printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id')"
     printf '%s\n' "$hdrs" | grep -i '^set-cookie: cids' | grep -qi 'httponly' \
-        && bad "cids cookie was made HttpOnly (the web client reads it)" || ok "other cookies left alone (the web client reads them)"
+        && bad "cids cookie was made HttpOnly (the web client reads it)" || ok "other cookies stay readable by the web client (not HttpOnly)"
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'samesite=lax' \
+        && ok "session_id cookie is SameSite=Lax" || bad "session_id cookie has no SameSite: $(printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id')"
+    ck="$(printf '%s\n' "$hdrs" | grep -i '^set-cookie: cids')"
+    printf '%s\n' "$ck" | grep -qi 'secure' && printf '%s\n' "$ck" | grep -qi 'samesite=lax' \
+        && ok "every other cookie is Secure and SameSite=Lax" || bad "cids cookie flags: $ck"
     # Odoo answers every route under a language code as well (/en/xmlrpc/2/common)
     # wherever the portal or website app is installed: the block, the closed
     # database manager and the hidden page hold there too.
@@ -262,12 +269,28 @@ if docker run -d --name "$TC" --add-host odoo:127.0.0.1 -p 127.0.0.1::443 \
         c="$(code_of "https://a.example.org:$P$u")"
         { [ "$c" = 200 ] || [ "$c" = 429 ]; } && ok "not caught by the RPC pattern: $u" || bad "$u answered $c"
     done
+    for u in /website/info /en/website/info /fr/website/info; do
+        c="$(code_of "https://a.example.org:$P$u")"
+        [ "$c" = 404 ] && ok "hidden: $u" || bad "$u answered $c"
+    done
+    c="$(code_of "https://a.example.org:$P/website/information")"
+    { [ "$c" = 200 ] || [ "$c" = 429 ]; } && ok "a page that only starts like it is served: /website/information" || bad "/website/information answered $c"
     # Database manager open (ODOO_LIST_DB unset here): passed on, throttled,
     # and throttled under a language code too (10 a minute, burst 10).
     c="$(code_of "https://a.example.org:$P/web/database/manager")"
     [ "$c" = 200 ] && ok "database manager open: passed on to Odoo" || bad "database manager open: answered $c"
     n=0; for i in $(seq 1 30); do [ "$(code_of -X POST "https://a.example.org:$P/en/web/database/backup")" = 429 ] && n=$((n + 1)); done
     [ "$n" -ge 10 ] && ok "database manager under a language code: throttled ($n of 30 refused)" || bad "database manager under a language code: only $n of 30 refused"
+    # Port 80: on to HTTPS for our own names, nothing for any other.
+    P80="$(docker port "$TC" 80/tcp | head -1 | sed 's/.*://')"
+    loc="$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' --resolve "a.example.org:$P80:127.0.0.1" "http://a.example.org:$P80/web/login?x=1")"
+    [ "$loc" = "301 https://a.example.org/web/login?x=1" ] && ok "port 80, our domain: 301 to the same name over HTTPS" || bad "port 80, our domain: $loc"
+    c="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' "http://127.0.0.1:$P80/x")"
+    [ "$c" = 000 ] && ok "port 80, a name that is not ours: no answer, no redirect to it" || bad "port 80, forged Host: HTTP $c"
+    c="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$P80/")"
+    [ "$c" = 000 ] && ok "port 80, by IP address: no answer" || bad "port 80, by IP: HTTP $c"
+    c="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: new.example.net' "http://127.0.0.1:$P80/.well-known/acme-challenge/token")"
+    [ "$c" = 404 ] && ok "port 80, a domain being added: the ACME challenge path still answers" || bad "port 80, ACME path for a new domain: HTTP $c"
     # A Host that is not one of ours, on a connection made for a real domain.
     # HTTP/2: nginx answers 421 itself. HTTP/1.1: the catch-all drops it (444).
     # Either way Odoo never sees the forged name.
@@ -392,6 +415,8 @@ if docker run -d --name "$PC" -p 127.0.0.1::443 \
     [ "$(code -X POST "$B/en/xmlrpc/2/common")" = 403 ] && ok "proxy: /en/xmlrpc refused under a language code (403)" || bad "proxy: /en/xmlrpc/2/common answered $(code -X POST "$B/en/xmlrpc/2/common")"
     [ "$(code -X POST "$B/fr/jsonrpc")" = 403 ] && ok "proxy: /fr/jsonrpc refused under a language code (403)" || bad "proxy: /fr/jsonrpc answered"
     [ "$(code "$B/en/web/database/manager")" = 403 ] && ok "proxy: database manager refused under a language code (403)" || bad "proxy: /en/web/database/manager answered $(code "$B/en/web/database/manager")"
+    [ "$(code "$B/en/website/info")" = 404 ] && ok "proxy: /en/website/info hidden (404)" || bad "proxy: /en/website/info answered"
+    printf '%s\n' "$hdrs" | grep -i '^set-cookie: session_id' | grep -qi 'samesite=lax' && ok "proxy: session_id cookie made SameSite=Lax" || bad "proxy: session_id cookie has no SameSite"
     grep -q 'limit_conn ephem_ephem_example_org_conn 200;' "$PF" && ok "proxy: live updates bounded per address" || bad "proxy: no bound on live update connections"
     [ "$(curl -sk $A "$B/websocket")" = gevent ] && ok "proxy: /websocket goes to port 8072" || bad "proxy: /websocket not routed to 8072"
     seen="$(curl -sk -D - -o /dev/null $A -H 'X-Forwarded-For: 6.6.6.6' -H 'X-Forwarded-Host: evil.example.com' "$B/echo" | grep -i '^x-seen' | tr -d '\r' | cut -d' ' -f2-)"
