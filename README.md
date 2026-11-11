@@ -864,9 +864,11 @@ docker compose pull
 docker compose up -d
 ```
 
-On a production server pin the version first (`EPHEM_IMAGE_TAG=1.0.5` in
-`.env`); `bash manage.sh` (`u`, then `i`) does the same and checks that the
-office image exists for that version.
+A production server stays on one release: `bash setup.sh` asks once and
+pins the release the server runs (`EPHEM_IMAGE_TAG=1.0.5` in `.env`), so a
+download never moves it to a newer one by itself. To update, give the new
+version in `bash manage.sh` (`u`, then `i`), which also checks that the
+office image exists for it.
 
 ### Update Odoo Modules Across All Databases
 

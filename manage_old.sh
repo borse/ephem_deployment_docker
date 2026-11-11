@@ -1959,9 +1959,10 @@ menu_security() {
     [ -n "$DBF" ] \
         && echo -e "  ${GREEN}✓${NC} dbfilter set ($DBF)" \
         || echo -e "  ${YELLOW}!${NC} ODOO_DBFILTER not set — required once you have several databases"
-    [ -n "$TAG" ] \
+    # "latest" is what setup.sh writes when the pin was declined: not a pin.
+    { [ -n "$TAG" ] && [ "$TAG" != latest ]; } \
         && echo -e "  ${GREEN}✓${NC} app image pinned (EPHEM_IMAGE_TAG=$TAG)" \
-        || echo -e "  ${YELLOW}!${NC} app image not pinned — set EPHEM_IMAGE_TAG in .env"
+        || echo -e "  ${YELLOW}!${NC} app image not pinned: any download moves this server to the newest release (pin one: Update, then the app image)"
     [ -n "$(env_get BACKUP_AGE_RECIPIENT)" ] \
         && echo -e "  ${GREEN}✓${NC} backups are encrypted (BACKUP_AGE_RECIPIENT set)" \
         || echo -e "  ${YELLOW}!${NC} backups NOT encrypted — set BACKUP_AGE_RECIPIENT (README → Backups)"

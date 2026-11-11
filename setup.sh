@@ -144,6 +144,53 @@ pg_set_password() {  # pg_set_password AS_ROLE ROLE PASSWORD
         | docker compose exec -T db psql -U "$as" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1
 }
 
+# A server that follows "latest" moves to a newer release at any download,
+# with nobody having chosen it. Asked once: stay on the release this server
+# has now, and updates happen when someone picks a version in bash manage.sh.
+# The release number is the image's own label, taken only when Docker Hub has
+# a tag of that name (older images carry a label that is no release, and a
+# pin nobody can download would stop the next update). No is remembered as
+# EPHEM_IMAGE_TAG=latest. The tag is added here on the machine as well, so
+# nothing is downloaded again.
+pin_app_image() {
+    local img="borrs/ephem:latest" ver office A
+    if ! docker image inspect "$img" >/dev/null 2>&1; then
+        echo "Downloading the app image…"
+        docker_pull_with_diagnosis odoo || return 0
+    fi
+    ver=$(docker image inspect "$img" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null) || ver=""
+    if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! docker manifest inspect "borrs/ephem:$ver" >/dev/null 2>&1 </dev/null; then
+        echo -e "${YELLOW}!${NC} The app image follows 'latest': its release number could not be confirmed on"
+        echo "   Docker Hub (no internet, or an image from before the numbered releases)."
+        echo "   Pin a release later: bash manage.sh, Update (u), then i."
+        return 0
+    fi
+    echo ""
+    echo "This server runs release $ver of the app image and follows 'latest': any later"
+    echo "download would move it to a newer release without anyone choosing it."
+    read -p "Keep it on $ver until you choose an update (bash manage.sh, u, then i)? [Y/n]: " A
+    if [[ "${A:-Y}" =~ ^[Nn] ]]; then
+        set_env_key EPHEM_IMAGE_TAG latest
+        echo -e "${GREEN}✓${NC} Stays on 'latest' (EPHEM_IMAGE_TAG=latest in .env); not asked again"
+        return 0
+    fi
+    docker tag "$img" "borrs/ephem:$ver"
+    # The converter is released under the same number. Without one for this
+    # release (here or on Docker Hub) it keeps following its own tag, so the
+    # start below cannot fail on an image that does not exist.
+    if office_converter_on && [ -z "$(env_val EPHEM_OFFICE_TAG)" ]; then
+        office=$(docker image inspect borrs/ephem-office:latest --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null) || office=""
+        if [ "$office" = "$ver" ]; then
+            docker tag borrs/ephem-office:latest "borrs/ephem-office:$ver"
+        elif ! docker manifest inspect "borrs/ephem-office:$ver" >/dev/null 2>&1 </dev/null; then
+            set_env_key EPHEM_OFFICE_TAG latest
+            echo -e "${YELLOW}!${NC} No office converter image for release $ver: the converter stays on 'latest' (EPHEM_OFFICE_TAG)"
+        fi
+    fi
+    set_env_key EPHEM_IMAGE_TAG "$ver"
+    echo -e "${GREEN}✓${NC} App image pinned to release $ver (EPHEM_IMAGE_TAG=$ver in .env)"
+}
+
 # Server mode: .env still has CHANGE_ME. Offer to fill the three secrets with
 # random values (a person typing passwords into a production .env picks
 # shorter ones). Returns 1 when declined, and the manual instructions follow.
@@ -2021,6 +2068,10 @@ fi
 # container (changed mount, new image, hardening), nginx must restart too or
 # every page is a 502. Compared by container id below.
 ODOO_CID_BEFORE=$(odoo_cid odoo)
+# Server: stay on one release of the app image (asked once, see pin_app_image).
+if [ "$MODE" = "server" ] && [ -z "$(env_val EPHEM_IMAGE_TAG)" ]; then
+    pin_app_image || true
+fi
 docker compose up -d
 # A server without python3: the app image is here now and can do the hashing.
 # Written in place (odoo.conf is a single file mount), before the restart
