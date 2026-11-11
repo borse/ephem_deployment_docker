@@ -775,7 +775,7 @@ and backups):
 
 * `r` Restore a backup: a snapshot, or a tenant migrated off a VM
 * `d` Duplicate: a copy of an existing tenant
-* `n` New empty database: a fresh one (admin/admin, no demo data)
+* `n` New empty database: a fresh one (login admin with a random password shown once, no demo data)
 
 All three work with the web database manager disabled, which is where it
 should stay on production. The database name must match the subdomain: for

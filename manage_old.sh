@@ -2393,13 +2393,37 @@ menu_db_admin() {
     esac
 }
 
+# A database made from the command line starts with the login admin and the
+# password admin, and it answers on its domain the moment Odoo is back. These
+# two give admin a random password before that, while Odoo is still stopped.
+# The statement goes to the Odoo shell on stdin, never on a command line.
+# The fingerprint (never the stored value itself) tells whether it changed.
+db_admin_fingerprint() {  # db_admin_fingerprint DB
+    compose exec -T db psql -U "$DB_USER" -d "$1" -Atc \
+        "SELECT md5(password) FROM res_users WHERE login = 'admin'" </dev/null 2>/dev/null | tr -d '[:space:]' || true
+}
+
+# Prints the new password; returns 1, printing nothing, when it was not set.
+db_randomize_admin() {  # db_randomize_admin DB
+    local pw before after
+    pw=$(openssl rand -hex 12 2>/dev/null || head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    [ "${#pw}" -ge 24 ] || return 1
+    before=$(db_admin_fingerprint "$1")
+    printf '%s\n' "env.ref('base.user_admin').password = '$pw'" "env.cr.commit()" \
+        | compose run --rm -T --no-deps "$ODOO_SVC" odoo shell -d "$1" --no-http >/dev/null 2>&1 || return 1
+    after=$(db_admin_fingerprint "$1")
+    { [ -n "$after" ] && [ "$after" != "$before" ]; } || return 1
+    printf '%s' "$pw"
+}
+
 # ── 13.2.5) Create empty database(s) ──────────
 # Adding a domain deliberately creates nothing; this is where an empty tenant
 # comes from when it is not being restored or duplicated.
 menu_db_create() {
     echo -e "${CYAN}${BOLD}Create empty database(s)${NC}"
     echo ""
-    echo "  A fresh Odoo database, no demo data, first login admin/admin."
+    echo "  A fresh Odoo database, no demo data. Its first login is admin with a"
+    echo "  random password, shown once when the database is ready."
     echo "  Name it after the domain's first label so dbfilter routes to it:"
     echo "  training.pheoc.com → 'training'."
     echo ""
@@ -2431,13 +2455,19 @@ menu_db_create() {
     [[ "${OK:-N}" =~ ^[Yy]$ ]] || { echo "  Cancelled."; return 0; }
 
     compose stop "$ODOO_SVC" >/dev/null
-    local FAILED=() MADE=()
+    local FAILED=() MADE=() LOGINS=() DEFAULT_PW=() PW
     for n in "${GOOD[@]}"; do
         echo ""
         echo -e "  ${CYAN}→${NC} $(compose_cmd_text) run --rm $ODOO_SVC odoo -d $n -i base --without-demo=all"
         if compose run --rm -T --no-deps "$ODOO_SVC" odoo -d "$n" -i base --without-demo=all --stop-after-init </dev/null; then
             echo -e "  ${GREEN}✓${NC} '$n' created"
             MADE+=("$n")
+            # Before Odoo is back: the database must never answer with admin/admin.
+            if PW=$(db_randomize_admin "$n"); then
+                LOGINS+=("$n|$PW")
+            else
+                DEFAULT_PW+=("$n")
+            fi
         else
             echo -e "  ${RED}✗${NC} '$n' failed — see the output above."
             FAILED+=("$n")
@@ -2454,9 +2484,23 @@ menu_db_create() {
     [ "${#MADE[@]}" -gt 0 ] && echo -e "  ${GREEN}✓ Created:${NC} ${MADE[*]}"
     [ "${#FAILED[@]}" -gt 0 ] && echo -e "  ${RED}✗ Failed:${NC} ${FAILED[*]}"
     [ "${#MADE[@]}" -eq 0 ] && return 1
+    if [ "${#LOGINS[@]}" -gt 0 ]; then
+        echo ""
+        echo "  First login of each new database. Shown here once and kept nowhere:"
+        local row
+        for row in "${LOGINS[@]}"; do
+            printf '    %-24s login %badmin%b   password %b%s%b\n' "${row%%|*}" "$BOLD" "$NC" "$BOLD$GREEN" "${row#*|}" "$NC"
+        done
+    fi
+    if [ "${#DEFAULT_PW[@]}" -gt 0 ]; then
+        echo ""
+        echo -e "  ${RED}✗ Still on the password admin:${NC} ${DEFAULT_PW[*]}"
+        echo "     The random password could not be set, and the database already"
+        echo "     answers on its domain: log in as admin / admin NOW and change it."
+    fi
     echo ""
     echo "  Secure each one at first login:"
-    echo "    • log in (admin/admin), change the admin password immediately"
+    echo "    • change the admin password to one of your own"
     echo "    • enable two-factor authentication for admin"
     echo "    • Settings → General Settings → Customer Account: 'On invitation'"
 }
