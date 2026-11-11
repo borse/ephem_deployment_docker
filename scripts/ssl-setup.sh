@@ -103,7 +103,7 @@ for d in "${DOMAIN_ARRAY[@]}"; do
         certs_refresh
         if LIN="$(lineage_for_domain "$d")"; then
             echo -e "  ${YELLOW}!${NC} $d keeps its existing certificate '$LIN'"
-            echo "     (give it one of its own: manage.sh → 2) Manage domains → Split)"
+            echo "     (give it one of its own: bash manage.sh, Web access (w), then c)"
             OK_DOMAINS+=("$d")
         else
             echo -e "  ${RED}✗${NC} $d — certificate request failed, leaving it out"
@@ -163,6 +163,6 @@ for d in "${OK_DOMAINS[@]}"; do
 done
 echo ""
 echo "Certificates renew automatically, each on its own schedule."
-echo "Add or remove domains later:  bash manage.sh → 2) Manage domains"
+echo "Add or remove domains later:  bash manage.sh, Web access (w), then a or r"
 echo "========================================="
 echo ""

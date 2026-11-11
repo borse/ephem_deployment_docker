@@ -12,8 +12,8 @@
 #       └── manifest
 #
 # Drop that folder into ephem-deploy/backups/ on the production server and it
-# appears in the Restore list on its own (manage.sh → Advanced → Databases →
-# Restore). No unpacking, no psql by hand.
+# appears in the Restore list on its own (bash manage.sh, Databases (d),
+# then r). No unpacking, no psql by hand.
 #
 # This script is STANDALONE on purpose: copy just this file to the VM, it
 # needs nothing else from the repo.
@@ -263,9 +263,8 @@ say "${CYAN}C) Then restore it on production${NC}"
 echo ""
 echo "     ssh $PROD"
 echo "     cd $PRODPATH && bash manage.sh"
-echo "       → 11) Advanced"
-echo "       → 2) Databases"
-echo "       → 2) Restore        ← '$DB' is already in the list"
+echo "       d   Databases and backups"
+echo "       r   Restore a backup    ← '$DB' is already in the list"
 echo ""
 echo "   Landing it in backups/ is what puts it in that list. Anywhere else"
 echo "   works too: paste the full path at the same prompt instead."

@@ -455,7 +455,7 @@ PYFIX
 # Every Odoo mounts ONE host folder at /mnt/extra-addons, and that folder is
 # a PARENT holding one subfolder per source: the ePHEM clone setup.sh makes
 # ($CORE_NAME, ePHEM-core by default) and any repository added later from
-# manage.sh → Addons → Add a source. Single modes mount addons/, dev-multi
+# manage.sh (+, Add a repository). Single modes mount addons/, dev-multi
 # mounts odcaN/. The generated odoo config lists every subfolder in its
 # addons_path, so a source is nothing more than a subfolder with Odoo modules
 # in it; each clone keeps its own remote (and ssh alias), so pull and switch
@@ -512,8 +512,8 @@ addons_module_dirs() {  # addons_module_dirs PARENT → one host path per line
 # clone) contributes its eoc_*, ephem_* and cmp_* modules: its other folders
 # are not modules, and its OCA dependencies are listed by hand in
 # update-modules.sh where their order matters. Every other source (a
-# country's own repository, an OCA repository added from manage.sh →
-# Addons) contributes every module it holds, whatever its name. Safe to
+# country's own repository, an OCA repository added from manage.sh)
+# contributes every module it holds, whatever its name. Safe to
 # hand to -u on any database: Odoo skips names that are not installed there.
 addons_update_modules() {  # addons_update_modules PARENT
     local p="$1" src dir name
@@ -1117,7 +1117,7 @@ stack_doctor() {  # stack_doctor SERVICE
     if grep -qE "addons-path: no such directory|addons_path.*(does not exist|no such)" <<< "$LOGS"; then
         found=1
         echo -e "${RED}✗${NC} A folder listed in addons_path is gone (a source was moved, renamed or deleted"
-        echo "   by hand). Regenerate the config: manage.sh → Addons, or bash setup.sh."
+        echo "   by hand). Regenerate the config: bash setup.sh."
         echo ""
     fi
     if grep -q "Address already in use" <<< "$LOGS"; then

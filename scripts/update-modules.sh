@@ -37,7 +37,7 @@
 # the run is often faster for it.
 #
 # The modules come from every source folder of the Odoo acted on (the
-# addons/ parent: ePHEM-core plus whatever manage.sh → Addons added).
+# addons/ parent: ePHEM-core plus whatever was added from manage.sh).
 #
 # Multi-instance developer mode (EPHEM_MODE=dev-multi in .env): acts on ONE
 # instance, its odcaN/ code and, by default, its own database ephem_N. The
@@ -502,7 +502,7 @@ changed_modules() {  # changed_modules DB → module names, one per line
 }
 
 # "All": every module installed on this database whose code is in our own
-# folders (ePHEM-core and the repositories added from manage.sh → Addons),
+# folders (ePHEM-core and the repositories added from manage.sh),
 # the listed ones first in list order. Odoo's official addons (base, mail...)
 # are never in those folders, so they never count, even where the list names
 # one; nor does an entry whose code is gone.

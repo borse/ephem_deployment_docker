@@ -7,7 +7,7 @@
 #   • its own host port            (8010, 8020, 8030, …)
 #   • its own addons folder        (odca<name>/, holding the ePHEM clone as
 #                                   odca<name>/ePHEM-core plus any repository
-#                                   added later from manage.sh → Addons)
+#                                   added later from manage.sh)
 #   • its own odoo config          (odoo-<name>.conf)
 #   • its own database + filestore (DB "ephem_<name>", volume odoo-data-<name>)
 #
@@ -142,7 +142,7 @@ write_conf() {
 admin_passwd = $admin
 
 ; One entry per source folder inside odca$name/ (ePHEM-core first). Regenerated
-; by dev-instances.sh up and by manage.sh → Addons whenever a source changes.
+; by dev-instances.sh up and by manage.sh whenever a source changes.
 addons_path = $(addons_path_value "odca$name")
 
 proxy_mode = False

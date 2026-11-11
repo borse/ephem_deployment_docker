@@ -244,7 +244,7 @@ and RTF files (`.doc`, `.ppt`, `.rtf`, `.odt`); without it those files are
 reported as unreadable, while `.docx`, `.pptx`, `.xlsx` and PDF are read
 either way. The answer is saved as `OFFICE_CONVERTER` in `.env` (`1`, or
 empty, installed; `0` not installed). Run setup again, or use
-`bash manage.sh` → Advanced → Document converter, to switch it either way.
+`bash manage.sh`, Maintenance (`m`), then `o`, to switch it either way.
 Servers set up before this question keep their converter.
 
 ### Configure Your Settings
@@ -531,7 +531,7 @@ bash scripts/update-modules.sh
 A teammate just pushed a new branch (e.g. `18_national_dev_new_IAP_levels`) and your `git branch -a` doesn't see it? Developer mode clones with `--single-branch`, so the remote refspec only tracks the branch you originally chose. To pull in any other branch, use the management menu:
 
 ```bash
-bash manage.sh    # → 3 (Addons) → 2 (Fetch & switch to a different branch)
+bash manage.sh    # s (Switch a branch), choose the repository, then f fetches the new branches
 ```
 
 In a multi-instance checkout the Addons item first shows the roster with the branch each instance's `ePHEM-core` clone is on and asks which instance to work in (Enter keeps the pinned one), so a branch never lands in the wrong folder. It then lists the sources in that folder and asks which one to work on (Enter = `ePHEM-core`). The branch name is checked against origin before anything changes, uncommitted work comes along when it does not conflict (git refuses the switch otherwise), and afterwards the menu offers to restart or update modules on that same instance.
@@ -556,7 +556,7 @@ When you need to run two or more Odoo servers at once on the same machine — co
 bash setup.sh    # → 3 (Developer), then 2 (Multi-instance) at the layout question
 ```
 
-Setup hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs. Later, add or remove an instance from `bash manage.sh` → 6 (Stack) → 7, or with the commands further down:
+Setup hands off to `scripts/dev-instances.sh`, which spins up named instances sharing a single Postgres container but with separate databases, ports, addons folders, and configs. Later, add or remove an instance from `bash manage.sh`, Maintenance (`m`), then `e`, or with the commands further down:
 
 | Instance name | URL | Database | Addons folder (mounted) | ePHEM clone |
 |---------------|-----|----------|-------------------------|-------------|
@@ -564,7 +564,7 @@ Setup hands off to `scripts/dev-instances.sh`, which spins up named instances sh
 | `2` | `http://localhost:8020` | `ephem_2` | `odca2/` | `odca2/ePHEM-core/` |
 | `3` | `http://localhost:8030` | `ephem_3` | `odca3/` | `odca3/ePHEM-core/` |
 
-Each `odcaN/` folder is the parent mounted into its container; repositories added from `bash manage.sh` → Addons go next to `ePHEM-core/` in the same folder and only that instance sees them.
+Each `odcaN/` folder is the parent mounted into its container; repositories added from `bash manage.sh` (`+`) go next to `ePHEM-core/` in the same folder and only that instance sees them.
 
 The same ports are open on the LAN by default, so a phone or a colleague on the same network can use `http://<this machine's LAN IP>:8030` (on WSL2 that is the Windows adapter address, shown by `ipconfig`; allow the port in Windows Defender Firewall if the first connection is blocked). Set `DEV_BIND_HOST=127.0.0.1` in `.env` and rerun `up` to keep the instances on this machine only.
 
@@ -691,7 +691,7 @@ Odoo mounts one folder, `addons/` (`odcaN/` per instance in multi-instance mode)
 Add a repository after installation from the menu:
 
 ```bash
-bash manage.sh    # → Addons → 3) Add a source
+bash manage.sh    # + (Add a repository)
 ```
 
 It asks for:
@@ -748,10 +748,10 @@ when you are ready.
 **The easy way — the production menu:**
 
 ```bash
-bash manage.sh      # → 2) Manage domains
-                    #      1) Add domain(s)     — space-separated for several
-                    #      2) Remove domain(s)  — space-separated for several
-                    #      3) Split the shared certificate into one per domain
+bash manage.sh      # w (Web access), then
+                    #   a   Add domain(s), space-separated for several
+                    #   r   Remove domain(s), space-separated for several
+                    #   c   Split a shared certificate into one per domain
 ```
 
 **Manual steps** (what the menu runs for you):
@@ -770,12 +770,12 @@ certificate, keeps the database and filestore:
 bash scripts/remove-domain.sh training.health.gov.xx simex.health.gov.xx
 ```
 
-**Put a database behind the domain** — `bash manage.sh` → `11) Advanced` →
-`2) Databases`:
+**Put a database behind the domain**: `bash manage.sh`, then `d` (Databases
+and backups):
 
-* `2) Restore` — a snapshot, or a tenant migrated off a VM
-* `4) Duplicate` — a copy of an existing tenant
-* `5) Create` — a fresh empty database (admin/admin, no demo data)
+* `r` Restore a backup: a snapshot, or a tenant migrated off a VM
+* `d` Duplicate: a copy of an existing tenant
+* `n` New empty database: a fresh one (admin/admin, no demo data)
 
 All three work with the web database manager disabled, which is where it
 should stay on production. The database name must match the subdomain: for
@@ -788,14 +788,14 @@ Removing a domain then means re-issuing for everyone, and one dead DNS record
 breaks renewal for all of them on the same day. Migrate once:
 
 ```bash
-bash manage.sh      # → 2) Manage domains → 3) Split the shared certificate
+bash manage.sh      # w (Web access), then c (Split a shared certificate)
 # or: bash scripts/split-certs.sh
 ```
 
 It issues the new certificates first, switches nginx over, and only then
-retires the old shared certificate — nothing goes offline. `bash manage.sh` →
-`3) SSL` marks a shared certificate in yellow, so you can see whether you
-still have one.
+retires the old shared certificate — nothing goes offline. `bash manage.sh`,
+Web access (`w`), then `s` marks a shared certificate in yellow, so you can
+see whether you still have one.
 
 ---
 
@@ -810,7 +810,7 @@ Create identical copies of a configured database — useful for training rooms w
 bash scripts/add-domain.sh training-01.pheoc.com training-02.pheoc.com training-03.pheoc.com training-04.pheoc.com training-05.pheoc.com training-06.pheoc.com
 
 # 2. Create the first database, then set it up at https://training-01.pheoc.com
-#    bash manage.sh → 11) Advanced → 2) Databases → 5) Create   (name it training-01)
+#    bash manage.sh, d (Databases and backups), then n (New empty database)   (name it training-01)
 
 # 3. Duplicate to all others
 bash scripts/duplicate-db.sh training-01 training-02 training-03 training-04 training-05 training-06
@@ -855,8 +855,8 @@ ePHEM runs two images released under the same version number: the app image
 ePHEM AI's old Office files, on an internal network with no route out). One
 pull takes both; `up -d` recreates both containers. With the converter not
 installed (`OFFICE_CONVERTER=0`) `up -d` leaves it out, but a plain
-`docker compose pull` still downloads its image; `bash manage.sh` → 4) pulls
-only what runs.
+`docker compose pull` still downloads its image; the app image update in
+`bash manage.sh` (`u`, then `i`) pulls only what runs.
 
 ```bash
 bash scripts/backup.sh
@@ -865,8 +865,8 @@ docker compose up -d
 ```
 
 On a production server pin the version first (`EPHEM_IMAGE_TAG=1.0.5` in
-`.env`); `bash manage.sh` → 4) does the same and checks that the office image
-exists for that version.
+`.env`); `bash manage.sh` (`u`, then `i`) does the same and checks that the
+office image exists for that version.
 
 ### Update Odoo Modules Across All Databases
 
@@ -890,11 +890,11 @@ Two different jobs, both writing into `backups/`:
 
 | | Whole-server backup | Per-database snapshot |
 |---|---|---|
-| Run it | `bash scripts/backup.sh` (menu item 7) | `bash manage.sh` → 11 → 2 → 1 |
+| Run it | `bash scripts/backup.sh` (menu: `d`, then `a`) | `bash manage.sh`, `d`, then `s` |
 | Covers | every database + the whole filestore | one database + its filestore |
 | Output | flat files, optionally one encrypted `.age` | a folder per snapshot |
 | Retention | by age, `BACKUP_KEEP_DAYS` (default 14 days) | by count, `SNAPSHOT_KEEP` (default newest 10 per database) |
-| Restore | from the menu, 11 → 2 → 2 (or by hand, below) | from the menu, 11 → 2 → 2 |
+| Restore | from the menu, `d`, then `r` (or by hand, below) | from the menu, `d`, then `r` |
 
 Use the first for cron and disaster recovery, the second before you touch a
 single tenant. The two retentions never collide: `backup.sh` only sweeps flat
@@ -1000,7 +1000,7 @@ the most common way backups are lost.
 **Restore from backup:**
 
 ```bash
-bash manage.sh      # → 11) Advanced → 2) Databases → 2) Restore
+bash manage.sh      # d (Databases and backups), then r (Restore a backup)
 ```
 
 One list covers everything this server can restore, newest first — snapshot
@@ -1040,47 +1040,90 @@ setup.sh left this checkout in (`EPHEM_MODE` in `.env`):**
 bash manage.sh
 ```
 
-On a **server** it is the production menu: status & health, add tenants/domains,
-SSL, app and addon updates, backups, security check, and an Advanced submenu
-holding the sharper tools (start/stop/restart, per-database backup / restore /
-delete / duplicate, the database-manager lock, the RPC endpoint switch).
+On a **server** it is the production menu. The home screen lists the
+repositories with their branch and state, and every action is a letter:
+
+| Letter | Screen |
+|---|---|
+| `u` | Update: guided (app image, code, modules), or one step |
+| `r`, `o`, `l` | Restart, stop, start (Odoo, nginx, everything); restart Odoo only; follow the log |
+| `s`, `p`, `c`, `f`, `+`, `n`, `k` | Repositories: switch a branch, pull, local changes, fetch, add, rename, remove |
+| `d` | Databases and backups: snapshot, duplicate, delete, new, restore, back up everything |
+| `w` | Web access: domains and certificates, upload limit, RPC endpoints, database routing, database manager |
+| `m` | Maintenance: workers and scheduled jobs, document converter, local basemap, automatic updates of the server |
+| `v` | Status and checks: containers, doctor, security check |
+| `h` | Help |
+
+Enter or `b` goes back one level and `x` leaves from anywhere.
 
 ### The menu in developer mode
 
-In demo, developer and multi-instance developer mode the same command shows a
-developer menu instead. Multi-instance mode works **per instance**:
+In demo, developer and multi-instance developer mode the same command shows
+the developer menu. With several instances, a number opens one of them:
 
 ```bash
-bash manage.sh        # the instance you used last time (EPHEM_INSTANCE in .env)
-bash manage.sh 2      # pin odca2 / ephem_2 / :8020 for this run, and remember it
+bash manage.sh        # the home screen: every instance and its repositories
+bash manage.sh 2      # straight into instance 2 (odca2 / ephem_2 / :8020)
 ```
 
 ```
-ePHEM developer menu   developer, multi-instance
-  Instance 2: odca2 on 18_ephem_2        http://localhost:8020   (running)
+  ePHEM developer menu
+  developer, multi-instance, fetched 1 min ago
 
-  1) Status                        every instance: state, port, branch, uncommitted work
-  2) Switch instance
-  3) Addons                        asks which odcaN/ first, then pull, fetch & switch branch, git status
-  4) Restart instance 2 + follow the log      (scripts/dev-logs.sh 2)
-  5) Update or install modules                (scripts/dev-logs.sh 2 -u ...)
-  6) Stack                         start/stop this instance, recreate or stop the whole stack, clean up leftovers, change the roster, full reset
-  7) Pull the latest app image and recreate   (fixes a wrong-architecture image first, explains a failed pull)
-  8) Doctor                        prerequisites (docker, compose, git, ssh), then scan the log for known errors
-  9) Databases                     backup / restore / delete / duplicate / create
- 10) Back up everything now        (scripts/backup.sh)
+ ┌─────┬────────────────┬────────────┬─────────┬────────────┐
+ │ No. │ Where          │ Branch     │ State   │ Origin     │
+ ├─────┼────────────────┼────────────┼─────────┼────────────┤
+ │ 1   │ odca1  :8010   │            │ running │            │
+ │ 1.1 │ └ ePHEM-core   │ 18_ephem_2 │ clean   │ up to date │
+ │ 2   │ odca2  :8020   │            │ running │            │
+ │ 2.1 │ ├ ePHEM-core   │ 18_ephem_2 │ clean   │ 2 behind   │
+ │ 2.2 │ └ ephem_uganda │ main       │ clean   │ up to date │
+ └─────┴────────────────┴────────────┴─────────┴────────────┘
+
+  Repositories and branches
+    s       Switch a branch
+    p       Pull the latest code
+    c       Show local changes
+    f       Fetch from origin
+    +       Add a repository
+    n       Rename a repository
+    k       Remove a repository
+
+  Run
+    r       Restart and follow the log
+    o       Restart only
+    l       Follow the log
+    t       Start or stop
+    u       Update modules
+    i       Install a module
+
+  More
+    d       Databases and backups: duplicate, restore, create, delete
+    m       Maintenance
+    v       Status and checks
+    h       Help
+    x       Exit
 ```
 
-Everything is scoped to the pinned instance: the addons folder is `odcaN/`, a
-module update runs against `ephem_N` through `odooN`'s container, and a
+Numbers are places and letters are actions. Type a letter and the menu asks
+where; type a number to open that instance or repository; or put both on one
+line once you know them: `s 2.1` switches the branch of repository 2.1, `r 2`
+restarts instance 2 and follows its log, `p a` pulls everything. Enter or `b`
+goes back one level, `x` leaves from anywhere, `h` lists the rest.
+
+Everything acts on the instance you named: its addons folder is `odcaN/`, a
+module update runs against `ephem_N` through that instance's container, and a
 snapshot of `ephem_N` takes the filestore from **that instance's data volume**
-(`odoo-data-N`), whichever instance is pinned. The Addons item is the one
-exception to acting silently: it shows the roster with the branch each
-folder is on and asks which instance to work in before it pulls or switches
-anything (Enter keeps the pinned one). Picking another instance pins it, so
-the restart and module update that follow act on the folder whose code just
-changed. The production-only items (domains, SSL, RPC, upload limit,
-security check) are not shown.
+(`odoo-data-N`). The screens read only this machine: the Origin column is what
+a clone knew at its last fetch, and the passphrase of an SSH key is asked
+right before the first command that needs the network. Maintenance (`m`)
+holds the stack (recreate, stop, change the roster, full reset), the app
+image and the local basemap. The production-only screens (Web access, the
+security check, the server's automatic updates) are not shown.
+
+The numbered menu this one replaced still opens with `bash manage_old.sh`.
+Keep that file: `manage.sh` is the navigation and loads the work itself
+(restore, clone, nginx, certificates) from it.
 
 The mode itself is written by `setup.sh` at the end of every run (and by
 `scripts/dev-instances.sh up`), so re-running setup defaults to what the
@@ -1092,23 +1135,24 @@ recognised from its files, and the menu offers to record it.
 | Open the menu (production or developer, by mode) | `bash manage.sh`, or `bash manage.sh 2` to pin instance 2 |
 | Start the system | `docker compose up -d` |
 | Stop the system | `docker compose down` |
-| Start / stop / restart Odoo | `bash manage.sh` → 11 → 1, or `docker compose restart odoo` |
-| Restart nginx (renewed certificate, config edit) | `bash manage.sh` → 11 → 1 → 4, or `docker compose restart nginx` |
-| Snapshot one database + filestore | `bash manage.sh` → 11 → 2 → 1 |
-| Restore a snapshot (or migrate one in) | `bash manage.sh` → 11 → 2 → 2 |
-| Delete a database + filestore | `bash manage.sh` → 11 → 2 → 3 (snapshots first, then three warnings) |
-| Open / block the RPC endpoints (`/xmlrpc`, `/jsonrpc`), per domain or server-wide | `bash manage.sh` → 11 → 4 (sets `NGINX_RPC_OPEN` / `NGINX_RPC_ALLOW` in `.env`) |
-| Draw the maps from a basemap file on this server (a country or WHO region, works offline) | `bash manage.sh` → 11 → 6 (developer menu: 11) |
+| Start / stop / restart Odoo | `bash manage.sh`, then `r`, or `docker compose restart odoo` |
+| Restart nginx (renewed certificate, config edit) | `bash manage.sh`, `r`, then 4, or `docker compose restart nginx` |
+| Snapshot one database + filestore | `bash manage.sh`, `d`, then `s` |
+| Restore a snapshot (or migrate one in) | `bash manage.sh`, `d`, then `r` |
+| Delete a database + filestore | `bash manage.sh`, `d`, then `k` (snapshots first, then three warnings) |
+| Open / block the RPC endpoints (`/xmlrpc`, `/jsonrpc`), per domain or server-wide | `bash manage.sh`, `w`, then `p` (sets `NGINX_RPC_OPEN` / `NGINX_RPC_ALLOW` in `.env`) |
+| Draw the maps from a basemap file on this server (a country or WHO region, works offline) | `bash manage.sh`, `m`, then `g` |
+| Automatic security updates of the server, and the time it restarts when one needs it | `bash manage.sh`, `m`, then `a`, or `bash scripts/host-updates.sh apply` |
 | Restart Odoo + follow colored logs | `bash scripts/dev-logs.sh` |
 | Restart everything | `docker compose restart` |
 | Check status | `docker compose ps` |
 | View Odoo logs | `docker compose logs -f odoo` |
 | Run a backup | `bash scripts/backup.sh` |
-| Add domain(s) | `bash manage.sh` → 2 → 1, or `bash scripts/add-domain.sh new.domain.com other.domain.com` |
-| Remove domain(s) | `bash manage.sh` → 2 → 2, or `bash scripts/remove-domain.sh old.domain.com` |
-| One certificate per domain (migrate) | `bash manage.sh` → 2 → 3, or `bash scripts/split-certs.sh` |
-| Create an empty database | `bash manage.sh` → 11 → 2 → 5 |
-| Duplicate a database | `bash manage.sh` → 11 → 2 → 4, or `bash scripts/duplicate-db.sh source target1 target2` |
+| Add domain(s) | `bash manage.sh`, `w`, then `a`, or `bash scripts/add-domain.sh new.domain.com other.domain.com` |
+| Remove domain(s) | `bash manage.sh`, `w`, then `r`, or `bash scripts/remove-domain.sh old.domain.com` |
+| One certificate per domain (migrate) | `bash manage.sh`, `w`, then `c`, or `bash scripts/split-certs.sh` |
+| Create an empty database | `bash manage.sh`, `d`, then `n` |
+| Duplicate a database | `bash manage.sh`, `d`, then `d`, or `bash scripts/duplicate-db.sh source target1 target2` |
 | Snapshot a tenant on a non-Docker VM | `bash scripts/vm-snapshot.sh` (on the VM) |
 | Update modules | `bash scripts/update-modules.sh` (multi-instance: `--instance 2`, acts on `ephem_2` with `odca2/`) |
 | Re-run setup | `bash setup.sh` |
@@ -1194,7 +1238,7 @@ chmod -R 755 addons/
 docker compose restart odoo
 ```
 
-If a module was moved, renamed or deleted by hand, `odoo.conf` may still list a folder that is gone and Odoo refuses to start (`addons-path: no such directory`). `bash manage.sh` → Addons rewrites the addons path from what is on disk, and so does `bash setup.sh`.
+If a module was moved, renamed or deleted by hand, `odoo.conf` may still list a folder that is gone and Odoo refuses to start (`addons-path: no such directory`). `bash setup.sh` rewrites the addons path from what is on disk, and `bash manage.sh` does so whenever a repository is added, renamed or removed.
 
 Go to **Apps → Update Apps List**.
 
@@ -1244,6 +1288,7 @@ ephem-deploy/
 ├── odoo.conf                       ← Odoo config (generated by setup.sh)
 ├── setup.sh                        ← Main setup script — run this for installs and updates
 ├── manage.sh                       ← Day-to-day menu: production items in server mode, developer items in dev modes
+├── manage_old.sh                   ← The numbered menu it replaced; manage.sh loads its functions, keep it
 │
 ├── nginx/
 │   ├── default.conf                ← HTTP-only template (in Git, never modified)
@@ -1258,7 +1303,7 @@ ephem-deploy/
 │
 ├── addons/                         ← the folder mounted into Odoo (read-only in server/demo, read-write in developer mode)
 │   ├── ePHEM-core/                 ← ePHEM modules (private repo, cloned by setup.sh)
-│   └── <other>/                    ← any repository added from manage.sh → Addons, one folder each
+│   └── <other>/                    ← any repository added from manage.sh (+), one folder each
 │
 ├── scripts/
 │   ├── ssl-setup.sh                ← Set up HTTPS with Let's Encrypt
@@ -1320,7 +1365,7 @@ ephem-deploy/
 - `/xmlrpc` and `/jsonrpc` are blocked at NGINX — they are the main
   credential-stuffing target and the web client doesn't use them. When an
   integration or import has to call in, open them for that tenant only
-  (`bash manage.sh` → 11 → 4, per domain) or allow-list the caller's
+  (`bash manage.sh`, `w`, then `p`, per domain) or allow-list the caller's
   address server-wide; both live in `.env` (`NGINX_RPC_OPEN`,
   `NGINX_RPC_ALLOW`), never in `nginx/active.conf`, which is regenerated
 - Login attempts are throttled (POST-only, so normal page loads are never
@@ -1331,12 +1376,12 @@ ephem-deploy/
   automatically
 - Containers run with dropped capabilities and `no-new-privileges`; the
   office converter and its gate also have a read only filesystem
-- `bash manage.sh` → 9) Security check shows every item above as it stands on
+- `bash manage.sh`, `v`, then `c` (Security check) shows every item above as it stands on
   this server
 
 **Note:** Demo mode exposes Odoo directly on port 8069 without SSL or a reverse proxy — intentional for local/evaluation use, never for a public-facing server. Developer mode listens on every interface by default (`DEV_BIND_HOST=0.0.0.0` in `.env`) so phones and colleagues on the LAN can open it; set it to `127.0.0.1` for a local only setup.
 
-**Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes. Automatic OS updates, with a restart at a set time when one is needed, are offered by `bash setup.sh` on Debian and Ubuntu (`scripts/host-updates.sh`).
+**Required on production servers:** work through **[HARDENING.md](HARDENING.md)** once (SSH keys, automatic OS updates, the ufw/Docker interaction, encrypted off-site backups, 2FA, disabling the database manager). It takes about 20 minutes. Automatic OS updates, with a restart at a set time when one is needed, are offered by `bash setup.sh` on Debian and Ubuntu, and by `bash manage.sh`, `m`, then `a` (`scripts/host-updates.sh`).
 
 ---
 

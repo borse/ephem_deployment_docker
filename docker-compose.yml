@@ -77,7 +77,7 @@ services:
       - ./addons:/mnt/extra-addons:ro
       # Read only: Odoo has no reason to rewrite its own configuration.
       - ./odoo.conf:/etc/odoo/odoo.conf:ro
-      # Opt in local basemap files (bash manage.sh: Local basemap). Empty on a
+      # Opt in local basemap files (bash manage.sh, Maintenance (m), then g). Empty on a
       # server that never downloaded one, and the maps then use OpenFreeMap.
       - ./basemaps:/mnt/basemaps:ro
     networks:

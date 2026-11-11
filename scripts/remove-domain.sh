@@ -9,7 +9,7 @@
 #
 # Databases and filestores are never touched — the tenant's data survives,
 # only the way in disappears. Delete data from:
-#   bash manage.sh → Advanced → Databases → Delete
+#   bash manage.sh, Databases (d), then k (Delete)
 #
 # Usage:
 #   ./scripts/remove-domain.sh training.pheoc.com
@@ -167,7 +167,7 @@ for d in "${REMOVE[@]}"; do
         else
             echo -e "  ${YELLOW}!${NC} re-issue failed — '$LIN' still lists $d."
             echo "     Renewal keeps working until $d's DNS record disappears; fix it with"
-            echo "     manage.sh → Manage domains → Split the shared certificate."
+            echo "     bash manage.sh, Web access (w), then c (Split a shared certificate)."
         fi
     fi
     certs_refresh
@@ -199,7 +199,7 @@ if [ ${#LEFTOVER[@]} -gt 0 ]; then
     printf '     • %s\n' "${LEFTOVER[@]}"
     echo ""
     echo "  Keep them (a domain can be added back later), or remove them:"
-    echo "    bash manage.sh → Advanced → Databases → Backup, then Delete"
+    echo "    bash manage.sh, Databases (d): s takes a snapshot, k deletes"
 fi
 echo "========================================="
 echo ""

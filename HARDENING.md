@@ -73,7 +73,8 @@ sudo systemctl enable --now fail2ban
 
 The app image is updated by the ePHEM team, but the host OS and Docker
 itself are yours to patch. On Debian and Ubuntu, `bash setup.sh` (Server
-deploy) asks about it and sets it up; the same thing by hand:
+deploy) asks about it and sets it up, and so does `bash manage.sh`,
+Maintenance (m), then a; the same thing by hand:
 
 ```bash
 bash scripts/host-updates.sh apply     # asks for sudo
@@ -91,8 +92,8 @@ What it does:
   with that in mind). Nights with nothing that needs it: no restart.
 - A restart takes ePHEM down for about two minutes. Docker starts with the
   server and starts every container again, the certificate renewal
-  (certbot) included. `bash manage.sh` → Security check shows whether any
-  container would stay down.
+  (certbot) included. `bash manage.sh`, Status and checks (v), then c
+  (Security check) shows whether any container would stay down.
 
 Docker Engine installed from Docker's own repository is not part of those
 updates: a new Docker restarts every container, so run that one yourself at
@@ -182,10 +183,10 @@ openssl s_client -connect YOUR.DOMAIN:443 -noservername </dev/null 2>&1 | grep -
 curl -s -D - -o /dev/null https://YOUR.DOMAIN/web/login | grep -i '^set-cookie: session_id'
 
 # Everything this stack can verify about itself, in one place
-bash manage.sh        # 9) Security check
+bash manage.sh        # v (Status and checks), then c (Security check)
 
 # RPC endpoints blocked (expect 403, unless you opened them for this domain
-# or your address via manage.sh → 11 → 4), database manager throttled/disabled
+# or your address in manage.sh, Web access (w), then p), database manager throttled/disabled
 curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/xmlrpc/2/common
 curl -s -o /dev/null -w '%{http_code}\n' https://YOUR.DOMAIN/web/database/manager
 

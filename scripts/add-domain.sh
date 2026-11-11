@@ -175,7 +175,7 @@ for d in "${ISSUED[@]}"; do
     printf '  https://%-38s → database: %s\n' "$d" "${d%%.*}"
 done
 echo ""
-echo "Put a database there with manage.sh → Advanced → Databases:"
+echo "Put a database there with bash manage.sh, Databases (d):"
 echo "  • Restore    — a snapshot or a VM migration"
 echo "  • Duplicate  — a copy of an existing tenant"
 echo "  • Create     — a fresh empty database"

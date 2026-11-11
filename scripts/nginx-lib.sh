@@ -245,7 +245,7 @@ ssl_email() {
 #                     for every hostname and only the default applies)
 #     training.pheoc.com simex.pheoc.com
 #
-# Changed from: bash manage.sh → 11) Advanced → 4) RPC endpoints. Every
+# Changed from: bash manage.sh, Web access (w), then p (RPC endpoints). Every
 # entry ends up inside the nginx config, so only an address, a CIDR range or
 # a domain name gets through; anything else is refused loudly and left out.
 
@@ -450,7 +450,7 @@ server {
     # preferred credential-stuffing target. Odoo's own web client does not
     # use them, so blocking them does not affect normal browser use. Who may
     # call in is decided in .env, per domain (NGINX_RPC_OPEN) or server-wide
-    # (NGINX_RPC_ALLOW), from bash manage.sh → Advanced → RPC endpoints;
+    # (NGINX_RPC_ALLOW), from bash manage.sh, Web access, RPC endpoints;
     # a hand edit here is lost on the next re-render.
 $(_render_rpc_block "$d")
 
@@ -983,14 +983,14 @@ server {
     # ── RPC endpoints ─────────────────────────
     # Password login with no login page and no CSRF token: the favourite
     # target of credential stuffing. The Odoo web client never uses them.
-    # Opened per address from manage.sh on the Odoo server (Advanced → RPC
+    # Opened per address from manage.sh on the Odoo server (Web access, RPC
     # endpoints), which rewrites this file.
 @RPC@
 
     # ── Database manager: closed ──────────────
     # Create, drop, back up (the whole database with its files) and restore,
     # guarded only by the master password. From the internet it has no use:
-    # manage.sh on the Odoo server does all of this (Advanced → Databases).
+    # manage.sh on the Odoo server does all of this (Databases and backups).
     # ^~ so no regex location below can take a URL under it.
     location ^~ /web/database/ {
         deny all;

@@ -1,4 +1,4 @@
-# Updating an Existing Server (November 2026: certificate renewal after a restart, automatic updates)
+# Updating an Existing Server (November 2026: certificate renewal after a restart, automatic updates, new menu)
 
 Code and configuration only: no new image, no data, no module update.
 
@@ -14,6 +14,12 @@ What changes:
    `bash setup.sh` asks; with yes, updates install every night and the server
    restarts at the chosen time (04:00 by default, on the server's clock) on
    the nights an update needs it. HARDENING.md, section 3.
+3. **`bash manage.sh` is the new menu.** Numbers are places (repositories,
+   databases) and letters are actions: `u` update, `d` databases and backups,
+   `w` web access, `m` maintenance, `v` status and checks, `h` help. The
+   numbered menu still opens with `bash manage_old.sh`, and that file has to
+   stay: the new menu loads the work itself from it. Both have a screen for
+   the automatic updates (Maintenance, then `a`; old menu: Advanced, 9).
 
 ## Steps
 
@@ -39,7 +45,8 @@ docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' ephem-certbot   # unless-
 bash scripts/host-updates.sh status
 ```
 
-`bash manage.sh` → Security check has the same lines under "This server".
+`bash manage.sh`, Status and checks (`v`), then `c` (Security check) has the
+same lines under "This server".
 
 ## Rolling back
 
@@ -79,7 +86,7 @@ bash setup.sh          # 1) Server deploy, Enter keeps your access choice
 
 On an nginx server setup re-renders `nginx/active.conf` with the fixes
 (tested first, rolled back if nginx refuses it). Without a setup run, any
-change in `bash manage.sh` → 10 or Advanced → RPC endpoints re-renders it too.
+change in `bash manage.sh`, Web access (`w`), `u` or `p`, re-renders it too.
 
 A **direct server behind another machine's nginx** moves to proxy mode in the
 same run: choose **3** at "How will people reach ePHEM?", then give this
@@ -112,7 +119,7 @@ setup has run).
 ## Verify afterwards
 
 ```bash
-bash manage.sh          # 9) Security check: firewall and proxy_mode lines
+bash manage.sh          # v, then c (Security check): firewall and proxy_mode lines
 bash scripts/proxy-firewall.sh status                                       # proxy mode
 curl -s -o /dev/null -w '%{http_code}\n' https://DOMAIN/websocket/health    # 200
 curl -s -o /dev/null -w '%{http_code}\n' https://DOMAIN/xmlrpc/2/common     # 403
@@ -179,7 +186,7 @@ one and the check below keeps warning about it.
 ## Verify afterwards
 
 ```bash
-bash manage.sh          # 9) Security check: every line should show a tick
+bash manage.sh          # v, then c (Security check): every line should show a tick
 docker compose ps       # ephem-office-gate and ephem-office healthy, neither with a published port
 ```
 
@@ -276,14 +283,14 @@ git pull              # brings the office service into docker-compose.yml
 bash scripts/backup.sh
 
 # 2. Images 1.0.5 (app + office converter)
-bash manage.sh        # 4) Update the ePHEM app image, version 1.0.5
+bash manage.sh        # u (Update), then i (App image only), version 1.0.5
                       # It checks that the office image exists for that version.
                       # By hand instead: EPHEM_IMAGE_TAG=1.0.5 in .env, then
                       #   docker compose pull && docker compose up -d
                       # (pulls both images, starts the ephem-office container)
 
 # 3. New ePHEM code
-bash manage.sh        # 5) Addons, ePHEM-core, 1) Pull latest
+bash manage.sh        # p (Pull the latest code), ePHEM-core
                       # "Apply the new code now?": answer n, step 4 does it
 
 # 4. Update every module on every database (Odoo restarts at the end)
@@ -331,7 +338,7 @@ the VM deployment guide; adjust them if the server differs.
 ## Rolling back
 
 Image: set `EPHEM_IMAGE_TAG=1.0.3` in `.env` and, because 1.0.3 has no office
-image of its own, `EPHEM_OFFICE_TAG=1.0.5` (manage.sh option 4 sets it by
+image of its own, `EPHEM_OFFICE_TAG=1.0.5` (the app image update in manage.sh sets it by
 itself when the chosen release has none), then
 `docker compose pull && docker compose up -d`. Code: restore the backup from
 step 1 together with the previous ePHEM-core commit (`d7e9ebf87`).
@@ -375,12 +382,12 @@ git pull
 bash scripts/backup.sh
 
 # 2. App image 1.0.3 (adds LibreOffice)
-bash manage.sh        # 4) Update the ePHEM app image, version 1.0.3
+bash manage.sh        # u (Update), then i (App image only), version 1.0.3
                       # By hand instead: EPHEM_IMAGE_TAG=1.0.3 in .env, then
                       #   docker compose pull && docker compose up -d
 
 # 3. New ePHEM code
-bash manage.sh        # 5) Addons, ePHEM-core, 1) Pull latest
+bash manage.sh        # p (Pull the latest code), ePHEM-core
                       # "Apply the new code now?": answer n, step 4 does it
 
 # 4. Update the modules on every database (Odoo restarts at the end)
@@ -509,7 +516,7 @@ What it delivers:
 1. **A `basemaps/` folder** next to `addons/`, mounted read only into Odoo
    (`/mnt/basemaps`) and nginx (`/srv/basemaps`). nginx serves it at
    `/ephem/basemap/`, so map tiles never queue behind Odoo requests.
-2. **`bash manage.sh` → 11) Advanced → 6) Local basemap**, which downloads a
+2. **`bash manage.sh`, Maintenance (`m`), then `g` (Local basemap)**, which downloads a
    country, several countries or a WHO region from the Protomaps daily build
    (OpenStreetMap data, no key, no account) and points a database at it, or
    back to OpenFreeMap. It shows the size before downloading. For example:
@@ -532,7 +539,7 @@ git pull
 bash setup.sh              # choose 1) Server deploy
 
 # 3. Only when this country wants a local basemap
-bash manage.sh             # 11) Advanced -> 6) Local basemap -> 1) Download
+bash manage.sh             # m (Maintenance), g (Local basemap), then 1) Download
 #    type the country code (YE), or several (YE,SA,OM), or a WHO region,
 #    check the size it prints, confirm, then let it switch the database:
 #    it restarts Odoo
@@ -564,8 +571,8 @@ What it delivers:
 1. **A parent addons folder.** Odoo mounts `addons/`, and the ePHEM clone
    lives inside it as `addons/ePHEM-core/`. Before this update the clone was
    the mounted folder itself (`custom-addons/`).
-2. **More repositories without re-running setup.** `bash manage.sh` → 5)
-   Addons → 3) Add a source clones another repository next to `ePHEM-core`,
+2. **More repositories without re-running setup.** `bash manage.sh`, then `+`
+   (Add a repository) clones another repository next to `ePHEM-core`,
    with its own deploy key, and puts it on the addons path. The same menu
    pulls every source, switches a branch, removes or renames a source.
 3. **A safe move of existing installs.** `setup.sh` renames the folder, moves
@@ -598,7 +605,7 @@ bash setup.sh              # choose 1) Server deploy
 # 4. Verify
 docker compose logs --tail=100 odoo | grep "addons paths"
 #    must list /mnt/extra-addons/ePHEM-core
-bash manage.sh             # 1) Status shows the Addons table with ePHEM-core
+bash manage.sh             # the table on the home screen lists ePHEM-core
 #    then open the site in the browser
 
 # 5. ONLY if you pulled new addon commits in step 3
@@ -651,7 +658,7 @@ bash setup.sh              # choose 1) Server deploy
 ## Adding a repository later
 
 ```bash
-bash manage.sh             # 5) Addons -> 3) Add a source
+bash manage.sh             # + (Add a repository)
 ```
 
 It asks for the repository, the folder name, the branch (defaults to the
@@ -725,7 +732,7 @@ bash scripts/backup.sh && ls -lh backups/ | tail
 > **If anything using XML-RPC integrations calls INTO this server** (rare —
 > outbound integrations from Odoo are unaffected), open RPC for that
 > tenant's domain, or allow-list the caller's address server-wide, with
-> `bash manage.sh` → 11) Advanced → 4) RPC endpoints. That writes
+> `bash manage.sh`, Web access (`w`), then `p` (RPC endpoints). That writes
 > `NGINX_RPC_OPEN` / `NGINX_RPC_ALLOW` to `.env` and re-renders nginx; an
 > edit made by hand to `nginx/active.conf` is lost the next time a domain
 > is added or removed.
