@@ -2254,16 +2254,20 @@ if [ "$MODE" = "server" ]; then
         echo "   only protection. Your database(s) already exist, so it can be disabled."
         read -p "  Disable the database manager now (sets ODOO_LIST_DB=False)? [Y/n]: " LOCK_DB
         if [[ ! "${LOCK_DB:-Y}" =~ ^[Nn]$ ]]; then
-            if sed --version 2>/dev/null | grep -q GNU; then
-                sed -i "s/^ODOO_LIST_DB=.*/ODOO_LIST_DB=False/" .env
-                sed -i "s/^list_db = .*/list_db = False/" odoo.conf
+            # odoo.conf is written IN PLACE: it is a single file mount, and
+            # sed -i puts a new file in its place. Docker Desktop then cannot
+            # start the container again ("error mounting ... odoo.conf"), and
+            # with the restart's output thrown away setup went on to say
+            # "ePHEM is running" over an Odoo that was down.
+            set_env_key ODOO_LIST_DB False
+            odoo_conf_set_key odoo.conf list_db False
+            if docker compose restart odoo >/dev/null 2>&1; then
+                echo -e "  ${GREEN}✓${NC} Database manager disabled. Create databases from bash manage.sh"
+                echo "     (d, then n); to open it again set ODOO_LIST_DB=True in .env and re-run setup."
             else
-                sed -i '' "s/^ODOO_LIST_DB=.*/ODOO_LIST_DB=False/" .env
-                sed -i '' "s/^list_db = .*/list_db = False/" odoo.conf
+                echo -e "  ${RED}✗${NC} Database manager disabled in odoo.conf, but Odoo did not restart."
+                echo "     Start it: docker compose up -d --force-recreate odoo   (then: docker compose restart nginx)"
             fi
-            docker compose restart odoo >/dev/null 2>&1 || true
-            echo -e "  ${GREEN}✓${NC} Database manager disabled. To create a new database later,"
-            echo "     set ODOO_LIST_DB=True in .env, re-run setup, then disable it again."
         else
             echo "  Left enabled — disable it later by setting ODOO_LIST_DB=False in .env"
             echo "  and re-running: bash setup.sh"

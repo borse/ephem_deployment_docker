@@ -876,11 +876,9 @@ menu_domain_add() {
         read -r -p "  Set ODOO_DBFILTER=^%d\$ now? [Y/n]: " DF
         if [[ ! "${DF:-Y}" =~ ^[Nn]$ ]]; then
             set_env_key ODOO_DBFILTER '^%d$'
-            if grep -q "^dbfilter" "$ODOO_CONF" 2>/dev/null; then
-                sed -i 's|^dbfilter = .*|dbfilter = ^%d$|' "$ODOO_CONF"
-            else
-                echo 'dbfilter = ^%d$' >> "$ODOO_CONF"
-            fi
+            # In place (odoo_conf_set_key): the file is a single file mount,
+            # and sed -i would put a new file where the container looks.
+            odoo_conf_set_key "$ODOO_CONF" dbfilter '^%d$'
             echo -e "  ${GREEN}✓${NC} dbfilter set (subdomain = database name, exact match)"
             offer_odoo_restart
         fi
