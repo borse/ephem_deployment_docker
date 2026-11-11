@@ -1928,6 +1928,140 @@ basemap_delete() {
 }
 
 # ── 11) Security check ────────────────────────
+# ── Security check: what the server answers, and the machine under it ──
+
+# One request to the nginx of this server, made on the machine itself the way
+# a visitor's would arrive (the real name, so the right server block answers).
+# Prints the HTTP status, 000 when nothing answered.
+security_ask() {  # security_ask DOMAIN-or-"" METHOD PATH
+    if [ -n "$1" ]; then
+        curl -sk -m 6 -o /dev/null -w '%{http_code}' -X "$2" --resolve "$1:443:127.0.0.1" "https://$1$3" 2>/dev/null || true
+    else
+        curl -s -m 6 -o /dev/null -w '%{http_code}' -X "$2" "http://127.0.0.1$3" 2>/dev/null || true
+    fi
+}
+
+# What nginx really serves right now, which a file on disk cannot tell: a
+# config changed by hand, or written and never loaded, reads fine and
+# answers otherwise. Asked on the first domains only (they share one render).
+security_live() {
+    command -v curl >/dev/null 2>&1 || return 0
+    [ "$(svc_state nginx)" = running ] || return 0
+    local d c shown=0 LDB
+    local -a doms=()
+    LDB=$(env_get ODOO_LIST_DB)
+    while IFS= read -r d; do [ -n "$d" ] && doms+=("$d"); done < <(active_domains)
+    [ "${#doms[@]}" -gt 0 ] || doms=("")       # HTTP only: one block for every name
+    echo ""
+    echo -e "${BOLD}Asked of the running nginx, on this server:${NC}"
+    for d in "${doms[@]:0:3}"; do
+        # RPC, through the language code that used to go round the block.
+        if [ -z "$(rpc_allow 2>/dev/null)" ] && ! rpc_domain_open "$d"; then
+            c=$(security_ask "$d" POST /en/xmlrpc/2/common)
+            case "$c" in
+                403) echo -e "  ${GREEN}✓${NC} ${d:-this server}: /en/xmlrpc/2/common refused (the RPC block holds under a language code)" ;;
+                000|"") echo -e "  ${CYAN}→${NC} ${d:-this server}: no answer on this machine's own address, not checked" ; continue ;;
+                *)   echo -e "  ${RED}✗${NC} ${d:-this server}: /en/xmlrpc/2/common answered HTTP $c: the RPC endpoints are reachable. Run bash setup.sh" ;;
+            esac
+        fi
+        if [ "${LDB:-True}" = False ]; then
+            c=$(security_ask "$d" GET /web/database/manager)
+            case "$c" in
+                403|429) echo -e "  ${GREEN}✓${NC} ${d:-this server}: the database manager page is refused by nginx as well" ;;
+                000|"")  : ;;
+                *)   echo -e "  ${YELLOW}!${NC} ${d:-this server}: /web/database/manager still answers (HTTP $c): Odoo refuses its actions, the page shows. Run bash setup.sh" ;;
+            esac
+        fi
+        shown=1
+    done
+    [ "$shown" -eq 1 ] || echo "  (nothing to ask: the RPC endpoints are open by choice and the database manager is enabled)"
+}
+
+# Ports of this stack that other machines can reach. In each mode there is a
+# known set; one more (a ports: line added by hand "to test something") is
+# raw Odoo or the database on the network, past nginx, and no ufw rule
+# applies to a port Docker publishes.
+security_ports() {
+    local name ports m addr hport want rc=0 project
+    project="$(compose_project)"
+    while IFS=$'\t' read -r name ports; do
+        [ -n "$name" ] || continue
+        for m in ${ports//,/ }; do
+            case "$m" in *"->"*) ;; *) continue ;; esac
+            addr="${m%%->*}"; hport="${addr##*:}"; addr="${addr%:*}"
+            case "$addr" in 127.*|"[::1]") continue ;; esac
+            want=no
+            case "$(server_access):$name" in
+                nginx:ephem-nginx)  case "$hport" in 80|443) want=yes ;; esac ;;
+                direct:ephem-app)   [ "$hport" = "$(direct_port)" ] && want=yes ;;
+                proxy:ephem-app)    case "$hport" in 8069|8072) [ "$addr" = "$(env_get PROXY_BIND_HOST)" ] && want=yes ;; esac ;;
+            esac
+            if [ "$want" = no ]; then
+                echo -e "  ${RED}✗${NC} $name answers other machines on $addr:$hport, which is not part of this setup"
+                echo "     (a ports: line added to a compose file?). Remove it, then: docker compose up -d"
+                rc=1
+            fi
+        done
+    done < <(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Names}}\t{{.Ports}}' 2>/dev/null)
+    [ "$rc" -eq 0 ] && echo -e "  ${GREEN}✓${NC} no container of this stack is published beyond what this setup uses"
+    return 0
+}
+
+# Docker itself, and the images that are not ours. Nothing downloads a newer
+# nginx, PostgreSQL or certbot by itself: they arrive with Update (u), so an
+# image that is months old is months of fixes not installed.
+security_docker() {
+    local v major img created days cid
+    v=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || v=""
+    major="${v%%.*}"
+    if printf '%s' "$major" | grep -Eq '^[0-9]+$' && [ "$major" -lt 28 ]; then
+        case "$(server_access)" in
+            proxy)
+                echo -e "  ${YELLOW}!${NC} Docker $v: before version 28 a machine on the same network as this server can reach a"
+                echo "     published container port past the address it is published on. The proxy firewall drops"
+                echo "     that for Odoo's ports (bash scripts/proxy-firewall.sh status); update Docker all the same." ;;
+            direct)
+                echo -e "  ${YELLOW}!${NC} Docker $v: before version 28 a machine on the same network as this server can reach Odoo's"
+                echo "     port past the address it is published on (DIRECT_BIND_HOST). Update Docker." ;;
+            *)  echo -e "  ${CYAN}→${NC} Docker $v (version 28 and later close a way round the address a port is published on)" ;;
+        esac
+    elif [ -n "$v" ]; then
+        echo -e "  ${GREEN}✓${NC} Docker $v"
+    fi
+    for cid in ephem-nginx ephem-db ephem-certbot; do
+        img=$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null) || continue
+        created=$(docker inspect -f '{{.Created}}' "$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)" 2>/dev/null) || continue
+        days=$(( ( $(date +%s) - $(date -d "$created" +%s 2>/dev/null || date +%s) ) / 86400 ))
+        if [ "$days" -gt 60 ]; then
+            echo -e "  ${YELLOW}!${NC} $img was built $days days ago: its fixes since then are not installed (Update, then the app image, downloads the current one)"
+        else
+            echo -e "  ${GREEN}✓${NC} $img is $days days old"
+        fi
+    done
+}
+
+# The machine under the containers, as far as an ordinary account can see.
+security_host() {
+    local v members
+    v=$(timedatectl show -p NTPSynchronized --value 2>/dev/null) || v=""
+    case "$v" in
+        yes) echo -e "  ${GREEN}✓${NC} the clock is kept right by a time server (certificates and two-factor codes depend on it)" ;;
+        no)  echo -e "  ${YELLOW}!${NC} the clock is not synchronised: certificates and two-factor codes fail on a wrong clock (timedatectl set-ntp true)" ;;
+    esac
+    # The first value sshd meets wins; on Debian and Ubuntu the drop-ins are
+    # read before the main file. Only said when a file states it.
+    v=$(cat /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null \
+        | awk 'tolower($1) == "passwordauthentication" { print tolower($2); exit }') || v=""
+    case "$v" in
+        no)  echo -e "  ${GREEN}✓${NC} SSH takes keys only (PasswordAuthentication no)" ;;
+        yes) echo -e "  ${YELLOW}!${NC} SSH accepts passwords (PasswordAuthentication yes): keys only, HARDENING.md section 2" ;;
+        *)   echo -e "  ${CYAN}→${NC} SSH: no PasswordAuthentication line readable here, so its default (passwords accepted) may apply: HARDENING.md section 2" ;;
+    esac
+    members=$(getent group docker 2>/dev/null | cut -d: -f4) || members=""
+    [ -n "$members" ] && echo -e "  ${CYAN}→${NC} accounts that are root on this machine through Docker (group docker): ${members//,/, }"
+    return 0
+}
+
 menu_security() {
     echo -e "${CYAN}${BOLD}Security check${NC}"
     echo ""
@@ -2065,9 +2199,15 @@ menu_security() {
             || echo -e "  ${YELLOW}!${NC} nginx has no catch-all HTTPS server (config from before the hardening): run bash setup.sh, or change any nginx setting here"
     fi
     if [ "$EPHEM_MODE" = server ]; then
+        security_ports
+        [ "$(server_access)" = nginx ] && security_live
+        echo ""
+        echo -e "${BOLD}Docker and the images that are not ours:${NC}"
+        security_docker
         echo ""
         echo -e "${BOLD}This server (updates, coming back after a restart):${NC}"
         bash "$SCRIPT_DIR/scripts/host-updates.sh" check || true
+        security_host
     fi
     echo ""
     echo "  Host-level checklist (SSH, firewall, OS updates): see HARDENING.md"
