@@ -23,10 +23,26 @@ services:
       # App role (LOGIN CREATEDB, no superuser) — see db-init/01-app-role.sh
       ODOO_DB_USER: ${POSTGRES_USER:-odoo}
       ODOO_DB_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # A psql session typed by hand keeps no history file: none could be
+      # written on the read only image, and what is typed there (ALTER ROLE
+      # ... PASSWORD) should not stay in a file anyway.
+      PSQL_HISTORY: /dev/null
+    # Nothing in the image can be changed from inside: the data lives in its
+    # volume, the socket in memory. No /tmp in memory on purpose: `docker cp`
+    # into one reports success and the file is not there. This way a file
+    # copied or written into the container is refused out loud; feed it
+    # through instead (docker compose exec -T db psql -U odoo -d NAME < file).
+    read_only: true
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./db-init:/docker-entrypoint-initdb.d:ro
       - ./db-config:/etc/ephem-db:ro
+      # The unix socket every maintenance script uses (docker compose exec db
+      # psql), and its lock file.
+      - type: tmpfs
+        target: /var/run/postgresql
+        tmpfs:
+          size: 16777216
     # Only Odoo (and the dev instances) share this network: nginx and certbot,
     # the containers that face the internet, cannot reach the database.
     networks:
@@ -37,6 +53,10 @@ services:
     # Minimal set the official postgres image needs to chown its data dir
     # and step down from root to the postgres user.
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    # One process per connection (100 at most) plus its own workers: far
+    # below this. The bound is for the server: a process that multiplies
+    # without end stops here instead of using up every process the machine has.
+    pids_limit: 1024
     logging: &default-logging
       driver: json-file
       options:
@@ -96,7 +116,21 @@ services:
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
-    logging: *default-logging
+    # Workers, scheduled jobs, the PDF renderer and request threads stay in
+    # the hundreds even on a large server; see the database for why a bound.
+    pids_limit: 4096
+    # When the SERVER runs out of memory the kernel has to stop something.
+    # This makes it an Odoo worker, which Odoo starts again by itself, and
+    # not the database or the SSH service.
+    oom_score_adj: 500
+    # Who logged in, from where, and what failed: kept for weeks, not hours.
+    # 50 MB a file, 20 files, the closed ones compressed (about a tenth).
+    logging: &long-logging
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "20"
+        compress: "true"
     expose:
       - "8069"
       - "8072"
@@ -230,6 +264,18 @@ services:
       # The same files, served at /ephem/basemap/ so map tiles never queue
       # behind Odoo requests (nginx/default.conf).
       - ./basemaps:/srv/basemaps:ro
+      # The only places nginx writes, now that the rest is read only. Uploads
+      # and large downloads pass through files here (up to NGINX_MAX_UPLOAD),
+      # so this one is on disk, not in memory.
+      - nginx-cache:/var/cache/nginx
+      - type: tmpfs
+        target: /var/run
+        tmpfs:
+          size: 1048576
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
     # The container that faces the internet shares a network with Odoo and
     # with nothing else: not with the database, not with the converter.
     networks:
@@ -240,7 +286,12 @@ services:
     # nginx master runs as root to bind 80/443 and spawn workers as the
     # nginx user; this is the standard minimal set for the official image.
     cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID, NET_BIND_SERVICE]
-    logging: *default-logging
+    # The container the internet reaches: nothing in its image can be
+    # changed from inside.
+    read_only: true
+    pids_limit: 512
+    # The access log is the record of who asked for what: same keeping as Odoo.
+    logging: *long-logging
     # Reload nginx every 6h so certificates renewed by certbot are actually
     # served — without this, nginx keeps the old cert in memory until it
     # expires, even though certbot renewed it on disk.
@@ -264,6 +315,7 @@ services:
       - acme
     security_opt:
       - no-new-privileges:true
+    pids_limit: 256
     logging: *default-logging
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done'"
 
@@ -272,6 +324,8 @@ volumes:
   odoo-data:
   certbot-etc:
   certbot-www:
+  # nginx's scratch files (an upload on its way to Odoo); nothing to back up.
+  nginx-cache:
 
 networks:
   # Odoo and the database (and, in the developer stack, every Odoo instance).
