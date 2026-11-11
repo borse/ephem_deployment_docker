@@ -207,9 +207,16 @@ services:
     restart: unless-stopped
     depends_on:
       - odoo
+    # IPv4 on purpose. Published with no address, Docker also listens on the
+    # server's IPv6 addresses, and since this network is IPv4 only it relays
+    # those connections itself: nginx then sees every IPv6 visitor as one
+    # address, Docker's own. They would all share one login throttle, appear
+    # under that address in the logs, and pass an NGINX_RPC_ALLOW range that
+    # happens to cover it. A visitor whose network offers both falls back to
+    # IPv4 on its own.
     ports:
-      - "80:80"
-      - "443:443"
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
     volumes:
       - ./nginx/active.conf:/etc/nginx/conf.d/default.conf:ro
       - certbot-etc:/etc/letsencrypt:ro
