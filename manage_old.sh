@@ -1998,6 +1998,19 @@ menu_security() {
         else
             echo -e "  ${YELLOW}!${NC} odoo.conf holds the master password in clear text: run bash setup.sh"
         fi
+        # Read from the running process itself (PID 1 in the container is
+        # Odoo). Kept in a variable and only tested, never printed.
+        local CMDLINE=""
+        if [ "$(svc_state "$ODOO_SVC")" = running ]; then
+            CMDLINE=$(compose exec -T "$ODOO_SVC" sh -c 'tr "\0" " " < /proc/1/cmdline' </dev/null 2>/dev/null) || CMDLINE=""
+        fi
+        if [ -n "$CMDLINE" ]; then
+            if grep -q -- '--db_password' <<< "$CMDLINE"; then
+                echo -e "  ${YELLOW}!${NC} the database password is on Odoo's command line, where every account on this server can read it (ps): run bash setup.sh"
+            else
+                echo -e "  ${GREEN}✓${NC} the database password is not on Odoo's command line"
+            fi
+        fi
     fi
     KEYS=$(grep -ls 'AGE-SECRET-KEY-' ./*-key.txt ./*.age.key 2>/dev/null | tr '\n' ' ')
     [ -z "$KEYS" ] \

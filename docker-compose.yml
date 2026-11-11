@@ -63,6 +63,13 @@ services:
       PORT: 5432
       USER: ${POSTGRES_USER:-odoo}
       PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # The same password, where the database driver looks for it by itself.
+      # The image's entrypoint puts PASSWORD on Odoo's command line
+      # (--db_password), and a command line can be read by every account on
+      # the server (ps). The odoo.conf that setup.sh writes carries an empty
+      # db_password line, which makes the entrypoint leave the argument out;
+      # Odoo then connects with this variable, which only the container sees.
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       # ePHEM AI converts old Office files through the office service below,
       # never with a LibreOffice of its own. Odoo talks to the converter only
       # through office-gate, which is the one thing it shares a network with.

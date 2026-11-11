@@ -371,6 +371,11 @@ run_batch_update() {
     # Run with live output. sh -c so the command inherits the container's
     # environment (HOST, PORT, USER, PASSWORD). Inside the live container
     # when it is running, else in a throwaway one on the same volumes.
+    # The password is not an argument when the container carries PGPASSWORD
+    # (docker-compose.yml): the database driver reads it from there, and a
+    # command line can be read by every account on the server (ps). A
+    # container from an older compose file has no PGPASSWORD and gets the
+    # argument as before.
     local -a RUNNER
     if [ "$(svc_state "$ODOO_SVC")" = "running" ]; then
         RUNNER=(compose exec -T "$ODOO_SVC")
@@ -378,7 +383,7 @@ run_batch_update() {
         RUNNER=(compose run --rm -T --no-deps "$ODOO_SVC")
     fi
     "${RUNNER[@]}" \
-        sh -c "odoo $ODOO_FLAGS -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER --db_password \$PASSWORD --stop-after-init --no-http" \
+        sh -c "if [ -n \"\${PGPASSWORD:-}\" ]; then set --; else set -- --db_password \"\$PASSWORD\"; fi; exec odoo $ODOO_FLAGS -d $DB --db_host \$HOST --db_port \$PORT --db_user \$USER \"\$@\" --stop-after-init --no-http" \
         </dev/null 2>&1 | \
         tee -a "$LOG_FILE" | \
         filter_output

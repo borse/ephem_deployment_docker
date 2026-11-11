@@ -56,7 +56,9 @@ ensure_dev_bind_host() {
 get_lan_ip() {
     local ip=""
     if command -v ipconfig.exe >/dev/null 2>&1; then
-        ip=$(ipconfig.exe 2>/dev/null | tr -d '\r' | awk '/IPv4/ {print $NF}' \
+        # </dev/null: a Windows program started from WSL drains the script's own
+        # input, and the answers to the prompts that follow go with it.
+        ip=$(ipconfig.exe 2>/dev/null </dev/null | tr -d '\r' | awk '/IPv4/ {print $NF}' \
              | grep -vE '^(127\.|169\.254\.|172\.(1[6-9]|2[0-9]|3[01])\.)' | head -n1) || true
     fi
     [ -n "$ip" ] || ip=$(get_server_ip)
@@ -84,20 +86,44 @@ gen_secret() {  # gen_secret [BYTES]
 
 env_val() { grep "^$1=" .env 2>/dev/null | cut -d'=' -f2- | xargs || true; }
 
+# The application's database role (POSTGRES_USER in .env, odoo when empty).
+db_role() { local u; u=$(env_val POSTGRES_USER); printf '%s' "${u:-odoo}"; }
+
 # Odoo's master password as the pbkdf2-sha512 hash Odoo verifies (passlib's
 # format), so odoo.conf, which the container user has to be able to read, does
 # not hold it in clear. The password goes in through the environment, never
-# the command line. Fails (and the caller keeps the plain value) without python3.
+# the command line. With this server's own python3, else with the one in the
+# app image once that image is here (a server without python3, such as a
+# minimal RHEL 8). Fails, and the caller keeps the plain value, with neither.
 hash_admin_password() {  # hash_admin_password PASSWORD
-    command -v python3 >/dev/null 2>&1 || return 1
-    ODOO_PW="$1" python3 -I - <<'PY'
+    local img py='
 import base64, hashlib, os
 rounds = 600000
 salt = os.urandom(16)
 digest = hashlib.pbkdf2_hmac("sha512", os.environ["ODOO_PW"].encode(), salt, rounds)
 ab64 = lambda raw: base64.b64encode(raw).decode().rstrip("=").replace("+", ".")
 print("$pbkdf2-sha512$%d$%s$%s" % (rounds, ab64(salt), ab64(digest)))
-PY
+'
+    if command -v python3 >/dev/null 2>&1; then
+        ODOO_PW="$1" python3 -I -c "$py"
+        return
+    fi
+    img=$(stack_image)
+    docker image inspect "$img" >/dev/null 2>&1 || return 1
+    ODOO_PW="$1" docker run --rm --network none -e ODOO_PW --entrypoint python3 "$img" -I -c "$py" </dev/null
+}
+
+# Can the app image take the database password from its environment
+# (PGPASSWORD) instead of Odoo's command line? Every published borrs/ephem
+# release can, so an image that is not here yet counts as yes; an image that
+# IS here is looked at, because with one that cannot (an old local build) the
+# empty db_password line in odoo.conf would stop Odoo from starting.
+image_reads_pgpassword() {
+    local img; img=$(stack_image)
+    docker image inspect "$img" >/dev/null 2>&1 || return 0
+    docker run --rm --network none --entrypoint sh "$img" -c \
+        'grep -q PGPASSWORD /usr/local/bin/wait-for-psql.py && grep -q "if ! grep" /entrypoint.sh' \
+        </dev/null >/dev/null 2>&1
 }
 
 # Does the role exist in the running db container? Over the unix socket inside
@@ -882,8 +908,8 @@ if [ "$MODE" = "developer" ]; then
         DEV_ADMIN_PASSWORD="9090"
         if [ ! -f .env ]; then
             echo "  .env not found — creating it from .env.example (local dev passwords)…"
-            cp .env.example .env
-            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+            ( umask 077; cp .env.example .env )
+            AUTO_PG_PASS=$(gen_secret 12)
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
                 sed -i "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
@@ -894,7 +920,7 @@ if [ "$MODE" = "developer" ]; then
             echo -e "  ${GREEN}✓${NC} .env created (Odoo master password: ${BOLD}$DEV_ADMIN_PASSWORD${NC})"
         elif grep -q "CHANGE_ME" .env; then
             echo "  .env has placeholder passwords — auto-filling them for local dev…"
-            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+            AUTO_PG_PASS=$(gen_secret 12)
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
                 sed -i "s/^ODOO_ADMIN_PASSWORD=.*/ODOO_ADMIN_PASSWORD=$DEV_ADMIN_PASSWORD/" .env
@@ -1312,6 +1338,7 @@ fi
 ERRORS=0
 ADDONS_UPDATED=false
 IMAGE_UPDATED=false
+ADMIN_CONF_PLAIN=false     # server: odoo.conf still holds the master password in clear
 
 # ── Docker ────────────────────────────────────
 # Already fully verified above by ensure_docker_ready (installed + daemon
@@ -1324,7 +1351,7 @@ if [ -f ".env" ]; then
     if grep -q "CHANGE_ME" .env; then
         if [ "$MODE" = "demo" ] || [ "$MODE" = "developer" ]; then
             echo -e "${YELLOW}!${NC} .env has CHANGE_ME — auto-generating passwords for local use..."
-            AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+            AUTO_PG_PASS=$(gen_secret 12)
             if sed --version 2>/dev/null | grep -q GNU; then
                 sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
             else
@@ -1381,10 +1408,11 @@ if [ -f ".env" ]; then
     fi
 else
     echo -e "${YELLOW}!${NC} .env not found — creating from template..."
-    cp .env.example .env
+    # Owner only from the first byte: the passwords are written into it next.
+    ( umask 077; cp .env.example .env )
 
     if [ "$MODE" = "demo" ] || [ "$MODE" = "developer" ]; then
-        AUTO_PG_PASS=$(openssl rand -hex 12 2>/dev/null || echo "ephem-$(date +%s)")
+        AUTO_PG_PASS=$(gen_secret 12)
         if sed --version 2>/dev/null | grep -q GNU; then
             sed -i "s/CHANGE_ME/$AUTO_PG_PASS/g" .env
         else
@@ -1566,7 +1594,19 @@ if [ -f ".env" ]; then
     CRON_THREADS=$(env_get ODOO_MAX_CRON_THREADS)
 
     ADMIN_PASS="${ADMIN_PASS:-}"
-    LIST_DB="${LIST_DB:-True}"
+    # Odoo knows the words True, true, False and false and nothing else: any
+    # other text ("FALSE", "0", "no", "off") is to it a filled in value, which
+    # counts as true, so the database manager would stay open while .env seems
+    # to say closed. Written here, and back into .env, as the word Odoo reads.
+    LIST_DB_RAW="$LIST_DB"
+    case "$(printf '%s' "$LIST_DB" | tr '[:upper:]' '[:lower:]')" in
+        false|0|no|n|off) LIST_DB=False ;;
+        *)                LIST_DB=True ;;
+    esac
+    if [ -n "$LIST_DB_RAW" ] && [ "$LIST_DB_RAW" != "$LIST_DB" ]; then
+        set_env_key ODOO_LIST_DB "$LIST_DB"
+        echo -e "${GREEN}✓${NC} ODOO_LIST_DB=$LIST_DB_RAW in .env rewritten as $LIST_DB (the spelling Odoo reads)"
+    fi
     # Whole numbers only: anything else in .env falls back to the default.
     [[ "$WORKERS_ENV" =~ ^[0-9]+$ ]] || WORKERS_ENV=4
     [[ "$CRON_THREADS" =~ ^[0-9]+$ ]] || CRON_THREADS=2
@@ -1586,7 +1626,7 @@ if [ -f ".env" ]; then
         echo -e "${GREEN}✓${NC} Odoo master password pinned to local dev default: ${BOLD}$ADMIN_PASS${NC}"
         ensure_dev_bind_host
     elif [ -z "$ADMIN_PASS" ] || [ "$ADMIN_PASS" = "CHANGE_ME" ]; then
-        ADMIN_PASS=$(openssl rand -base64 16 2>/dev/null || echo "ephem-$(date +%s)")
+        ADMIN_PASS=$(gen_secret 16)
         echo -e "${YELLOW}!${NC} Generated admin password: $ADMIN_PASS  (save this!)"
     fi
 
@@ -1661,8 +1701,26 @@ workers = $WORKERS_ENV"
             if ADMIN_HASH=$(hash_admin_password "$ADMIN_PASS"); then
                 ADMIN_CONF="$ADMIN_HASH"
             else
-                echo -e "${YELLOW}!${NC} python3 is not available to hash the Odoo master password: odoo.conf keeps it in clear text."
+                # No python3 on this server and the app image not downloaded
+                # yet: hashed further down, once the image is here.
+                ADMIN_CONF_PLAIN=true
             fi
+        fi
+        # The database password stays off Odoo's command line, where every
+        # account on the server could read it (ps): an empty db_password line
+        # makes the image's entrypoint leave --db_password out, and Odoo takes
+        # the password from its environment (PGPASSWORD, docker-compose.yml).
+        DB_PASSWORD_LINES="; No db_password line: this app image cannot read the database password from
+; its environment, so its entrypoint passes it as an argument (visible with ps)."
+        if image_reads_pgpassword; then
+            DB_PASSWORD_LINES="; Empty on purpose, keep the line: the database password comes from the
+; container's environment (PGPASSWORD). Without this line the image passes it
+; as an argument, which every account on the server can read with ps.
+db_password ="
+        else
+            echo -e "${YELLOW}!${NC} The app image here ($(stack_image)) cannot take the database password from its"
+            echo "   environment: it stays on Odoo's command line, readable by every account on this server."
+            echo "   Update the app image (bash manage.sh), then run setup again."
         fi
         cat > odoo.conf << ODOOEOF
 [options]
@@ -1671,6 +1729,8 @@ workers = $WORKERS_ENV"
 
 ; The Odoo master password, as a pbkdf2-sha512 hash on a server.
 admin_passwd = $ADMIN_CONF
+
+$DB_PASSWORD_LINES
 
 ; One entry per source folder inside addons/ ($CORE_NAME first). Regenerated by
 ; setup.sh and by manage.sh whenever a source is added, removed or renamed.
@@ -1894,9 +1954,12 @@ echo "Starting database…"
 docker compose up -d db
 echo ""
 
+# The application's role is POSTGRES_USER in .env (odoo unless changed): the
+# steps below act on that role, not on a fixed name.
+APP_ROLE=$(db_role)
 echo "Waiting for database..."
 for i in $(seq 1 30); do
-    if docker compose exec -T db pg_isready -U odoo -q </dev/null 2>/dev/null; then
+    if docker compose exec -T db pg_isready -U "$APP_ROLE" -q </dev/null 2>/dev/null; then
         echo -e "${GREEN}✓${NC} Database is ready"
         break
     fi
@@ -1920,8 +1983,8 @@ done
 # currently-set password is wrong.
 ENV_PASSWORD=$(grep "^POSTGRES_PASSWORD=" .env | cut -d'=' -f2- | xargs)
 if [ -n "$ENV_PASSWORD" ]; then
-    if pg_set_password odoo odoo "$ENV_PASSWORD"; then
-        echo -e "${GREEN}✓${NC} Postgres 'odoo' password synced to current .env"
+    if pg_set_password "$APP_ROLE" "$APP_ROLE" "$ENV_PASSWORD"; then
+        echo -e "${GREEN}✓${NC} Postgres '$APP_ROLE' password synced to current .env"
     else
         echo -e "${YELLOW}!${NC} Could not sync password automatically."
     fi
@@ -1959,6 +2022,18 @@ fi
 # every page is a 502. Compared by container id below.
 ODOO_CID_BEFORE=$(odoo_cid odoo)
 docker compose up -d
+# A server without python3: the app image is here now and can do the hashing.
+# Written in place (odoo.conf is a single file mount), before the restart
+# below reads it.
+if [ "$ADMIN_CONF_PLAIN" = true ]; then
+    if ADMIN_HASH=$(hash_admin_password "$ADMIN_PASS") && [ -n "$ADMIN_HASH" ] \
+       && odoo_conf_set_key odoo.conf admin_passwd "$ADMIN_HASH"; then
+        echo -e "${GREEN}✓${NC} Odoo master password hashed in odoo.conf (with the app image, this server has no python3)"
+    else
+        echo -e "${YELLOW}!${NC} The Odoo master password could not be hashed: odoo.conf keeps it in clear text,"
+        echo "   readable by every account on this server. Install python3, then run setup again."
+    fi
+fi
 # After the move from custom-addons/ the old container's bind mount still
 # shows the folder that was moved (a mount follows the inode, not the path);
 # recreate it so /mnt/extra-addons is addons/ and the new addons_path resolves.
@@ -2008,7 +2083,7 @@ fi
 # created there is no reason to leave it enabled.
 if [ "$MODE" = "server" ]; then
     LIST_DB_NOW=$(grep "^ODOO_LIST_DB=" .env | cut -d'=' -f2- | xargs)
-    DB_COUNT=$(docker compose exec -T db psql -U odoo -d postgres -t -A -c \
+    DB_COUNT=$(docker compose exec -T db psql -U "$APP_ROLE" -d postgres -t -A -c \
         "SELECT count(*) FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');" \
         </dev/null 2>/dev/null | tr -d '\r')
     if [ "${LIST_DB_NOW:-True}" != "False" ] && [ "${DB_COUNT:-0}" -gt 0 ] 2>/dev/null; then
