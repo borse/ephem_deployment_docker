@@ -82,11 +82,38 @@ office_converter_on() { [ "$(env_get OFFICE_CONVERTER)" != 0 ]; }
 office_converter_normalize() {
     local v; v=$(env_get OFFICE_CONVERTER)
     case "$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')" in
-        ""|0|1) return 0 ;;
-        off|no|n|false|none) set_env_key OFFICE_CONVERTER 0 ;;
-        *) set_env_key OFFICE_CONVERTER 1 ;;
+        ""|0|1) ;;
+        off|no|n|false|none)
+            set_env_key OFFICE_CONVERTER 0
+            echo -e "  ${YELLOW}!${NC} OFFICE_CONVERTER=$v in .env is not 1 or 0: now 0" ;;
+        *)
+            set_env_key OFFICE_CONVERTER 1
+            echo -e "  ${YELLOW}!${NC} OFFICE_CONVERTER=$v in .env is not 1 or 0: now 1" ;;
     esac
-    echo -e "  ${YELLOW}!${NC} OFFICE_CONVERTER=$v in .env is not 1 or 0: now $(env_get OFFICE_CONVERTER)"
+    office_pull_policy_sync
+}
+
+# docker compose wants the image of a service even at scale 0: `up -d`
+# downloads the office image (about 600 MB) on a server that said no to the
+# converter, and when it cannot (no internet, a release without an office
+# image) the whole command fails and nothing starts. OFFICE_PULL_POLICY=never,
+# which docker-compose.yml reads, stops it looking for the image. Kept in
+# step with OFFICE_CONVERTER here: never while the converter is off, empty
+# (compose's own default) while it is on. Writes only when the two disagree.
+office_pull_policy_sync() {
+    local p; p=$(env_get OFFICE_PULL_POLICY)
+    if office_converter_on; then
+        [ "$p" != never ] || set_env_key OFFICE_PULL_POLICY ""
+    else
+        [ "$p" = never ] || set_env_key OFFICE_PULL_POLICY never
+    fi
+    return 0
+}
+
+# Turn the converter on (1) or off (0): both keys, never one without the other.
+office_converter_set() {  # office_converter_set 0|1
+    set_env_key OFFICE_CONVERTER "$1"
+    office_pull_policy_sync
 }
 
 # The services to pull: none named (= every service) while the office

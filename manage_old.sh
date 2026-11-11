@@ -2178,12 +2178,12 @@ menu_office() {
         echo -e "  Now: ${BOLD}installed${NC}  (converter: $(svc_state office), gate: $(svc_state office-gate))"
         read -r -p "  Remove it? [y/N]: " R
         [[ "${R:-N}" =~ ^[Yy]$ ]] || { echo "  Nothing changed."; return 0; }
-        set_env_key OFFICE_CONVERTER 0
+        office_converter_set 0
     else
         echo -e "  Now: ${BOLD}not installed${NC}  (OFFICE_CONVERTER=0 in .env)"
         read -r -p "  Install it? [Y/n]: " R
         [[ "${R:-Y}" =~ ^[Nn]$ ]] && { echo "  Nothing changed."; return 0; }
-        set_env_key OFFICE_CONVERTER 1
+        office_converter_set 1
     fi
     echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d office office-gate   (OFFICE_CONVERTER=$(env_get OFFICE_CONVERTER))"
     if compose up -d office office-gate; then

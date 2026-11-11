@@ -122,13 +122,19 @@ services:
   # Optional: OFFICE_CONVERTER in .env (asked by bash setup.sh) is the scale
   # of this service and of office-gate. 1, or absent (servers set up before
   # the key), runs both; 0 runs neither, and ePHEM AI then reports such files
-  # as unreadable. A number only: docker compose cannot read "off". A plain
-  # `docker compose pull` still downloads the image at 0; manage.sh and
-  # setup.sh leave it out (pull_services in scripts/stack-lib.sh).
+  # as unreadable. A number only: docker compose cannot read "off".
+  #
+  # At scale 0 docker compose still wants the image: `up -d` downloads it,
+  # and when it cannot (no internet, a release without an office image) the
+  # whole command fails and nothing starts. OFFICE_PULL_POLICY=never, which
+  # setup.sh and manage.sh write next to OFFICE_CONVERTER=0, stops that; they
+  # clear it again when the converter is turned on. `docker compose pull`
+  # from those tools leaves the image out too (pull_services, stack-lib.sh).
   office:
     image: borrs/ephem-office:${EPHEM_OFFICE_TAG:-${EPHEM_IMAGE_TAG:-latest}}
     container_name: ephem-office
     scale: ${OFFICE_CONVERTER:-1}
+    pull_policy: ${OFFICE_PULL_POLICY:-missing}
     restart: unless-stopped
     # Reaps a LibreOffice left behind when a conversion is killed.
     init: true

@@ -1457,7 +1457,7 @@ fi
 if [ -f .env ]; then
     office_converter_normalize
     if [ -n "$OFFICE_CONVERTER_CHOICE" ]; then
-        set_env_key OFFICE_CONVERTER "$OFFICE_CONVERTER_CHOICE"
+        office_converter_set "$OFFICE_CONVERTER_CHOICE"
     fi
 fi
 
