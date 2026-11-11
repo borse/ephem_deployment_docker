@@ -11,11 +11,27 @@
 #
 # ufw and firewalld never see these connections: Docker's NAT rules hand them
 # to the container first. Docker's documented place for such a rule is its
-# DOCKER-USER chain, which Docker creates and leaves alone. The rules go into
-# a root-owned script (/usr/local/sbin/ephem-proxy-ports) that a systemd unit
-# runs after Docker starts, so they come back after a reboot and after a
-# Docker restart. The addresses are written into that script: nothing is read
-# from this checkout, which its owner can edit, when root runs it at boot.
+# DOCKER-USER chain, which Docker creates when there is none and otherwise
+# leaves alone. The rules go into a root-owned script
+# (/usr/local/sbin/ephem-proxy-ports) that a systemd unit runs BEFORE Docker
+# starts: they are in place before the first container is, and Docker keeps
+# them. The unit never takes them out again (only `remove` does), so the
+# ports stay shut through a shutdown and through a Docker restart, while Odoo
+# is still answering. The addresses are written into that script: nothing is
+# read from this checkout, which its owner can edit, when root runs it at
+# boot.
+#
+# Until November 2026 the unit ran after Docker and removed the rules when it
+# stopped: Odoo answered any machine for a moment at every boot, shutdown and
+# Docker restart. `check` reports such a unit; `apply` replaces it.
+#
+# A second way in is shut as well. A machine on the same network segment as
+# this server can send packets for the container's own address through the
+# server (one route on that machine is enough). Docker before version 28 lets
+# them through to a published port, whatever address it is published on, and
+# they never carry the published address, so the rule above does not see
+# them. Such a connection, to port 8069 or 8072, not arriving from one of
+# Docker's own networks and not through a published port, is dropped.
 #
 # Connections made on this server itself (an SSH tunnel to the bind address,
 # the health checks) do not pass DOCKER-USER and keep working.
@@ -96,36 +112,62 @@ set -e
 BIND='$1'
 FROM='$2'
 CHAIN=EPHEM-PROXY
+# Connections for a container's own address that were routed through this
+# server instead of arriving on the published one.
+ROUTED=EPHEM-PROXY-ROUTED
 
 # Every DOCKER-USER rule that sends to our chain, whichever address it names
 # (an earlier BIND included). iptables -S prints rules in the form iptables
 # takes them back.
-unhook() {
+unhook() {  # unhook [KEEP]: every jump to our chain, except those naming address KEEP
     iptables -S DOCKER-USER 2>/dev/null | grep -- "-j \$CHAIN\\\$" | sed 's/^-A /-D /' | while read -r rule; do
-        iptables \$rule
+        case " \$rule " in
+            *" --ctorigdst \${1:-none} "*|*" --ctorigdst \${1:-none}/32 "*) ;;
+            *) iptables \$rule ;;
+        esac
     done
 }
 
 case "\${1:-start}" in
     start)
-        if ! iptables -n -L DOCKER-USER >/dev/null 2>&1; then
-            echo "$UNIT: no DOCKER-USER chain (is Docker running, with its iptables firewall?)" >&2
-            exit 1
-        fi
-        iptables -N "\$CHAIN" 2>/dev/null || iptables -F "\$CHAIN"
-        for src in \$FROM; do
-            iptables -A "\$CHAIN" -s "\$src" -j RETURN
-        done
-        iptables -A "\$CHAIN" -j DROP
-        unhook
+        # At boot this runs before Docker: the chain Docker hooks into its
+        # own rules is made here, with ours in it, and Docker keeps it.
+        iptables -N DOCKER-USER 2>/dev/null || true
+        # The chain in one step (iptables-restore replaces it whole): on a
+        # running server there is never a moment with half of it.
+        {
+            echo '*filter'
+            echo ":\$CHAIN - [0:0]"
+            for src in \$FROM; do
+                echo "-A \$CHAIN -s \$src -j RETURN"
+            done
+            echo "-A \$CHAIN -j DROP"
+            # Between containers (Docker's own networks) is not our business.
+            echo ":\$ROUTED - [0:0]"
+            echo "-A \$ROUTED -i docker+ -j RETURN"
+            echo "-A \$ROUTED -i br-+ -j RETURN"
+            echo "-A \$ROUTED -j DROP"
+            echo 'COMMIT'
+        } | iptables-restore --noflush
+        # The jumps first, then away with those of an earlier address: never
+        # a moment without one.
         for port in 8069 8072; do
-            iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdst "\$BIND" --ctorigdstport "\$port" --ctdir ORIGINAL -j "\$CHAIN"
+            iptables -C DOCKER-USER -p tcp -m conntrack --ctorigdst "\$BIND" --ctorigdstport "\$port" --ctdir ORIGINAL -j "\$CHAIN" 2>/dev/null \\
+                || iptables -I DOCKER-USER -p tcp -m conntrack --ctorigdst "\$BIND" --ctorigdstport "\$port" --ctdir ORIGINAL -j "\$CHAIN"
+            iptables -C DOCKER-USER -p tcp --dport "\$port" -m conntrack ! --ctstate DNAT --ctdir ORIGINAL -j "\$ROUTED" 2>/dev/null \\
+                || iptables -I DOCKER-USER -p tcp --dport "\$port" -m conntrack ! --ctstate DNAT --ctdir ORIGINAL -j "\$ROUTED"
         done
+        unhook "\$BIND"
         ;;
     stop)
         unhook
         iptables -F "\$CHAIN" 2>/dev/null || true
         iptables -X "\$CHAIN" 2>/dev/null || true
+        iptables -S DOCKER-USER 2>/dev/null | grep -- "-j \$ROUTED\\\$" | sed 's/^-A /-D /' | while read -r rule; do
+            iptables \$rule
+        done
+        iptables -F "\$ROUTED" 2>/dev/null || true
+        iptables -X "\$ROUTED" 2>/dev/null || true
         ;;
     *)
         echo "usage: \$0 start|stop" >&2
@@ -139,19 +181,22 @@ write_unit() {  # write_unit OUT
     cat > "$1" <<EOF
 [Unit]
 Description=ePHEM: Odoo ports open to the proxy machine only (ephem-deploy proxy mode)
-After=docker.service
-Requires=docker.service
-# A Docker restart restarts this too, so the rules are put back after it.
+# Before Docker: the rules are there before the first container starts and
+# its port is published. Docker keeps the DOCKER-USER chain it finds.
+Before=docker.service
+# A Docker restart runs this again first, should anything have emptied the chain.
 PartOf=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=$RULES start
-ExecStop=$RULES stop
+# No ExecStop, on purpose: when this unit stops (a shutdown, a Docker restart)
+# Odoo is still answering, and the rules must stay. Taking them out is
+# "$RULES stop", which proxy-firewall.sh remove runs.
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=multi-user.target docker.service
 EOF
 }
 
@@ -174,8 +219,15 @@ cmd_apply() {
         echo -e "${RED}✗${NC} No docker.service unit here (a snap Docker?). The rules need Docker's own service."
         exit 1
     fi
-    if ! $SUDO iptables -n -L DOCKER-USER >/dev/null 2>&1; then
-        echo -e "${RED}✗${NC} iptables has no DOCKER-USER chain: Docker is not running, or runs without its iptables firewall."
+    # Docker running, and its own rules passing through DOCKER-USER: with its
+    # firewall turned off, or on nftables, rules put there would hold nothing.
+    if ! $SUDO iptables -n -L DOCKER-USER >/dev/null 2>&1 \
+       || ! $SUDO iptables -S FORWARD 2>/dev/null | grep -q -- '-j DOCKER-USER'; then
+        echo -e "${RED}✗${NC} iptables has no DOCKER-USER chain in use: Docker is not running, or runs without its iptables firewall."
+        exit 1
+    fi
+    if ! command -v iptables-restore >/dev/null 2>&1 && ! $SUDO sh -c 'command -v iptables-restore' >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} iptables-restore is missing (it comes with iptables): install the iptables package."
         exit 1
     fi
 
@@ -186,13 +238,15 @@ cmd_apply() {
     $SUDO install -m 0644 -o root -g root "$tmp/unit" "$UNIT_FILE"
     rm -rf "$tmp"
     $SUDO systemctl daemon-reload
-    $SUDO systemctl enable "$UNIT" >/dev/null 2>&1
+    # reenable: a unit from before November 2026 was wanted by the boot only;
+    # this one is started with Docker as well.
+    $SUDO systemctl reenable "$UNIT" >/dev/null 2>&1 || $SUDO systemctl enable "$UNIT" >/dev/null 2>&1
     if ! $SUDO systemctl restart "$UNIT"; then
         echo -e "${RED}✗${NC} The rules did not load: sudo journalctl -u $UNIT"
         exit 1
     fi
     echo -e "${GREEN}✓${NC} Odoo on $bind (ports 8069, 8072) answers $from only"
-    echo "     (systemd unit $UNIT, back after every reboot and Docker restart)"
+    echo "     (systemd unit $UNIT: in place before Docker starts, kept through every restart)"
 }
 
 cmd_remove() {
@@ -224,6 +278,12 @@ cmd_check() {
         echo -e "  ${YELLOW}!${NC} Odoo's ports are open to every address that reaches $bind (no proxy firewall): bash scripts/proxy-firewall.sh apply"
         return 1
     fi
+    # A unit from before November 2026: it took its rules out whenever it
+    # stopped, with Odoo still running, and put them back after Docker.
+    if grep -q '^ExecStop=' "$UNIT_FILE" 2>/dev/null || ! grep -q '^Before=docker.service' "$UNIT_FILE" 2>/dev/null; then
+        echo -e "  ${YELLOW}!${NC} the proxy firewall is an older one: Odoo's ports open for a moment at every boot, shutdown and Docker restart: bash scripts/proxy-firewall.sh apply"
+        return 1
+    fi
     have_bind="$(rules_value BIND)"; have_from="$(rules_value FROM)"
     if [ "$have_bind" != "$bind" ] || [ "$have_from" != "$from" ]; then
         echo -e "  ${YELLOW}!${NC} the proxy firewall enforces $have_bind for '$have_from', .env says $bind for '$from': bash scripts/proxy-firewall.sh apply"
@@ -239,7 +299,8 @@ cmd_status() {
     if [ -n "$SUDO" ] || [ "$(id -u)" -eq 0 ]; then
         echo "  Rules in force:"
         { $SUDO iptables -S DOCKER-USER 2>/dev/null | grep -- '-j EPHEM-PROXY' || true
-          $SUDO iptables -S EPHEM-PROXY 2>/dev/null || true; } | sed 's/^/    /'
+          $SUDO iptables -S EPHEM-PROXY 2>/dev/null || true
+          $SUDO iptables -S EPHEM-PROXY-ROUTED 2>/dev/null || true; } | sed 's/^/    /'
     fi
 }
 
