@@ -327,12 +327,26 @@ services:
     volumes:
       - certbot-etc:/etc/letsencrypt
       - certbot-www:/var/www/certbot
+      # Its own log (renewals, and why one failed), kept across restarts and
+      # shared with the one-off runs that issue or delete a certificate.
+      - certbot-log:/var/log/letsencrypt
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 67108864
     # Reaches Let's Encrypt and nothing of ours (the challenge goes through
     # the certbot-www volume, which nginx serves).
     networks:
       - acme
     security_opt:
       - no-new-privileges:true
+    # It holds the private key of every certificate and talks to the
+    # internet, so it gets what the other containers get: no capability at
+    # all (it runs as root only over files root already owns, in its
+    # volumes) and an image nothing can be changed in. Issuing, renewing and
+    # deleting certificates were run this way against a test ACME server.
+    cap_drop: [ALL]
+    read_only: true
     pids_limit: 256
     logging: *default-logging
     entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done'"
@@ -342,6 +356,7 @@ volumes:
   odoo-data:
   certbot-etc:
   certbot-www:
+  certbot-log:
   # nginx's scratch files (an upload on its way to Odoo); nothing to back up.
   nginx-cache:
 
