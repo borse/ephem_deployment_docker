@@ -158,6 +158,24 @@ RandomizedDelaySec=15m
 EOF
 }
 
+# When a restart that is waiting now will happen. The updater is what orders
+# it, and the system runs the updater once per calendar day: apt.systemd.daily
+# compares the day of the stamp below with today. So when the updates already
+# ran today, tonight's run is skipped and the restart comes a day later.
+UPGRADE_STAMP=/var/lib/apt/periodic/upgrade-stamp
+first_restart() {  # first_restart TIME → "Thursday 2026-11-12 at 23:00"
+    local u day
+    u="$(hour_before "$1")"
+    day="$(date +%F)"
+    [[ "$u" > "$(date +%H:%M)" ]] || day="$(date -d "$day + 1 day" +%F)"
+    if [ "$(date -r "$UPGRADE_STAMP" +%F 2>/dev/null || true)" = "$day" ]; then
+        day="$(date -d "$day + 1 day" +%F)"
+    fi
+    # Updates at 23:xx: the restart an hour later is on the next day.
+    [[ "$1" > "$u" ]] || day="$(date -d "$day + 1 day" +%F)"
+    printf '%s at %s' "$(LC_ALL=C date -d "$day" '+%A %Y-%m-%d')" "$1"
+}
+
 # Containers of this stack that would stay down after a restart of the
 # server. One-off containers (docker compose run) are left out. Prints one
 # name per line.
@@ -267,7 +285,10 @@ cmd_apply() {
     echo -e "${GREEN}✓${NC} This server installs its security updates every night at about $(hour_before "$t")"
     echo "     and restarts at $t when one of them needs it (server clock: now $(date '+%H:%M %Z'))."
     echo "     ePHEM is down for about two minutes on those nights and comes back by itself."
-    [ -f /var/run/reboot-required ] && echo "     A restart is already waiting: expect the first one at the next $t."
+    if [ -f /var/run/reboot-required ]; then
+        echo "     A restart is already waiting: expect it on $(first_restart "$t")."
+        echo "     (The updates run once a day and order the restart. Sooner: sudo reboot)"
+    fi
     check_comes_back || true
 }
 
