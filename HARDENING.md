@@ -22,7 +22,14 @@ What this means in practice:
 - **Never add extra `ports:` entries to `docker-compose.yml` on a server**
   (for example publishing 8069 "to test something"). That exposes raw Odoo
   to the internet and no firewall setting will save you. Developer and demo
-  modes bind to `127.0.0.1` for exactly this reason.
+  setups DO publish Odoo on every address of the machine, on purpose (a
+  phone or a colleague on the same network opens it): they belong on a
+  laptop or an office VM, never on a server. `DEV_BIND_HOST=127.0.0.1` in
+  `.env` keeps a developer instance on the machine itself.
+- **Direct access** (`SERVER_ACCESS=direct`) is the same raw Odoo, chosen on
+  purpose: no HTTPS, no login throttle, RPC endpoints open. `setup.sh` asks
+  which address of the server answers; give the one of the closed network or
+  the VPN, not "every address", on a server that also has a public one.
 - ufw still fully protects everything that is *not* Docker: use it for SSH.
 - nginx is published on the server's **IPv4** addresses only. Docker cannot
   hand an IPv6 visitor's address to a container on an IPv4 network: it relays
@@ -152,6 +159,30 @@ root on the machine.
 - Keep the host kernel and Docker patched (section 3). Containers share the
   host kernel, so a kernel escape is the one thing no container setting
   prevents.
+
+## 5c. What the containers are held to
+
+Set in `docker-compose.yml`; nothing to do, listed so you know what a
+scanner will and will not find.
+
+- **No capabilities** beyond the few the database and nginx need to start,
+  and no way to gain new ones (`no-new-privileges`), on every container.
+- **Read only images** for the database, nginx, the converter and its gate:
+  nothing in them can be changed from inside. Their data and scratch space
+  are volumes and memory. Odoo is not read only: it runs as an unprivileged
+  user that cannot change the image either, and the documented quick patch
+  (`pip install` as root for a module your own addons need) has to keep
+  working.
+- **A bound on processes** for every container, so one that multiplies
+  without end cannot use up every process the server has.
+- **When the server runs out of memory** the kernel stops an Odoo worker,
+  which Odoo starts again, before the database or the SSH service.
+- **Logs**: Odoo and nginx keep 20 files of 50 MB each, the closed ones
+  compressed (weeks on most servers). Read them with
+  `docker compose logs --since 24h nginx`. They are gone when the container
+  is removed (`docker compose down`), so for an incident copy them out first:
+  `docker compose logs --no-color nginx > nginx.log`. For longer keeping,
+  send them to another machine.
 
 ## 6. Backups that survive the server
 

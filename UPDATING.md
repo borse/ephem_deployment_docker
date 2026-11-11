@@ -33,6 +33,30 @@ What changes:
 6. Smaller: `.env` is private from the moment it is created; setup acts on
    the database role named in `POSTGRES_USER` instead of assuming `odoo`; on
    a server without python3 the master password is hashed with the app image.
+7. **The server stays on one release of the app image.** Setup asks once and
+   pins the release the server runs now (`EPHEM_IMAGE_TAG` in `.env`).
+   Before, a server without the key followed `latest` and moved to a newer
+   release at any download. Updates stay where they were: `bash manage.sh`,
+   Update (`u`), then `i`.
+8. **HTTPS in the same run.** On a server with nginx and no certificate
+   yet, setup asks for the domain name and the email and gets the
+   certificate at the end, instead of leaving `ssl-setup.sh` for later while
+   the site already answers on plain HTTP.
+9. **Direct access asks which address answers** (a Linux server), instead of
+   publishing Odoo on every address without a word. **Behind a proxy with
+   `PROXY_FROM` still empty**, setup shows the machines connected to Odoo and
+   proposes the address when there is exactly one, so an open server closes
+   at the next run.
+10. **Without the converter, nothing downloads it.** At `OFFICE_CONVERTER=0`
+    `docker compose up -d` still fetched the 600 MB image, and failed as a
+    whole when it could not. The tools now write `OFFICE_PULL_POLICY=never`
+    next to it.
+11. **The database and nginx run on read only images, and every container
+    has a bound on its processes.** When the server runs out of memory, an
+    Odoo worker is stopped before the database. HARDENING.md, section 5c.
+12. **Odoo and nginx keep about a gigabyte of logs each** (compressed on
+    disk), instead of 30 MB: weeks instead of hours when something has to be
+    looked into.
 
 ## Steps
 
@@ -42,7 +66,16 @@ git pull --ff-only
 bash setup.sh          # Enter keeps every answer
 ```
 
-Setup recreates the Odoo and nginx containers: about a minute offline.
+Setup recreates every container, the database included (its image becomes
+read only): about a minute offline, and no data is touched. New questions on
+this run: the domain for HTTPS when the server has no certificate yet, and
+the release to stay on.
+
+One habit changes: files can no longer be copied or written into the
+database container (`docker cp`, `pg_dump -f /tmp/...`): Docker refuses,
+"container rootfs is marked read-only". Feed them through instead:
+`docker compose exec -T db psql -U odoo -d NAME < file.sql`, and
+`docker compose exec -T db pg_dump -U odoo NAME > file.sql`.
 
 ## Verify afterwards
 
@@ -55,6 +88,12 @@ sudo ss -tlnp | grep -E ':(80|443) '
 
 # The throttle under a language code: 429 must appear
 for i in {1..40}; do curl -s -o /dev/null -w '%{http_code} ' -X POST https://YOUR.DOMAIN/fr/web/login; done; echo
+
+# Read only images and process bounds in force (expect true and a number)
+docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.PidsLimit}}' ephem-db ephem-nginx
+
+# The release this server stays on (expect a number, not latest)
+grep '^EPHEM_IMAGE_TAG=' .env
 ```
 
 `bash manage.sh`, Status and checks (`v`), then `c` (Security check) has a
