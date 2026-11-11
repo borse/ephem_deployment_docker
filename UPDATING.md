@@ -1,3 +1,73 @@
+# Updating an Existing Server (November 2026: second hardening pass)
+
+Code and configuration only: no new image, no data, no module update.
+
+What changes:
+
+1. **The database password leaves Odoo's command line.** The app image
+   handed it to Odoo as an argument (`--db_password`), and a command line can
+   be read by every account on the server (`ps aux`); the database answers on
+   its Docker address from the server itself, so any such account could read
+   every database. `setup.sh` now writes an empty `db_password` line into
+   `odoo.conf` and the container gets the password in its environment
+   (`PGPASSWORD`), which only the container sees. `scripts/update-modules.sh`
+   does the same for its update runs. In force once setup has run again.
+2. **The login throttle also covers the language addresses.** With the
+   website app, Odoo answers the login, password reset and sign up pages
+   under a language code as well (`/fr/web/login`), and those went round the
+   limit of 30 a minute. Setup re-renders the nginx config with the fix.
+   Proxy mode: copy `nginx/proxy/DOMAIN.conf` to the proxy machine again.
+3. **nginx is published on IPv4 only.** Published without an address, Docker
+   also listened on the server's IPv6 addresses and relayed those connections
+   itself, so nginx saw every IPv6 visitor as one address (Docker's own):
+   one shared login throttle, that address in the logs, and a pass through
+   any `NGINX_RPC_ALLOW` range that covers it. Visitors with both kinds of
+   address fall back to IPv4 on their own. A server that people can ONLY
+   reach over IPv6 must not take this update as it is: tell us first.
+4. **`ODOO_LIST_DB` in another spelling no longer leaves the database
+   manager open.** Odoo reads the words True and False only; `FALSE`, `0`,
+   `no` or `off` counted as true. Setup rewrites them as `False`.
+5. **A database created from the menu no longer starts as admin / admin.**
+   `bash manage.sh`, Databases and backups (`d`), then `n` sets a random
+   password for admin before Odoo is back, and shows it once.
+6. Smaller: `.env` is private from the moment it is created; setup acts on
+   the database role named in `POSTGRES_USER` instead of assuming `odoo`; on
+   a server without python3 the master password is hashed with the app image.
+
+## Steps
+
+```bash
+cd ~/ephem-deploy
+git pull --ff-only
+bash setup.sh          # Enter keeps every answer
+```
+
+Setup recreates the Odoo and nginx containers: about a minute offline.
+
+## Verify afterwards
+
+```bash
+# The database password is not in the process list (expect 0)
+ps aux | grep '[o]doo' | grep -c -- --db_password
+
+# nginx listens on IPv4 only (expect 0.0.0.0:80 and 0.0.0.0:443, no [::])
+sudo ss -tlnp | grep -E ':(80|443) '
+
+# The throttle under a language code: 429 must appear
+for i in {1..40}; do curl -s -o /dev/null -w '%{http_code} ' -X POST https://YOUR.DOMAIN/fr/web/login; done; echo
+```
+
+`bash manage.sh`, Status and checks (`v`), then `c` (Security check) has a
+line for the first one.
+
+## Rolling back
+
+Go back to the previous commit AND run its `bash setup.sh`: the older
+`docker-compose.yml` does not hand the password over in the environment, so
+with the empty `db_password` line still in `odoo.conf` Odoo would not start
+(its log says "Missing required database parameters"). The older setup
+writes the file without that line.
+
 # Updating an Existing Server (November 2026: certificate renewal after a restart, automatic updates, new menu)
 
 Code and configuration only: no new image, no data, no module update.

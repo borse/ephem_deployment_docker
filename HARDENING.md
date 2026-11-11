@@ -24,6 +24,10 @@ What this means in practice:
   to the internet and no firewall setting will save you. Developer and demo
   modes bind to `127.0.0.1` for exactly this reason.
 - ufw still fully protects everything that is *not* Docker: use it for SSH.
+- nginx is published on the server's **IPv4** addresses only. Docker cannot
+  hand an IPv6 visitor's address to a container on an IPv4 network: it relays
+  the connection itself, and nginx would see every IPv6 visitor as one
+  address, sharing one login throttle. Do not add `[::]` ports for it.
 - **Behind an nginx on another machine** (`SERVER_ACCESS=proxy`), Odoo is
   published on one LAN address, ports 8069 and 8072, for that nginx. setup.sh
   runs `scripts/proxy-firewall.sh apply`, which lets only `PROXY_FROM` reach
@@ -131,6 +135,12 @@ Docker itself is part of the attack surface, and `docker` group membership is
 root on the machine.
 
 - Put only administrators in the `docker` group.
+- Keep other people's accounts off this server where you can. Every account,
+  with or without sudo, can read the command line of every process
+  (`ps aux`) and can connect to the containers on their Docker addresses.
+  `setup.sh` keeps the database password out of Odoo's command line for that
+  reason (section 7 has the check); a secret typed as an argument of any
+  command is visible the same way while that command runs.
 - Never mount `/var/run/docker.sock` into a container (nothing in this stack
   does).
 - Enable `live-restore` and default `no-new-privileges` in
@@ -169,6 +179,10 @@ sudo ss -tlnp
 # Proxy mode: only the proxy machine may reach them (expect a ✓ line and two
 # rules naming PROXY_BIND_HOST)
 bash scripts/proxy-firewall.sh status
+
+# The database password is not in the process list (expect 0; otherwise
+# run bash setup.sh again, it rewrites odoo.conf)
+ps aux | grep '[o]doo' | grep -c -- --db_password
 
 # The app's database role must not be a superuser (expect superuser=f)
 docker compose exec db psql -U odoo -d postgres -c \
