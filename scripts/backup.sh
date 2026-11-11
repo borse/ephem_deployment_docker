@@ -90,12 +90,31 @@ if [ -z "$DATABASES" ]; then
     exit 1
 fi
 
+# A database name ends up here in a file name and as an argument of pg_dump.
+# Odoo and manage.sh only make names of letters, digits, . _ and - (an older
+# menu also left a comma). Any other name was made behind their back: by hand,
+# or by something that took the application over, whose database role may
+# create databases. A name such as ../../x would write its dump outside
+# backups/, and one such as --version would be read by pg_dump as an option
+# and stop the run before the filestore is saved. Such a database is not
+# dumped; the run goes on with every other one and ends as failed, so the
+# monitor is not pinged and somebody looks.
+safe_db_name() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._,-]*$'; }
+
 # Backup each database (pipefail makes a failed pg_dump abort the run)
-for DB in $DATABASES; do
+SKIPPED=()
+while IFS= read -r DB; do
+    [ -n "$DB" ] || continue
+    if ! safe_db_name "$DB"; then
+        echo "[$TIMESTAMP] ERROR: NOT backed up, its name is not one Odoo makes: '$DB'" >&2
+        SKIPPED+=("$DB")
+        continue
+    fi
     echo "[$TIMESTAMP] Backing up database: $DB"
-    compose exec -T db pg_dump -U "$DB_USER" "$DB" | gzip > "$DEST/${DB}_${TIMESTAMP}.sql.gz"
+    # </dev/null: the list of names is this loop's input, pg_dump must not read it.
+    compose exec -T db pg_dump -U "$DB_USER" -d "$DB" </dev/null | gzip > "$DEST/${DB}_${TIMESTAMP}.sql.gz"
     echo "[$TIMESTAMP] Done: $DB"
-done
+done <<< "$DATABASES"
 
 # Backup filestore (attachments / uploaded documents), read off the data
 # volume(s) by scripts/stack-lib.sh's filestore_archive: one directory per
@@ -151,8 +170,20 @@ find "$BACKUP_DIR" -maxdepth 1 -type f \
     -mtime +"$RETENTION_DAYS" -delete
 find "$BACKUP_DIR" -maxdepth 1 -type d -name '.staging_*' -mtime +1 -exec rm -rf {} +
 
-echo "[$TIMESTAMP] Backup complete."
 ls -lh "$BACKUP_DIR"/*"${TIMESTAMP}"* 2>/dev/null || true
+
+# Every other database and the filestore are saved above. The run still
+# counts as failed: no ping, so the monitor raises the alarm.
+if [ "${#SKIPPED[@]}" -gt 0 ]; then
+    echo "[$TIMESTAMP] FAILED: ${#SKIPPED[@]} database(s) were NOT backed up because of their name:" >&2
+    for DB in "${SKIPPED[@]}"; do
+        echo "[$TIMESTAMP]            '$DB'" >&2
+    done
+    echo "[$TIMESTAMP]         Neither Odoo nor manage.sh makes such a name. Find out who did before" >&2
+    echo "[$TIMESTAMP]         anything else:  docker compose exec db psql -U $DB_USER -d postgres -c '\\l'" >&2
+    exit 1
+fi
+echo "[$TIMESTAMP] Backup complete."
 
 # Tell the monitor we succeeded (only reached if everything above passed)
 if [ -n "$PING_URL" ]; then

@@ -73,6 +73,19 @@ if [ "$IS_SUPER" != "t" ] || [ "$BOOTSTRAP" != "$APP_ROLE" ]; then
 fi
 
 DATABASES=$(psql_q "SELECT datname FROM pg_database WHERE datistemplate = false AND datname NOT IN ('postgres');" | tr -d '\r')
+# Each name becomes a file name and an argument of pg_dump and createdb
+# below. Odoo and manage.sh only make names of letters, digits, . _ - (and an
+# older menu a comma); anything else would be cut in pieces or read as an
+# option, and this script wipes the cluster after its dumps. Stop before
+# anything is touched.
+ODD_NAMES=$(printf '%s\n' "$DATABASES" | grep -Ev '^[A-Za-z0-9][A-Za-z0-9._,-]*$' | grep . || true)
+if [ -n "$ODD_NAMES" ]; then
+    echo "These databases have names this migration cannot carry safely:" >&2
+    printf '%s\n' "$ODD_NAMES" | sed 's/^/    /' >&2
+    echo "Neither Odoo nor manage.sh makes such a name. Rename or drop them (after" >&2
+    echo "finding out where they came from), then run this again. Nothing was changed." >&2
+    exit 1
+fi
 DB_CID=$(compose ps -q db)
 VOL=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/var/lib/postgresql/data"}}{{.Name}}{{end}}{{end}}' "$DB_CID")
 DATA_SIZE=$(docker run --rm -v "$VOL":/d:ro alpine du -sh /d 2>/dev/null | cut -f1)
