@@ -1688,6 +1688,64 @@ v2_databases() {
     done
 }
 
+# ── Start-up helper (WSL) ─────────────────────
+# Docker Desktop starts the containers before Ubuntu shares the project
+# files, so the ones that mount a single file stay down after Windows starts.
+# scripts/dev-autostart.sh has the whole story; this offers it and says when
+# it is missing.
+v2_autostart_state() {
+    if is_wsl; then bash scripts/dev-autostart.sh --state 2>/dev/null; else echo not-wsl; fi
+}
+
+v2_autostart_label() {
+    case "$(v2_autostart_state)" in
+        installed)  echo "on" ;;
+        stale)      echo "installed for another folder" ;;
+        no-systemd) echo "needs systemd in WSL" ;;
+        *)          echo "off" ;;
+    esac
+}
+
+# One line on the home screen until it is installed or declined here.
+v2_autostart_notice() {
+    is_wsl || return 0
+    [ "$(env_get EPHEM_AUTOSTART_NOTICE)" = 0 ] && return 0
+    case "$(v2_autostart_state)" in
+        missing|stale|no-systemd)
+            echo ""
+            echo -e "  ${YELLOW}!${NC} After Windows starts, Docker Desktop can leave ePHEM down. To have it come"
+            echo "     back by itself: m, then s." ;;
+    esac
+}
+
+v2_autostart() {
+    local C
+    echo "  When Windows starts, Docker Desktop starts the containers about two seconds"
+    echo "  before Ubuntu shares the project files. Odoo (and nginx) then fail on their"
+    echo "  config file, Docker does not try again, and ePHEM stays down until someone"
+    echo "  starts it. The start-up helper is a small service in Ubuntu that starts them"
+    echo "  again each time Docker comes up. It never recreates or updates anything."
+    echo ""
+    bash scripts/dev-autostart.sh --status
+    echo ""
+    case "$(v2_autostart_state)" in
+        installed)
+            read -r -p "  Remove it? [y/N]: " C || C=n
+            [[ "${C:-N}" =~ ^[Yy]$ ]] && bash scripts/dev-autostart.sh --uninstall ;;
+        missing|stale)
+            read -r -p "  Install it (asks for sudo)? [Y/n]: " C || C=n
+            if [[ "${C:-Y}" =~ ^[Yy]$ ]]; then
+                bash scripts/dev-autostart.sh --install || true
+            else
+                set_env_key EPHEM_AUTOSTART_NOTICE 0
+                echo "  The home screen will not remind you again. Maintenance, s, installs it any time."
+            fi ;;
+        no-systemd)
+            bash scripts/dev-autostart.sh --install || true ;;
+    esac
+    return 0
+}
+
 # ── Maintenance ───────────────────────────────
 v2_stack_up() {
     local C
@@ -1737,6 +1795,7 @@ v2_maintenance_local() {
             v2_opt c "Start everything"
             v2_opt o "Stop everything, keep data"
         fi
+        is_wsl && v2_opt s "Start-up helper: ePHEM comes back after Windows starts ($(v2_autostart_label))"
         v2_head "Software"
         v2_opt i "Pull the latest app image and recreate"
         v2_opt g "Local basemap: the maps draw from a file here, offline too"
@@ -1750,6 +1809,7 @@ v2_maintenance_local() {
             x|X)    v2_bye ;;
             c|C)    v2_do v2_stack_up ;;
             o|O)    v2_do v2_stack_down ;;
+            s|S)    if is_wsl; then v2_do v2_autostart; else v2_bad; fi ;;
             i|I)    v2_do menu_image_local ;;
             g|G)    v2_do menu_basemap ;;
             z|Z)    v2_do menu_stack_wipe ;;
@@ -1771,6 +1831,7 @@ v2_maintenance_server() {
         v2_opt g "Local basemap: the maps draw from a file on this server"
         v2_head "This server"
         v2_opt a "Automatic updates: security updates and the restart time"
+        is_wsl && v2_opt s "Start-up helper: ePHEM comes back after Windows starts ($(v2_autostart_label))"
         v2_nav
         v2_prompt
         case "$V2_ANS" in
@@ -1780,6 +1841,7 @@ v2_maintenance_server() {
             o|O)    v2_do menu_office ;;
             g|G)    v2_do menu_basemap ;;
             a|A)    v2_do menu_host_updates ;;
+            s|S)    if is_wsl; then v2_do v2_autostart; else v2_bad; fi ;;
             *)      v2_bad ;;
         esac
     done
@@ -2149,6 +2211,7 @@ v2_home() {
         v2_home_title
         v2_tree_table
         v2_dups_show
+        v2_autostart_notice
         v2_home_options
         v2_prompt
         [ -n "$V2_ANS" ] || continue

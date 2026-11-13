@@ -299,10 +299,14 @@ svc_detail() {  # svc_detail SERVICE
     esac
 }
 
-# Docker's own reason a container cannot start ("" when there is none). The
-# usual one here: a single-file bind mount (odoo.conf, odoo-N.conf) whose file
-# was replaced, so the recorded mount no longer resolves and start fails with
-# "not a directory". Recreating the container re-resolves the mount.
+# Docker's own reason a container could not start ("" when there is none),
+# a single-file bind mount (odoo.conf, odoo-N.conf, active.conf) failing with
+# "not a directory". Two causes, told apart only by trying:
+#   - Docker Desktop on WSL started the container before Ubuntu shared the
+#     project files (Windows start, Docker Desktop restart). The error stays on
+#     record, but a plain start works once Ubuntu is up.
+#   - The file was replaced (new inode), so the recorded mount no longer
+#     resolves. Only recreating the container re-resolves it.
 svc_start_error() {  # svc_start_error SERVICE
     local cid; cid=$(compose ps -aq "$1" 2>/dev/null | head -1)
     [ -z "$cid" ] && return 0
@@ -310,7 +314,10 @@ svc_start_error() {  # svc_start_error SERVICE
 }
 
 # Start one service the way that actually works: create it when it has never
-# run, recreate it when docker refuses the old container, plain start else.
+# run, plain start else, and recreate it only when docker still refuses the
+# old container. A plain start first keeps the container as it is: recreating
+# rebuilds it from the compose files checked out now, which on another branch
+# may not be the ones it was made from.
 svc_start() {  # svc_start SERVICE
     local err
     if [ "$(svc_state "$1")" = absent ]; then
@@ -320,8 +327,11 @@ svc_start() {  # svc_start SERVICE
     fi
     err=$(svc_start_error "$1")
     if [ -n "$err" ]; then
+        echo -e "  ${YELLOW}!${NC} Docker could not start the container last time: ${err:0:140}"
+        echo -e "  ${CYAN}→${NC} $(compose_cmd_text) start $1"
+        compose start "$1" >/dev/null 2>&1 && return 0
         local before; before=$(odoo_cid "$1")
-        echo -e "  ${YELLOW}!${NC} The existing container cannot start: ${err:0:140}"
+        echo -e "  ${YELLOW}!${NC} Still refused, most likely because the mounted file was replaced."
         echo -e "  ${CYAN}→${NC} $(compose_cmd_text) up -d --force-recreate $1   (data volumes are kept)"
         compose up -d --force-recreate "$1" || return 1
         [ "$1" = "$ODOO_SVC" ] && nginx_follow_odoo "$before" "$1"
@@ -1094,9 +1104,19 @@ stack_doctor() {  # stack_doctor SERVICE
         found=1
         echo -e "${RED}✗${NC} Docker could not start the container:"
         echo "$err" | fold -s -w 90 | sed 's/^/     /'
-        echo "   Usually a stale single-file mount (its config file was replaced)."
+        if is_wsl; then
+            echo "   Usually Docker Desktop started it before Ubuntu was ready (Windows start,"
+            echo "   Docker Desktop restart). A plain start fixes that:  $(compose_cmd_text) start $svc"
+            echo "   If Docker still refuses, its config file was replaced:"
+        else
+            echo "   Usually a stale single-file mount (its config file was replaced)."
+        fi
         echo "   Recreate it:  $(compose_cmd_text) up -d --force-recreate $svc"
-        echo "   (the Stack menu's start does that for you; data volumes are kept)"
+        echo "   (the Stack menu's start tries a plain start, then recreates; data volumes are kept)"
+        if is_wsl && [ "$(bash "$EPHEM_ROOT/scripts/dev-autostart.sh" --state 2>/dev/null)" != installed ]; then
+            echo "   To have this done by itself after every Windows start:"
+            echo "     bash scripts/dev-autostart.sh --install"
+        fi
         echo ""
     fi
     LOGS=$(compose logs --tail=300 --no-log-prefix "$svc" 2>&1) || LOGS=""

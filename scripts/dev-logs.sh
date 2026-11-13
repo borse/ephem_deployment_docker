@@ -100,11 +100,12 @@ else
 fi
 
 # ── Starting and restarting go through stack-lib.sh ───────
-# svc_start and svc_restart recreate a container that docker refuses to
-# start, instead of failing on it. The usual case here: after a Docker
-# Desktop restart a single file mount (odoo-N.conf) no longer resolves and
-# every start ends in "not a directory", exit 127. Data volumes are kept.
-# They act on the compose files chosen above, so nothing else changes.
+# svc_start and svc_restart get a container docker refused to start going
+# again instead of failing on it. The usual case here: Docker Desktop started
+# it before Ubuntu shared odoo-N.conf ("not a directory", exit 127), and a
+# plain start works now. Only when docker still refuses (the file was
+# replaced) do they recreate it. Data volumes are kept. They act on the
+# compose files chosen above, so nothing else changes.
 # shellcheck source=stack-lib.sh
 source scripts/stack-lib.sh
 ODOO_SVC="$service"

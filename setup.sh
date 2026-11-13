@@ -2304,6 +2304,32 @@ if [ -n "$HOST_UPDATES_CHOICE" ]; then
     fi
 fi
 
+# ── WSL: ePHEM comes back after Windows starts ──
+# Docker Desktop starts the containers before Ubuntu shares the project
+# files, and the ones that mount a single file (odoo.conf, active.conf) stay
+# down until someone starts them. scripts/dev-autostart.sh starts them again
+# each time Docker comes up. Every mode: a training laptop is a server too.
+if is_wsl; then
+    echo ""
+    case "$(bash "$EPHEM_ROOT/scripts/dev-autostart.sh" --state)" in
+        installed)
+            echo -e "${GREEN}✓${NC} Start-up helper installed: ePHEM comes back by itself after Windows starts" ;;
+        missing|stale)
+            echo "After Windows starts, Docker Desktop can leave ePHEM down until it is started by hand."
+            AUTOSTART_GO=""
+            read -r -p "  Install the start-up helper that brings it back by itself (asks for sudo)? [Y/n]: " AUTOSTART_GO || AUTOSTART_GO=n
+            if [[ "${AUTOSTART_GO:-Y}" =~ ^[Yy]$ ]]; then
+                bash "$EPHEM_ROOT/scripts/dev-autostart.sh" --install \
+                    || echo -e "${YELLOW}!${NC} Not installed. Later: bash scripts/dev-autostart.sh --install"
+            else
+                echo "  Later: bash scripts/dev-autostart.sh --install  (or bash manage.sh, Maintenance)"
+            fi ;;
+        no-systemd)
+            echo -e "${YELLOW}!${NC} After Windows starts, Docker Desktop can leave ePHEM down. The helper that brings it"
+            echo "  back needs systemd in WSL: bash scripts/dev-autostart.sh --install says how to turn it on." ;;
+    esac
+fi
+
 echo ""
 echo "========================================="
 echo ""
