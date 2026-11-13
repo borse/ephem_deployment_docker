@@ -1,3 +1,54 @@
+# Windows machines (WSL): ePHEM comes back after Windows starts (November 2026)
+
+For every install inside WSL with Docker Desktop: developer machines, demo
+and training laptops. Linux servers and Macs are not affected.
+
+What was wrong: when Docker Desktop starts (Windows sign in, opened by hand,
+or its own restart) it starts the containers about two seconds before Ubuntu
+shares the project files with it. Odoo and nginx mount a single config file,
+fail before they run (`Exited (127)`, "not a directory ... odoo.conf"), and
+Docker never retries that kind of failure. ePHEM stayed down until someone
+started it, although nothing was broken.
+
+What changes:
+
+1. **A start-up helper** (`scripts/dev-autostart.sh --install`): a small
+   service in Ubuntu that starts those containers again each time Docker
+   comes up. It never recreates or updates anything. `setup.sh` offers it,
+   and the home screen of `bash manage.sh` says when it is missing.
+2. **Starting a refused container keeps it as it is.** The menu's start and
+   `scripts/dev-logs.sh` used to recreate any container Docker had refused,
+   which rebuilt it from the compose files checked out at that moment. They
+   now try a plain start first and recreate only when Docker still refuses
+   (its config file was replaced).
+
+## Steps (once per Windows machine)
+
+```bash
+cd ~/ephem-deploy
+git pull --ff-only
+bash scripts/dev-autostart.sh --install    # or: bash manage.sh, m, then s
+```
+
+It asks for your sudo password once. It needs systemd in WSL; when that is
+off, the script prints the two lines to add to `/etc/wsl.conf` and the
+`wsl --shutdown` that applies them.
+
+## Verify afterwards
+
+```bash
+bash scripts/dev-autostart.sh --status     # Installed and active
+```
+
+After the next Windows start, `journalctl -u ephem-autostart` shows which
+containers it started, if any.
+
+## Rolling back
+
+```bash
+bash scripts/dev-autostart.sh --uninstall
+```
+
 # Updating an Existing Server (November 2026: after the security test)
 
 Code and configuration only: no new image, no data, no module update.

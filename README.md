@@ -120,6 +120,8 @@ Because `setup.sh` runs *inside* WSL, it can't install WSL itself — that one b
 
 > **Where to clone the repo:** keep it inside the Linux home folder (e.g. `/home/<you>/ephem-deploy`), not under `/mnt/c/...`. Files under `/mnt/c` work, but bind-mounts and Docker volumes are much slower there.
 
+**After Windows starts:** Docker Desktop starts the containers about two seconds before Ubuntu shares the project files with it. Odoo (and nginx) then fail on their config file (`docker ps -a` shows `Exited (127)`, the error says "not a directory"), and Docker does not try again, so ePHEM stays down although nothing is broken. `setup.sh` offers a small start-up helper that starts them again each time Docker comes up: `bash scripts/dev-autostart.sh --install` (or `bash manage.sh`, Maintenance, `s`). It needs systemd in WSL (`[boot] systemd=true` in `/etc/wsl.conf`); the script says how to turn it on. Without it, `bash scripts/dev-autostart.sh` starts them once.
+
 **Using PyCharm on Windows with WSL:**
 
 - Open the project from the WSL filesystem: `File → Open` and paste `\\wsl.localhost\Ubuntu\home\<you>\ephem-deploy\addons` (the ePHEM clone is `ePHEM-core/` inside it).
