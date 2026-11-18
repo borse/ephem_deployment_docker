@@ -12,6 +12,7 @@
 #   ./scripts/update-modules.sh --auto --ask-odoo    (asks whether to stop Odoo first)
 #   ./scripts/update-modules.sh --auto --changed --install-too eoc_rrt
 #                                     (update, and install eoc_rrt in the same run)
+#   ./scripts/update-modules.sh --auto --jobs 1  (one database at a time)
 #
 # Update and install in one run: Odoo accepts -u and -i together, and a module
 # that must arrive in the same run as another's update (as eoc_rrt once had to
@@ -35,6 +36,14 @@
 # fighting the live server for the database (a "deadlock detected" when a
 # migration drops a column of a busy table, as on pheoc on 7 Nov 2026), and
 # the run is often faster for it.
+#
+# Several databases at once: each database is its own Odoo process and its
+# own transaction, and nearly all of the minute it takes is Odoo reloading
+# XML and checking tables on one CPU core. With more than one database to
+# update, the run starts several side by side: half the CPUs, at most one
+# per free GB of memory, at most 4. --jobs N sets the number (1 = one at a
+# time, the full Odoo log on screen as before). Each database then logs to
+# its own file while it runs, joined into the one log in order at the end.
 #
 # The modules come from every source folder of the Odoo acted on (the
 # addons/ parent: ePHEM-core plus whatever was added from manage.sh).
@@ -85,6 +94,7 @@ CHANGED_MODE=false      # only the modules whose code changed, per database
 ALL_MODE=false          # manual "0": every listed module installed on each database
 ASK_ODOO=false          # --auto, but ask whether to stop Odoo (manage.sh after a pull)
 INSTALL_TOO=""          # modules installed in the same run as the update (comma separated)
+JOBS=""                 # databases updated at once; empty = suited to this machine
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -97,9 +107,15 @@ while [[ $# -gt 0 ]]; do
         --changed)      CHANGED_MODE=true; shift ;;
         --ask-odoo)     ASK_ODOO=true; shift ;;
         --install-too)  INSTALL_TOO="$2"; shift 2 ;;
+        --jobs)         JOBS="${2:-}"; shift 2 ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+if [ -n "$JOBS" ] && ! { [[ "$JOBS" =~ ^[0-9]+$ ]] && [ "$JOBS" -ge 1 ] && [ "$JOBS" -le 16 ]; }; then
+    echo -e "${RED}✗${NC} --jobs takes a number from 1 to 16: $JOBS"
+    exit 1
+fi
 
 if [ -n "$INSTALL_TOO" ] && ! [[ "$INSTALL_TOO" =~ ^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$ ]]; then
     echo -e "${RED}✗${NC} --install-too takes module names separated by commas: $INSTALL_TOO"
@@ -303,6 +319,7 @@ odoo_safety_start() {
 }
 
 exit_cleanup() {
+    par_stop_jobs
     progress_teardown
     odoo_safety_start
 }
@@ -318,7 +335,8 @@ ask_stop_odoo() {
     echo "     translations, small fixes."
     echo "  2) Stop it first"
     echo "     Every tenant on this server is offline until the update ends, usually"
-    echo "     one to three minutes per database. Nothing else uses the database while"
+    echo "     one to three minutes per database, shared out over the databases"
+    echo "     updated at once ($(jobs_label)). Nothing else uses the database while"
     echo "     it runs, so the update cannot collide with users or scheduled jobs, and"
     echo "     it is often faster. Choose this when the update changes the database"
     echo "     structure (migrations, new or removed modules or fields), or after a"
@@ -587,6 +605,39 @@ fmt_dur() {
     else printf '%ds' "$s"; fi
 }
 
+# ── Databases at once ────────────────────────
+# What this machine carries: half its CPUs (Postgres and the live Odoo keep
+# the other half), one per GB of free memory (an update peaks well under
+# that), at most 4. --jobs overrides it. Never more than the databases.
+N_DBS=1                 # databases in the run, set once they are known
+machine_cpus() { nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2; }
+machine_free_gb() { awk '/^MemAvailable:/ {print int($2/1048576)}' /proc/meminfo 2>/dev/null || true; }
+machine_jobs() {
+    local j gb
+    j=$(( $(machine_cpus) / 2 ))
+    gb=$(machine_free_gb)
+    if [[ "$gb" =~ ^[0-9]+$ ]] && [ "$gb" -lt "$j" ]; then j=$gb; fi
+    if [ "$j" -gt 4 ]; then j=4; fi
+    if [ "$j" -lt 1 ]; then j=1; fi
+    echo "$j"
+}
+effective_jobs() {
+    local j=${JOBS:-$(machine_jobs)}
+    if [ "$N_DBS" -lt "$j" ]; then j=$N_DBS; fi
+    if [ "$j" -lt 1 ]; then j=1; fi
+    echo "$j"
+}
+jobs_label() {
+    local j; j=$(effective_jobs)
+    if [ "$j" -le 1 ]; then echo "one at a time"; else echo "$j at a time"; fi
+}
+jobs_plan_label() {
+    local why
+    if [ -n "$JOBS" ]; then why="--jobs $JOBS"
+    else why="$(machine_cpus) CPUs, $(machine_free_gb) GB free; --jobs N to change"; fi
+    echo "$(jobs_label) ($why)"
+}
+
 PROGRESS_ON=false
 PROGRESS_STATE=""
 TICKER_PID=""
@@ -692,10 +743,207 @@ progress_ticker() {
     done
 }
 
+# ── Several databases at once ────────────────
+# One background copy of this shell per database, at most effective_jobs at
+# a time. Each writes into PAR_DIR: <db>.log (its Odoo log), <db>.state (the
+# module Odoo is on, for the bar), <db>.start, and, as its very last act,
+# <db>.result ("ok SECONDS" or "errors SECONDS"). The main shell starts the
+# next database as one ends, prints a line per database as it finishes, and
+# joins the logs into LOG_FILE in database order at the end.
+PAR_DIR=""
+declare -A PAR_PIDS=()      # pid -> database, while it runs
+PAR_DONE_SUM=0              # seconds of the databases finished so far
+PAR_DONE_N=0
+
+par_job() {  # par_job DB MODULE...  (runs in the background)
+    local db="$1"; shift
+    local start ok=true
+    start=$(date +%s)
+    echo "$start" > "$PAR_DIR/$db.start"
+    LOG_FILE="$PAR_DIR/$db.log"
+    PROGRESS_STATE="$PAR_DIR/$db.state"
+    : > "$PROGRESS_STATE"
+    {
+        echo "Modules: $(IFS=,; echo "${*:-(none)}")"
+        if [ -n "$INSTALL_TOO" ]; then echo "Install too: $INSTALL_TOO (same run)"; fi
+    } > "$LOG_FILE"
+    # The log gets everything (run_batch_update tees it); the screen nothing.
+    run_batch_update "$db" "$@" >/dev/null 2>&1 || ok=false
+    if [ "$ok" = true ]; then record_state "$db" "$@" ${INSTALL_TOO//,/ }; fi
+    echo "$([ "$ok" = true ] && echo ok || echo errors) $(( $(date +%s) - start ))" > "$PAR_DIR/$db.result.tmp"
+    mv "$PAR_DIR/$db.result.tmp" "$PAR_DIR/$db.result"
+}
+
+kill_tree() {  # kill_tree PID: its children first, so none is left behind
+    local c
+    for c in $(pgrep -P "$1" 2>/dev/null || true); do kill_tree "$c"; done
+    kill "$1" 2>/dev/null || true
+}
+
+# Ctrl+C or an error: stop every database still running. As with one at a
+# time, an Odoo already updating inside the live container finishes that
+# database on its own (docker exec does not pass the signal on).
+par_stop_jobs() {
+    local pid
+    for pid in "${!PAR_PIDS[@]}"; do kill_tree "$pid"; done
+    PAR_PIDS=()
+}
+
+par_report() {  # par_report DB TOTAL JOBS: one line for a finished database
+    local db=$1 total=$2 jobs=$3 res=errors dur=0 s tail=""
+    if [ -f "$PAR_DIR/$db.result" ]; then read -r res dur < "$PAR_DIR/$db.result"
+    elif [ -f "$PAR_DIR/$db.start" ]; then read -r s < "$PAR_DIR/$db.start"; dur=$(( $(date +%s) - s )); fi
+    PAR_DONE_N=$((PAR_DONE_N+1)); PAR_DONE_SUM=$((PAR_DONE_SUM+dur))
+    local left_n=$((total-PAR_DONE_N)) avg=$((PAR_DONE_SUM/PAR_DONE_N))
+    tail="$PAR_DONE_N/$total done"
+    if [ "$left_n" -gt 0 ]; then tail="$tail, ~$(fmt_dur $(( (avg*left_n + jobs-1) / jobs ))) left"; fi
+    if [ "$res" = ok ]; then
+        echo -e "  ${GREEN}✓${NC} $db completed in $(fmt_dur "$dur")  ·  $tail"
+    else
+        echo -e "  ${RED}✗ $db had errors after $(fmt_dur "$dur")${NC}  ·  $tail"
+        # Its first errors and how it ended (the full log names the database).
+        { grep -m3 -E " (ERROR|CRITICAL) " "$PAR_DIR/$db.log" 2>/dev/null || true
+          tail -n 6 "$PAR_DIR/$db.log" 2>/dev/null || true; } \
+            | awk '!seen[$0]++' | cut -c1-240 | sed 's/^/      /'
+        FAILED_DBS+=("$db")
+    fi
+}
+
+# The bottom row while several run: done so far, then each running database
+# with its time and the module Odoo is on.
+par_ticker() {  # par_ticker TOTAL JOBS RUN_START
+    set +e
+    local total=$1 jobs=$2 run_start=$3
+    local frames='|/-\' f=0 rows cols last_rows=0 last_cols=0
+    while :; do
+        read -r rows cols < <(term_size)
+        if [ "$rows" != "$last_rows" ] || [ "$cols" != "$last_cols" ]; then
+            printf '\x1b7\033[1;%dr\x1b8' $((rows-1))
+            last_rows=$rows; last_cols=$cols
+        fi
+        local now s d r el st done_n=0 done_sum=0 started=0 run_left=0 running="" eta_txt pct
+        now=$(date +%s)
+        for s in "$PAR_DIR"/*.start; do
+            [ -e "$s" ] || continue
+            started=$((started+1))
+            d=${s##*/}; d=${d%.start}
+            if [ -f "$PAR_DIR/$d.result" ]; then
+                read -r r el < "$PAR_DIR/$d.result"
+                done_n=$((done_n+1)); done_sum=$((done_sum+el))
+            else
+                read -r el < "$s"; el=$((now-el))
+                st=$(cat "$PAR_DIR/$d.state" 2>/dev/null); st=${st#module }
+                running="$running, $d $(fmt_dur $el)${st:+ $st}"
+                run_left=$((run_left - el))
+            fi
+        done
+        if [ "$done_n" -gt 0 ]; then
+            local avg=$((done_sum/done_n)) rl
+            # Running ones: what the average says they still need (never < 0).
+            rl=$(( avg*(started-done_n) + run_left )); [ "$rl" -lt 0 ] && rl=0
+            eta_txt="~$(fmt_dur $(( (rl + avg*(total-started) + jobs-1) / jobs ))) left"
+        else
+            eta_txt="time left after the first database"
+        fi
+        pct=$(( done_n*100/(total>0?total:1) ))
+        local barw=20 fill bar plain
+        fill=$(( pct*barw/100 ))
+        bar=$(printf '%*s' "$fill" '' | tr ' ' '#')$(printf '%*s' $((barw-fill)) '' | tr ' ' '.')
+        plain=" ${frames:f%4:1} $done_n/$total done [$bar] $pct%  total $(fmt_dur $((now-run_start)))  $eta_txt  | ${running#, }"
+        plain=${plain:0:$((cols-1))}
+        printf '\x1b7\033[%d;1H\033[7m%s\033[K\033[0m\x1b8' "$rows" "$plain"
+        f=$((f+1))
+        sleep 0.5
+    done
+}
+
+run_databases_parallel() {  # same arguments and results as run_databases
+    local jobs run_start DB pid total next=0
+    local -a queue=() skipped=() mods=()
+    jobs=$(effective_jobs)
+    run_start=$(date +%s)
+    FAILED_DBS=(); PAR_DONE_SUM=0; PAR_DONE_N=0
+    PAR_DIR="$LOG_DIR/update_${TIMESTAMP}.parts"
+    mkdir -p "$PAR_DIR"
+    compute_fingerprints    # once, here, rather than in every copy
+
+    for DB in "${RUN_DBS[@]}"; do
+        mods=("$@")
+        if [ -n "${DB_MODULES[$DB]+x}" ]; then read -ra mods <<< "${DB_MODULES[$DB]}"; fi
+        if [ ${#mods[@]} -eq 0 ] && [ -z "$INSTALL_TOO" ]; then
+            echo "skipped 0" > "$PAR_DIR/$DB.result"
+            skipped+=("$DB")
+        else
+            queue+=("$DB")
+        fi
+    done
+    total=${#queue[@]}
+
+    echo ""
+    if [ ${#skipped[@]} -gt 0 ]; then
+        echo "  Nothing changed since their last update, skipped: ${skipped[*]}"
+    fi
+    if [ "$total" -gt 0 ]; then
+        if [ "$jobs" -gt "$total" ]; then jobs=$total; fi
+        echo -e "  ${BOLD}Updating $total database(s), $jobs at a time.${NC} The Odoo log of each, while it runs:"
+        echo -e "  ${CYAN}$PAR_DIR/<database>.log${NC}"
+        echo ""
+    fi
+
+    # Whatever ends the run, no update is left running behind it.
+    trap exit_cleanup EXIT
+    trap 'exit_cleanup; exit 130' INT TERM
+    progress_setup
+    if [ "$PROGRESS_ON" = true ] && [ "$total" -gt 0 ]; then
+        par_ticker "$total" "$jobs" "$run_start" &
+        TICKER_PID=$!
+    fi
+
+    while [ "$next" -lt "$total" ] || [ ${#PAR_PIDS[@]} -gt 0 ]; do
+        while [ "$next" -lt "$total" ] && [ ${#PAR_PIDS[@]} -lt "$jobs" ]; do
+            DB=${queue[$next]}; next=$((next+1))
+            mods=("$@")
+            if [ -n "${DB_MODULES[$DB]+x}" ]; then read -ra mods <<< "${DB_MODULES[$DB]}"; fi
+            par_job "$DB" "${mods[@]}" </dev/null &
+            PAR_PIDS[$!]=$DB
+        done
+        for pid in "${!PAR_PIDS[@]}"; do
+            DB=${PAR_PIDS[$pid]}
+            if [ ! -f "$PAR_DIR/$DB.result" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+            wait "$pid" 2>/dev/null || true
+            unset "PAR_PIDS[$pid]"
+            par_report "$DB" "$total" "$jobs"
+        done
+        sleep 1
+    done
+
+    progress_teardown
+    # One log, in database order, as a run one at a time writes it.
+    local res dur
+    for DB in "${RUN_DBS[@]}"; do
+        res=errors; dur=0
+        if [ -f "$PAR_DIR/$DB.result" ]; then read -r res dur < "$PAR_DIR/$DB.result"; fi
+        if [ "$res" = skipped ]; then
+            echo "--- $DB: nothing changed, skipped ---" >> "$LOG_FILE"
+        else
+            { echo "--- $DB ---"; cat "$PAR_DIR/$DB.log" 2>/dev/null || true
+              echo "--- $DB: $res in $(fmt_dur "$dur") ---"; } >> "$LOG_FILE"
+        fi
+    done
+    rm -rf "$PAR_DIR"
+    PAR_DIR=""
+    RUN_SECONDS=$(( $(date +%s) - run_start ))
+}
+
 # ── Run the update on every database in RUN_DBS ──
 # Args: the modules. Fills FAILED_DBS; prints the time each database took
-# and the time left.
+# and the time left. Several databases: run_databases_parallel.
 run_databases() {
+    N_DBS=${#RUN_DBS[@]}
+    if [ "$(effective_jobs)" -gt 1 ]; then
+        run_databases_parallel "$@"
+        return 0
+    fi
     local total=${#RUN_DBS[@]} idx=0 run_start db_start dur done_sum=0 done_n=0
     run_start=$(date +%s)
     FAILED_DBS=()
@@ -789,6 +1037,7 @@ ACTION="${SPECIFIC_ACTION:-update}"
 
 # ── AUTO MODE ────────────────────────────────
 if [ "$AUTO_MODE" = true ]; then
+    N_DBS=${#DATABASES[@]}
     [ "$ASK_ODOO" = true ] && ask_stop_odoo && echo ""
     echo -e "${BOLD}Mode:${NC}      Auto"
     echo -e "${BOLD}Action:${NC}    ${ACTION}"
@@ -802,6 +1051,7 @@ if [ "$AUTO_MODE" = true ]; then
     fi
     [ -n "$INSTALL_TOO" ] && echo -e "${BOLD}Install too:${NC} $INSTALL_TOO (same run)"
     echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
+    [ "$N_DBS" -gt 1 ] && echo -e "${BOLD}At once:${NC}   $(jobs_plan_label)"
     echo ""
 
     odoo_pause
@@ -865,6 +1115,7 @@ if [ ${#SELECTED_DBS[@]} -eq 0 ]; then
     echo -e "${RED}✗${NC} No databases selected."
     exit 1
 fi
+N_DBS=${#SELECTED_DBS[@]}
 
 # Step 3: Choose modules
 echo ""
@@ -952,6 +1203,7 @@ else
 fi
 [ -n "$INSTALL_TOO" ] && echo -e "${BOLD}Install too:${NC} $INSTALL_TOO (same run)"
 echo -e "${BOLD}Odoo:${NC}      $(odoo_plan_label)"
+[ "$N_DBS" -gt 1 ] && echo -e "${BOLD}At once:${NC}   $(jobs_plan_label)"
 echo "─────────────────────────────────────────"
 echo ""
 read -p "Proceed? (y/n) " -n 1 -r
