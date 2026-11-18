@@ -5,7 +5,7 @@
 # clone, nginx, certificates and snapshots are the functions of this file,
 # which it loads (everything above the "Menu loop" line), so this file has
 # to stay next to it. And the numbered menu itself still opens, for anyone
-# who knows it by heart: bash manage_old.sh
+# who knows it by heart: bash old_manage.sh
 #
 # Day-to-day management of an installed checkout, in whatever mode setup.sh
 # left it (EPHEM_MODE in .env, see scripts/stack-lib.sh):
@@ -18,8 +18,8 @@
 # one subfolder per source: the ePHEM clone (ePHEM-core) and any repository
 # added from the Addons item, each with its own remote and access key.
 #
-#     bash manage_old.sh          # dev-multi: the instance used last time
-#     bash manage_old.sh 2        # dev-multi: pin odca2 (remembered in .env)
+#     bash old_manage.sh          # dev-multi: the instance used last time
+#     bash old_manage.sh 2        # dev-multi: pin odca2 (remembered in .env)
 #
 # Everything here wraps the scripts/ tools and docker compose. Each menu item
 # prints the commands it runs, so this doubles as a cheat sheet.
@@ -113,10 +113,10 @@ backup_item()   { if local_mode; then echo 10; else echo 7; fi; }
 ask_choice() {  # ask_choice "1-4" ["b, x"]
     local keys="${2:-b, x}"
     # EOF (stdin closed, a piped run) would otherwise spin the menu forever.
-    read -r -p "  Choose [$1, $keys]: " CHOICE || { echo ""; echo "Bye. Re-open anytime:  bash manage_old.sh"; exit 0; }
+    read -r -p "  Choose [$1, $keys]: " CHOICE || { echo ""; echo "Bye. Re-open anytime:  bash old_manage.sh"; exit 0; }
     echo ""
     case "${CHOICE:-}" in
-        x|X)    echo "Bye. Re-open anytime:  bash manage_old.sh"; exit 0 ;;
+        x|X)    echo "Bye. Re-open anytime:  bash old_manage.sh"; exit 0 ;;
         b|B|"") CHOICE=b ;;
     esac
 }
@@ -1057,7 +1057,7 @@ ask_addons_instance() {
     if ! inst_index "$N" >/dev/null; then
         case "$N" in
             b|B) return 1 ;;
-            x|X) echo "Bye. Re-open anytime:  bash manage_old.sh"; exit 0 ;;
+            x|X) echo "Bye. Re-open anytime:  bash old_manage.sh"; exit 0 ;;
         esac
         echo -e "  ${RED}✗${NC} No instance named '$N'. Configured: ${INSTANCES[*]}"
         return 1
@@ -1895,7 +1895,7 @@ basemap_use() {  # basemap_use [FILE]
     if ! compose exec -T "$svc" test -f "/mnt/basemaps/$file" </dev/null >/dev/null 2>&1; then
         echo -e "  ${YELLOW}!${NC} $svc does not see basemaps/ yet (its container predates the mount), so its maps keep OpenFreeMap."
         if [ "$EPHEM_MODE" = dev-multi ]; then
-            echo "     Recreate it from the roster: bash manage_old.sh → Stack → Recreate the whole stack."
+            echo "     Recreate it from the roster: bash old_manage.sh → Stack → Recreate the whole stack."
         else
             echo "     Recreate the containers: bash setup.sh, or $(compose_cmd_text) up -d $svc nginx"
         fi
@@ -3618,7 +3618,7 @@ menu_main_local() {
         echo ""
         printf "  1) %s\n" "Status"
         [ "$EPHEM_MODE" = dev-multi ] && \
-        printf "  2) %-44s (%s)\n" "Switch instance" "bash manage_old.sh <name> does the same"
+        printf "  2) %-44s (%s)\n" "Switch instance" "bash old_manage.sh <name> does the same"
         if [ "$EPHEM_MODE" = dev-multi ]; then
         printf "  3) %-44s (%s)\n" "Addons: pull, switch branch, add a repository" "asks which odcaN/ first"
         else
@@ -3695,7 +3695,7 @@ menu_main_server() {
             9)  menu_security ;;
             10) menu_upload_limit ;;
             11) menu_advanced ;;
-            0)  echo "Bye. Re-open anytime:  bash manage_old.sh"; exit 0 ;;   # old habit, still works
+            0)  echo "Bye. Re-open anytime:  bash old_manage.sh"; exit 0 ;;   # old habit, still works
             b)  ;;
             *)  echo -e "${YELLOW}!${NC} Invalid choice: pick 1-11, or x to exit." ;;
         esac

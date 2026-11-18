@@ -377,7 +377,7 @@ What changes:
 3. **`bash manage.sh` is the new menu.** Numbers are places (repositories,
    databases) and letters are actions: `u` update, `d` databases and backups,
    `w` web access, `m` maintenance, `v` status and checks, `h` help. The
-   numbered menu still opens with `bash manage_old.sh`, and that file has to
+   numbered menu still opens with `bash old_manage.sh`, and that file has to
    stay: the new menu loads the work itself from it. Both have a screen for
    the automatic updates (Maintenance, then `a`; old menu: Advanced, 9).
 

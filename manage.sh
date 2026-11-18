@@ -27,28 +27,28 @@
 # right before the first of those that needs it.
 #
 # This file is the navigation. The work itself (restore, delete, clone, nginx,
-# certificates, snapshots) is the code of manage_old.sh, the numbered menu
+# certificates, snapshots) is the code of old_manage.sh, the numbered menu
 # this one replaced, loaded below: the two menus cannot disagree while both
-# exist, and manage_old.sh has to stay next to this file.
+# exist, and old_manage.sh has to stay next to this file.
 # ──────────────────────────────────────────────
 set -uo pipefail
 
 V2_ROOT="$(cd "$(dirname "$0")" && pwd)"
-V2_BASE="$V2_ROOT/manage_old.sh"
+V2_BASE="$V2_ROOT/old_manage.sh"
 V2_CUT='^# ── Menu loop ─'
 V2_ME="bash manage.sh"
 
 if [ ! -f "$V2_BASE" ] || ! grep -q "$V2_CUT" "$V2_BASE"; then
-    echo "manage.sh needs manage_old.sh next to it, with its '# ── Menu loop' line."
+    echo "manage.sh needs old_manage.sh next to it, with its '# ── Menu loop' line."
     echo "A checkout that is not complete? git status, then git pull."
     exit 1
 fi
 
-# manage_old.sh's screens are reused as they are, except for the sentences that
+# old_manage.sh's screens are reused as they are, except for the sentences that
 # send people to its menu numbers. A rule that stops matching only leaves
 # the old sentence on screen.
 V2_TEXTS=$(cat <<'RULES'
-s#Re-open anytime:  bash manage_old\.sh#Re-open anytime:  bash manage.sh#g
+s#Re-open anytime:  bash old_manage\.sh#Re-open anytime:  bash manage.sh#g
 s#menu 3 (Addons) moves it into#open its number here to move it into#
 s#Addons menu item moves it into#menu offers to move it into#
 s#OFFICE_CONVERTER=0, Advanced → Document converter#OFFICE_CONVERTER=0, installed from Maintenance (m)#
@@ -62,7 +62,7 @@ s#(update modules across databases)\. To roll back#(Update, then m). To roll bac
 s#first (options 4 and 5)#first (open it, then k or n)#
 s#come back here (Addons → Add a source) with#come back here (+ again) with#
 s#domain (menu item 2) nor the Databases menu next door needs it#domain nor the Databases menu needs it#
-s#bash manage_old\.sh → Stack → Recreate the whole stack#bash manage.sh, Maintenance (m), then c#
+s#bash old_manage\.sh → Stack → Recreate the whole stack#bash manage.sh, Maintenance (m), then c#
 s#disable it via Advanced → 3#disable it in Web access (w)#
 s#any setting in Advanced → RPC endpoints#any setting in Web access (w)#
 s#via Advanced → 4#in Web access (w)#
@@ -79,17 +79,17 @@ s#Menu item 2 → 3 splits#c on the Web access screen splits#
 RULES
 )
 
-# Everything above manage_old.sh's menu loop: its preamble (mode, instance, checks)
+# Everything above old_manage.sh's menu loop: its preamble (mode, instance, checks)
 # and all its functions. Arguments reach its stack_init as they would there.
 V2_CODE=$(sed -e "$V2_TEXTS" -e "/$V2_CUT/,\$d" "$V2_BASE") || exit 1
 eval "$V2_CODE"
 unset V2_CODE V2_TEXTS
 if ! declare -f menu_db_restore >/dev/null; then
-    echo "manage.sh could not load the functions of manage_old.sh."
+    echo "manage.sh could not load the functions of old_manage.sh."
     exit 1
 fi
 
-# ── What changes in manage_old.sh's own helpers ─
+# ── What changes in old_manage.sh's own helpers ─
 services_hint() { if local_mode; then echo "press m, then c"; else echo "press r"; fi; }
 
 # The Y/n before the passphrase goes: the passphrase prompt is the question.
@@ -112,7 +112,7 @@ V2_NOTICE=""        # one line for the next screen: a screen clears what came be
 V2_NO_PAUSE=0
 
 v2_bye()   { echo "Bye. Re-open anytime:  $V2_ME"; exit 0; }
-v2_ask()   { read -r -p "$1" V2_ANS || { echo ""; v2_bye; }; }    # EOF leaves, as in manage_old.sh
+v2_ask()   { read -r -p "$1" V2_ANS || { echo ""; v2_bye; }; }    # EOF leaves, as in old_manage.sh
 v2_bad()   { V2_NOTICE="${1:-Invalid choice.}"; }
 v2_clear() { if [ -t 1 ]; then printf '\033[H\033[2J'; fi; }
 
@@ -147,7 +147,7 @@ v2_prompt() {  # the prompt that ends a screen
 v2_pause() { echo ""; read -r -p "  Press Enter to go back " V2_ANS || v2_bye; }
 
 # One action on a clean screen, its result kept there until Enter. A cancel,
-# or backing out of one of manage_old.sh's own menus, returns at once.
+# or backing out of one of old_manage.sh's own menus, returns at once.
 v2_do() {  # v2_do COMMAND...
     CHOICE=""; V2_NO_PAUSE=0
     v2_clear
@@ -2130,7 +2130,7 @@ v2_help() {
         echo "    https://github.com/borse/ephem_deployment_docker#readme"
         echo "    https://github.com/borse/ePHEM"
         echo ""
-        echo "  The old numbered menu is still there: bash manage_old.sh"
+        echo "  The old numbered menu is still there: bash old_manage.sh"
         if local_mode; then
             v2_head "More"
             v2_opt p "PyCharm: paths, Git roots, run configurations"
