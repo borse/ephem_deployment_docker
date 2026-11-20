@@ -73,6 +73,16 @@ What are you setting up?
   3) Developer         — I'm a collaborator; I want to edit addons and use PyCharm
 ```
 
+Which of the three is offered depends on the machine:
+
+| Machine | 1) Server deploy | 2) Demo / Evaluate | 3) Developer |
+|---|---|---|---|
+| Linux | yes | yes | yes |
+| Windows (WSL) | hidden | yes | yes |
+| macOS | hidden | yes | yes |
+
+Under WSL and on macOS the first entry is replaced by one line, `Server deploy is available on Linux servers only.`, and the prompt reads `Choose [2-3]`; the other two keep their numbers. `bash setup.sh --force-server-mode` shows the entry on any machine, and a checkout that is already set up as a server keeps it, so running setup again there works as before.
+
 Here's how each mode works:
 
 ![Setup flow](docs/setup-flow.svg)
@@ -181,7 +191,7 @@ The script asks which mode you want (**Server / Demo / Developer**), then handle
 
 ## Mode 1 — Server Deploy
 
-For deploying ePHEM on a production or staging server.
+For deploying ePHEM on a production or staging server. Offered on Linux only (see [Choose Your Setup](#choose-your-setup) for WSL and macOS).
 
 After choosing **1**, setup asks how people will reach ePHEM:
 

@@ -723,6 +723,26 @@ dev_returning_gate() {
 
 windows_drive_gate
 
+# ── Which modes this machine is offered ───────
+# Server deploy is for a Linux server. Under WSL and on macOS, Docker is
+# Docker Desktop on a personal machine: the entry is hidden there, and the
+# numbers of the other two stay as they are (2 and 3). Two ways back to it:
+#   bash setup.sh --force-server-mode    the override, on any machine
+#   a checkout already set up as a server keeps the entry, so running setup
+#   again on it (the way such an install is updated) still works.
+PLATFORM="$(detect_platform)"
+FORCE_SERVER_MODE=false
+for _arg in "$@"; do
+    if [ "$_arg" = "--force-server-mode" ]; then FORCE_SERVER_MODE=true; fi
+done
+SERVER_MODE_OFFERED=true
+if [ "$PLATFORM" = wsl ] || [ "$PLATFORM" = mac ]; then
+    SERVER_MODE_OFFERED=false
+    if [ "$FORCE_SERVER_MODE" = true ]; then SERVER_MODE_OFFERED=true; fi
+    if [ -f .env ] && [ "$EPHEM_MODE" = server ]; then SERVER_MODE_OFFERED=true; fi
+fi
+if [ "$SERVER_MODE_OFFERED" = true ]; then MODE_RANGE="1-3"; else MODE_RANGE="2-3"; fi
+
 echo ""
 echo "========================================="
 echo "  ePHEM Setup"
@@ -730,7 +750,11 @@ echo "========================================="
 echo ""
 echo "What are you setting up?"
 echo ""
-echo -e "  ${BOLD}1)${NC} ${GREEN}Server deploy${NC}     — Production or staging server"
+if [ "$SERVER_MODE_OFFERED" = true ]; then
+    echo -e "  ${BOLD}1)${NC} ${GREEN}Server deploy${NC}     — Production or staging server"
+else
+    echo "  Server deploy is available on Linux servers only."
+fi
 echo -e "  ${BOLD}2)${NC} ${YELLOW}Demo / Evaluate${NC}   — Try ePHEM locally (no development)"
 echo -e "  ${BOLD}3)${NC} ${CYAN}Developer${NC}         — I'm a collaborator; I want to edit addons and use PyCharm"
 echo ""
@@ -749,10 +773,16 @@ if [ -n "$DEFAULT_MODE_CHOICE" ]; then
     else
         echo -e "  From the files here this checkout looks like: ${BOLD}$(ephem_mode_label)${NC}"
     fi
-    read -p "Choose [1-3] (Enter keeps $DEFAULT_MODE_CHOICE): " MODE_CHOICE
+    read -p "Choose [$MODE_RANGE] (Enter keeps $DEFAULT_MODE_CHOICE): " MODE_CHOICE
     MODE_CHOICE="${MODE_CHOICE:-$DEFAULT_MODE_CHOICE}"
 else
-    read -p "Choose [1-3]: " MODE_CHOICE
+    read -p "Choose [$MODE_RANGE]: " MODE_CHOICE
+fi
+
+if [ "${MODE_CHOICE:-}" = 1 ] && [ "$SERVER_MODE_OFFERED" != true ]; then
+    echo -e "${RED}✗${NC} Server deploy is available on Linux servers only."
+    echo "  To run it on this machine anyway:  bash setup.sh --force-server-mode"
+    exit 1
 fi
 
 case "${MODE_CHOICE:-}" in
@@ -760,7 +790,11 @@ case "${MODE_CHOICE:-}" in
     2) MODE="demo" ;;
     3) MODE="developer" ;;
     *)
-        echo -e "${RED}✗${NC} Invalid choice. Run the script again and choose 1, 2, or 3."
+        if [ "$SERVER_MODE_OFFERED" = true ]; then
+            echo -e "${RED}✗${NC} Invalid choice. Run the script again and choose 1, 2, or 3."
+        else
+            echo -e "${RED}✗${NC} Invalid choice. Run the script again and choose 2 or 3."
+        fi
         exit 1
         ;;
 esac
