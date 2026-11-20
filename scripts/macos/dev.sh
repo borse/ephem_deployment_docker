@@ -14,7 +14,8 @@
 #   • its own log                  logs/odoo-N.log
 #
 # Usage:
-#   bash scripts/macos/dev.sh create N [BRANCH]     # worktree odcaN + config (default branch: 18_ephem_2)
+#   bash scripts/macos/dev.sh new                   # add an instance: asks number, branch, database
+#   bash scripts/macos/dev.sh create N [BRANCH]     # the same without questions: worktree odcaN + config (default branch: 18_ephem_2)
 #   bash scripts/macos/dev.sh initdb N [MODULES]    # create database ephem_N (base, plus MODULES)
 #   bash scripts/macos/dev.sh start|stop|restart N  # N, several N, or all
 #   bash scripts/macos/dev.sh status                # ports, databases, branches, health
@@ -298,7 +299,7 @@ cmd_create() {
         ok "conf/odoo-$n.conf written (port $(inst_port "$n"), db $(inst_db "$n"))"
     fi
     write_agent_file "$n"
-    if pg_ready && ! db_exists "$(inst_db "$n")"; then
+    if [ "${CREATE_HINT:-1}" = 1 ] && pg_ready && ! db_exists "$(inst_db "$n")"; then
         echo ""
         echo "  Next:  $ME initdb $n     (creates database $(inst_db "$n"); once)"
         echo "         $ME start $n"
@@ -726,11 +727,142 @@ cmd_office() {
     esac
 }
 
+# ── new: add an instance, step by step ────────
+# The asking version of create + initdb + start: number, branch, database.
+# In the menu (bash manage.sh) it is the command `new`.
+
+# Asks for a branch of origin; sets PICKED_BRANCH. Enter takes the default,
+# a full name is taken as it is, anything else is searched for.
+pick_branch() {
+    local list a matches count i
+    list=$(core_git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin | grep -vx HEAD || true)
+    PICKED_BRANCH=""
+    while true; do
+        echo ""
+        echo "  Which branch?"
+        echo "    Enter          $DEFAULT_BRANCH (the default)"
+        echo "    a name         for example 18_national_main"
+        echo "    part of a name to choose among the branches that contain it (for example: uganda)"
+        echo "    ?              every branch of origin"
+        read -r -p "  Branch [$DEFAULT_BRANCH]: " a || return 1
+        a="${a:-$DEFAULT_BRANCH}"; a="${a#origin/}"
+        if [ "$a" = "?" ]; then
+            matches="$list"
+        elif printf '%s\n' "$list" | grep -qxF -- "$a"; then
+            PICKED_BRANCH="$a"; return 0
+        else
+            matches=$(printf '%s\n' "$list" | grep -iF -- "$a" || true)
+        fi
+        count=$(printf '%s\n' "$matches" | grep -c . || true)
+        if [ "$count" -eq 0 ]; then
+            warn "origin has no branch that contains '$a'."
+            continue
+        fi
+        if [ "$count" -eq 1 ]; then
+            PICKED_BRANCH="$matches"
+            echo "  → $PICKED_BRANCH"
+            return 0
+        fi
+        echo ""
+        printf '%s\n' "$matches" | awk '{ printf "    %3d) %s\n", NR, $0 }'
+        read -r -p "  Number (Enter to search again): " i || return 1
+        if [[ "$i" =~ ^[0-9]+$ ]] && [ "$i" -ge 1 ] && [ "$i" -le "$count" ]; then
+            PICKED_BRANCH=$(printf '%s\n' "$matches" | sed -n "${i}p")
+            return 0
+        fi
+    done
+}
+
+# A copy of another instance's database and filestore, taken while that
+# instance keeps running (pg_dump reads one consistent snapshot).
+copy_instance_db() {  # copy_instance_db FROM TO
+    local from="$1" to="$2" src dst
+    src="$(inst_db "$from")"; dst="$(inst_db "$to")"
+    "$PG_BIN/createdb" -E UTF8 -T template0 "$dst"
+    "$PG_BIN/pg_dump" -Fc --no-owner -d "$src" | "$PG_BIN/pg_restore" --no-owner --no-privileges -d "$dst" \
+        || warn "the copy reported errors (above): check $dst before relying on it"
+    if [ -d "$(filestore_dir "$from")" ]; then
+        mkdir -p "$(inst_data "$to")/filestore"
+        cp -R "$(filestore_dir "$from")" "$(filestore_dir "$to")"
+    fi
+    ok "database $dst is a copy of $src (filestore included)"
+}
+
+cmd_new() {
+    need_install; need_pg
+    [ -d "$CORE_CLONE/.git" ] || die "$CORE_CLONE is not a clone yet. Run: bash scripts/macos/install.sh"
+    local i free="" n a base dbsrc="" dbmode others=""
+    for i in 1 2 3 4 5 6 7 8 9; do
+        if [ -f "$(inst_conf "$i")" ] || [ -e "$(inst_dir "$i")" ]; then
+            others="$others $i"
+        elif [ -z "$free" ]; then
+            free="$i"
+        fi
+    done
+    [ -n "$free" ] || die "Instances 1 to 9 all exist: there is no number left."
+
+    step "New instance"
+    echo "  Existing:${others:- none}"
+    read -r -p "  Number of the new instance [$free]: " a || exit 1
+    n="${a:-$free}"
+    valid_n "$n" || die "'$n' is not an instance number (1 to 9)."
+    if [ -f "$(inst_conf "$n")" ] || [ -e "$(inst_dir "$n")" ]; then
+        die "Instance $n already exists. To move it to another branch: $ME switch $n BRANCH"
+    fi
+
+    fix_refspec
+    echo "  Fetching the branch list from origin…"
+    core_git fetch --prune --quiet origin || warn "Could not reach origin: choosing among the branches known from the last fetch."
+    pick_branch || exit 1
+    base="$PICKED_BRANCH"
+
+    echo ""
+    echo "  Database $(inst_db "$n"):"
+    echo "    1) empty: module base only (a few seconds)"
+    echo "    2) a copy of another instance's database"
+    echo "    3) none for now (later: $ME initdb $n, or restore $n SOURCE)"
+    read -r -p "  Choose [1-3] (default: 1): " dbmode || exit 1
+    dbmode="${dbmode:-1}"
+    if db_exists "$(inst_db "$n")"; then
+        warn "a database $(inst_db "$n") is already there: it is kept and used as it is."
+        dbmode=3
+    fi
+    if [ "$dbmode" = 2 ]; then
+        read -r -p "  Copy from instance (one of:$others): " dbsrc || exit 1
+        valid_n "$dbsrc" && db_exists "$(inst_db "$dbsrc")" \
+            || die "Instance '$dbsrc' has no database to copy. Nothing was created."
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Instance $n${NC}: $(inst_url "$n"), folder odca$n/, branch odca$n/$base (tracks origin/$base),"
+    case "$dbmode" in
+        2) echo "  database $(inst_db "$n") copied from $(inst_db "$dbsrc")." ;;
+        3) echo "  no new database." ;;
+        *) echo "  database $(inst_db "$n") empty." ;;
+    esac
+    confirm "  Create it?" Y || { echo "  Nothing was created."; return 0; }
+
+    CREATE_HINT=0 cmd_create "$n" "$base"
+    case "$dbmode" in
+        2) copy_instance_db "$dbsrc" "$n" ;;
+        3) ;;
+        *) cmd_initdb "$n" ;;
+    esac
+    echo ""
+    start_one "$n" || true
+    if [ "$dbmode" = 2 ]; then
+        echo "  If odca$n's branch differs from odca$dbsrc's, bring the copy in line with the code:"
+        echo "    $ME update $n"
+    fi
+    echo "  Folder for your editor or coding agent: $(inst_dir "$n")"
+}
+
 # ── Menu (bash manage.sh lands here on a native Mac setup) ─
 cmd_help() {
     cat <<EOF
 
-  create N [BRANCH]    worktree odcaN + config (default branch: $DEFAULT_BRANCH)
+  new                  add an instance: asks its number, its branch, its database
+  create N [BRANCH]    the same without questions: worktree odcaN + config (default branch: $DEFAULT_BRANCH)
   initdb N [MODULES]   create database ephem_N
   start | stop | restart  N…|all
   status               ports, databases, branches, health
@@ -780,6 +912,7 @@ dispatch() {
     local verb="${1:-status}"
     [ $# -gt 0 ] && shift
     case "$verb" in
+        new|add) cmd_new ;;
         create)  cmd_create "$@" ;;
         initdb)  cmd_initdb "$@" ;;
         start)   cmd_start "$@" ;;

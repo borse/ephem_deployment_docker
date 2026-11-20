@@ -113,7 +113,23 @@ every instance by `bash scripts/macos/dev.sh conf N` (then restart). The
 
 ## Daily commands
 
-`bash manage.sh` opens a menu of the same commands. Directly:
+`bash manage.sh` opens a menu of the same commands: it shows every instance,
+then you type a command (`restart 2`, `new`, ...).
+
+**Adding an instance** is `new`, in that menu or as
+`bash scripts/macos/dev.sh new`. It asks three things, then creates the
+worktree, the config, the `CLAUDE.md` and the database, and starts it:
+
+1. **Number**: Enter takes the lowest free one (up to 9).
+2. **Branch**: Enter takes `18_ephem_2`; a full name is taken as it is; part
+   of a name (`uganda`) lists the branches of origin that contain it, to pick
+   by number; `?` lists them all. The list is fetched first.
+3. **Database**: empty (module base only), a copy of another instance's
+   database and filestore (that instance keeps running), or none for now.
+
+`create N [BRANCH]` followed by `initdb N` does the same without questions.
+
+Every command, directly:
 
 ```bash
 cd ~/Developer/ephem_deployment_docker
@@ -131,7 +147,8 @@ bash scripts/macos/dev.sh fetch                  # fetch every branch from origi
 bash scripts/macos/dev.sh switch 2 18_national_main
 bash scripts/macos/dev.sh backup 2
 bash scripts/macos/dev.sh restore 2              # the latest backup of ephem_2; asks first
-bash scripts/macos/dev.sh create 4               # a fourth instance on 18_ephem_2
+bash scripts/macos/dev.sh new                    # add an instance: asks number, branch, database
+bash scripts/macos/dev.sh create 4               # the same without questions: a fourth instance on 18_ephem_2
 bash scripts/macos/dev.sh create 5 18_emt_v2     # a fifth on another branch
 bash scripts/macos/dev.sh initdb 4               # its empty database
 ```

@@ -391,6 +391,7 @@ Each `odcaN/` is a git worktree of one ePHEM clone, on its own local branch `odc
 
 ```bash
 bash manage.sh                               # the native menu (bash manage.sh --docker: the Docker one)
+                                             #   type `new` there to add an instance: it asks the number, the branch, the database
 bash scripts/macos/dev.sh status             # ports, databases, branches, running or not
 bash scripts/macos/dev.sh restart 2
 bash scripts/macos/dev.sh update 2 eoc_base  # update modules on ephem_2, then start again
