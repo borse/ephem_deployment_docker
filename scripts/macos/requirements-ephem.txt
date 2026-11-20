@@ -1,0 +1,29 @@
+# Python packages of the native macOS developer setup, installed into the
+# virtualenv AFTER Odoo's own requirements.txt (scripts/macos/install.sh).
+# Together they give the virtualenv what the borrs/ephem image has.
+
+# ── 1. What ePHEM adds to the image ──────────────────────────────
+# A mirror of requirements.in in borse/ephem-docker-image: when a package is
+# added or a pin moves there, do the same here. The reason for each one is
+# written in that file.
+epiweeks
+pandas<3.1
+google-auth
+odoorpc
+cairosvg              # needs Homebrew's cairo (libcairo), found through DYLD_FALLBACK_LIBRARY_PATH
+python-docx
+pypdfium2==5.15.2
+pypdf==6.21.4
+openpyxl==3.1.5       # replaces the 3.1.2 of Odoo's requirements.txt, as in the image
+
+# ── 2. What the odoo:18 image has beyond Odoo's requirements.txt ──
+# Ubuntu packages its Dockerfile installs (python3-magic, python3-odf, ...).
+python-magic          # needs Homebrew's libmagic
+odfpy
+pdfminer.six
+phonenumbers
+python-slugify
+rl-renderPM==4.0.3    # python3-renderpm: reportlab draws barcodes as images with it (Odoo's requirements.txt lists it for Windows only); builds against Homebrew's freetype
+
+# ── 3. Development only ──────────────────────────────────────────
+watchdog              # --dev=reload: restart when a Python file is saved

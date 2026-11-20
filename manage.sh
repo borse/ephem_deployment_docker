@@ -34,6 +34,27 @@
 set -uo pipefail
 
 V2_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# ── macOS: a native developer setup ───────────
+# scripts/macos/install.sh (bash setup.sh, Developer, Native) leaves the file
+# .macos-native here. With it, the instances are processes on the Mac, not
+# containers, and this menu is theirs: scripts/macos/dev.sh menu.
+#     bash manage.sh --docker     the Docker menu below, as on any machine
+# Nothing in this block runs on Linux or under WSL.
+if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    if [ "${1:-}" != "--docker" ] && [ -f "$V2_ROOT/.macos-native" ]; then
+        exec bash "$V2_ROOT/scripts/macos/dev.sh" menu "$@"
+    fi
+    # The Docker menu loads scripts/stack-lib.sh, which needs bash 4; macOS
+    # ships 3.2. Go on under Homebrew's bash when it is installed.
+    if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+        for V2_BASH in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+            if [ -x "$V2_BASH" ]; then exec "$V2_BASH" "$0" "$@"; fi
+        done
+    fi
+    if [ "${1:-}" = "--docker" ]; then shift; fi
+fi
+
 V2_BASE="$V2_ROOT/old_manage.sh"
 V2_CUT='^# ── Menu loop ─'
 V2_ME="bash manage.sh"

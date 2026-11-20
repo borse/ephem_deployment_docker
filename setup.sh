@@ -16,6 +16,17 @@ NC='\033[0m'
 # Shared with manage.sh and the scripts/ tools: the mode record (EPHEM_MODE in
 # .env), compose files per mode, the instance roster. scripts/stack-lib.sh
 EPHEM_ROOT="$(cd "$(dirname "$0")" && pwd)"
+
+# ── macOS: a bash that can run this ───────────
+# macOS still ships bash 3.2, and scripts/stack-lib.sh needs bash 4: loaded
+# by 3.2, this script stopped right here with "declare: -A: invalid option".
+# On a Mac only: go on under Homebrew's bash, which
+# scripts/macos/newer-bash.sh finds or offers to install.
+if [ "$(uname -s 2>/dev/null)" = Darwin ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    NEWER_BASH="$(bash "$EPHEM_ROOT/scripts/macos/newer-bash.sh")" || exit 1
+    exec "$NEWER_BASH" "$0" "$@"
+fi
+
 # shellcheck source=scripts/stack-lib.sh
 source "$EPHEM_ROOT/scripts/stack-lib.sh"
 ephem_mode    # what this checkout is now (from .env, else from the files)
@@ -1120,6 +1131,34 @@ if [ "$MODE" = "server" ]; then
         else
             echo -e "${GREEN}✓${NC} No automatic updates from here (HOST_AUTO_UPDATES=0); run setup again to turn them on"
         fi
+    fi
+fi
+
+# ── macOS, Developer: native or Docker ────────
+# On a Mac the developer setup can run Odoo straight on macOS instead of in
+# Docker (scripts/macos/): files are read at full speed and a restart takes
+# seconds. Asked on macOS only, and before Docker is checked, because the
+# native setup does not need Docker. Choosing Docker continues below exactly
+# as before; choosing Native hands off and never comes back here.
+if [ "$MODE" = "developer" ] && [ "$PLATFORM" = mac ]; then
+    echo ""
+    echo -e "${BOLD}How should the developer setup run on this Mac?${NC}"
+    echo ""
+    echo -e "  ${BOLD}1)${NC} Native (recommended on Mac) — Odoo runs on macOS itself: Homebrew PostgreSQL 16, one"
+    echo "                                  Python virtualenv, instances on :8010, :8020, :8030"
+    echo -e "  ${BOLD}2)${NC} Docker (as before)          — the containers of scripts/dev-instances.sh"
+    echo ""
+    # A checkout that already runs the Docker developer stack, and has no
+    # native setup, keeps Docker as the answer Enter gives.
+    DEFAULT_MAC_DEV=1
+    if [ -f .env ] && [ ! -f "$EPHEM_ROOT/.macos-native" ] \
+       && { [ "$EPHEM_MODE" = dev ] || [ "$EPHEM_MODE" = dev-multi ]; }; then
+        DEFAULT_MAC_DEV=2
+    fi
+    read -p "Choose [1-2] (default: $DEFAULT_MAC_DEV): " MAC_DEV_CHOICE
+    if [ "${MAC_DEV_CHOICE:-$DEFAULT_MAC_DEV}" != 2 ]; then
+        refuse_sudo_dev
+        exec bash "$EPHEM_ROOT/scripts/macos/install.sh"
     fi
 fi
 
