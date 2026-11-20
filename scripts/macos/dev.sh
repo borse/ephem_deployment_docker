@@ -311,6 +311,11 @@ cmd_create() {
 # The office converter the instances talk to (see cmd_office): on only when
 # OFFICE=1 is recorded in conf/native.env.
 odoo_env() {
+    # Colored log levels, as the Docker dev stack does (ODOO_PY_COLORS=1 in
+    # the compose override): Odoo then colors logs/odoo-N.log too, not only
+    # a terminal, so `logs N` looks like scripts/dev-logs.sh. ODOO_PY_COLORS=
+    # (set but empty) in the environment turns it off.
+    export ODOO_PY_COLORS="${ODOO_PY_COLORS-1}"
     if [ "$(nenv_get OFFICE)" = 1 ]; then
         export EPHEM_OFFICE_URL="http://127.0.0.1:2003" EPHEM_OFFICE_CONVERTER=1
     else
