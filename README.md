@@ -562,7 +562,7 @@ The first command rewrites the clone's refspec so future `git fetch` calls pick 
 
 ### Multi-Instance Dev — Several Odoo Servers Side by Side
 
-When you need to run two or more Odoo servers at once on the same machine — comparing 18 vs 16, testing a feature branch against `18_ephem_2`, or running a per-developer sandbox — choose the multi-instance layout in setup:
+When you need to run two or more Odoo servers at once on the same machine — comparing two branches, testing a feature branch against `18_ephem_2`, or running a per-developer sandbox — choose the multi-instance layout in setup:
 
 ```bash
 bash setup.sh    # → 3 (Developer), then 2 (Multi-instance) at the layout question
@@ -583,7 +583,7 @@ The same ports are open on the LAN by default, so a phone or a colleague on the 
 Pin each instance to a branch when you start it:
 
 ```bash
-bash scripts/dev-instances.sh up 1:18_ephem_2 2:16_national_dev 3
+bash scripts/dev-instances.sh up 1:18_ephem_2 2:18_national_main 3
 bash scripts/dev-instances.sh status      # ports + URLs + health
 bash scripts/dev-instances.sh down        # stop (keep data)
 bash scripts/dev-instances.sh down -v     # stop + wipe DB / filestore

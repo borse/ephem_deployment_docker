@@ -26,7 +26,7 @@
 #
 # Examples:
 #   bash scripts/dev-instances.sh up a b c
-#   bash scripts/dev-instances.sh up a:18_ephem_2 b:16_national_dev c
+#   bash scripts/dev-instances.sh up a:18_ephem_2 b:18_national_main c
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 

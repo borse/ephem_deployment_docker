@@ -1253,17 +1253,13 @@ if [ "$MODE" = "developer" ]; then
             fi
             echo ""
             echo "    1) $CORE_BRANCH          Odoo 18, current (recommended)"
-            echo "    2) 18_national_master  Odoo 18 stable"
-            echo "    3) 16_national_dev     Odoo 16 development"
-            echo "    4) 16_national_master  Odoo 16 stable"
-            echo "    5) Other (type a branch name)"
+            echo "    2) 18_national_main    Odoo 18 stable"
+            echo "    3) Other (type a branch name)"
             echo ""
-            read -p "  Choose [1-5] (default: 1): " BRANCH_CHOICE
+            read -p "  Choose [1-3] (default: 1): " BRANCH_CHOICE
             case "${BRANCH_CHOICE:-1}" in
-                2) BRANCH="18_national_master" ;;
-                3) BRANCH="16_national_dev" ;;
-                4) BRANCH="16_national_master" ;;
-                5) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-$CORE_BRANCH}" ;;
+                2) BRANCH="18_national_main" ;;
+                3) read -p "  Branch name on origin: " BRANCH; BRANCH="${BRANCH:-$CORE_BRANCH}" ;;
                 *) BRANCH="$CORE_BRANCH" ;;
             esac
 
@@ -1497,15 +1493,11 @@ if [ "$MODE" = "developer" ]; then
         echo "Which branch do you want to work on?"
         echo ""
         echo "  1) $CORE_BRANCH          Odoo 18, current (recommended)"
-        echo "  2) 18_national_master  Odoo 18 stable"
-        echo "  3) 16_national_dev     Odoo 16 development"
-        echo "  4) 16_national_master  Odoo 16 stable"
+        echo "  2) 18_national_main    Odoo 18 stable"
         echo ""
-        read -p "Choose [1-4] (default: 1): " BRANCH_CHOICE
+        read -p "Choose [1-2] (default: 1): " BRANCH_CHOICE
         case "${BRANCH_CHOICE:-1}" in
-            2) BRANCH="18_national_master" ;;
-            3) BRANCH="16_national_dev" ;;
-            4) BRANCH="16_national_master" ;;
+            2) BRANCH="18_national_main" ;;
             *) BRANCH="$CORE_BRANCH" ;;
         esac
 
