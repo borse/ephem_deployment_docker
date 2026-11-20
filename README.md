@@ -35,6 +35,7 @@ The script asks what you're setting up and walks you through the rest. The rest 
   - [Open ePHEM](#open-ephem)
 - [Mode 2 — Demo / Evaluate](#mode-2--demo--evaluate)
 - [Mode 3 — Developer](#mode-3--developer)
+  - [macOS: Native Developer Setup](#macos-native-developer-setup)
   - [Developer Prerequisites](#developer-prerequisites)
   - [GitHub SSH Key](#github-ssh-key)
   - [Returning Developers](#returning-developers)
@@ -79,7 +80,7 @@ Which of the three is offered depends on the machine:
 |---|---|---|---|
 | Linux | yes | yes | yes |
 | Windows (WSL) | hidden | yes | yes |
-| macOS | hidden | yes | yes |
+| macOS | hidden | yes | yes: native (recommended) or Docker |
 
 Under WSL and on macOS the first entry is replaced by one line, `Server deploy is available on Linux servers only.`, and the prompt reads `Choose [2-3]`; the other two keep their numbers. `bash setup.sh --force-server-mode` shows the entry on any machine, and a checkout that is already set up as a server keeps it, so running setup again there works as before.
 
@@ -97,7 +98,7 @@ Here's how each mode works:
 
 - **A server or computer** running one of:
   - **Linux** (Ubuntu 22.04+ recommended) — works out of the box
-  - **Mac** (macOS 12+) — install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/)
+  - **Mac** (macOS 12+) — install [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/) (not needed for the [native developer setup](#macos-native-developer-setup))
   - **Windows 10/11** — see [Windows — Run Inside WSL](#windows--run-inside-wsl) below
 - At least **2 GB RAM**
 - **SSH access** (for remote servers) or a terminal (for local machines)
@@ -365,6 +366,42 @@ docker compose down -v     # stop and delete all data
 ## Mode 3 — Developer
 
 For collaborators who want to edit ePHEM custom addons locally, with live reloading and PyCharm integration.
+
+### macOS: Native Developer Setup
+
+On a Mac, mode 3 asks one more question:
+
+```
+How should the developer setup run on this Mac?
+
+  1) Native (recommended on Mac) — Odoo runs on macOS itself: Homebrew PostgreSQL 16, one
+                                  Python virtualenv, instances on :8010, :8020, :8030
+  2) Docker (as before)          — the containers of scripts/dev-instances.sh
+```
+
+**Native** runs Odoo 18 straight on macOS: no VM between Odoo and your files, and a restart takes a couple of seconds. `setup.sh` hands off to `scripts/macos/install.sh`, which installs Homebrew (if missing), PostgreSQL 16 as a service, the Odoo 18.0 source, a Python 3.12 virtualenv with the packages of the `borrs/ephem` image, the patched wkhtmltopdf, and then creates the instances in `~/Developer/ephem` (this repo stays where it is):
+
+| Instance | URL | Database | Addons folder |
+|---|---|---|---|
+| 1 | `http://localhost:8010` | `ephem_1` | `~/Developer/ephem/odca1/` |
+| 2 | `http://localhost:8020` | `ephem_2` | `~/Developer/ephem/odca2/` |
+| 3 | `http://localhost:8030` | `ephem_3` | `~/Developer/ephem/odca3/` |
+
+Each `odcaN/` is a git worktree of one ePHEM clone, on its own local branch `odcaN/18_ephem_2` that tracks `origin/18_ephem_2`, with a `CLAUDE.md` describing the instance for a coding agent started there.
+
+```bash
+bash manage.sh                               # the native menu (bash manage.sh --docker: the Docker one)
+bash scripts/macos/dev.sh status             # ports, databases, branches, running or not
+bash scripts/macos/dev.sh restart 2
+bash scripts/macos/dev.sh update 2 eoc_base  # update modules on ephem_2, then start again
+bash scripts/macos/dev.sh logs 2
+bash scripts/macos/dev.sh switch 2 18_national_main
+bash scripts/macos/dev.sh backup 2           # and: restore 2
+```
+
+Full guide (layout, branches and merging back, PyCharm, restoring a database from another machine, differences from the image): **[docs/macos-native-dev.md](docs/macos-native-dev.md)**.
+
+**Docker (as before)** continues with the rest of this section, unchanged. Everything below describes the Docker developer setup, which is the only one on Linux and Windows (WSL).
 
 ### Developer Prerequisites
 
@@ -1334,6 +1371,7 @@ ephem-deploy/
 │   └── <other>/                    ← any repository added from manage.sh (+), one folder each
 │
 ├── scripts/
+│   ├── macos/                      ← Native developer setup on macOS (install.sh, dev.sh): docs/macos-native-dev.md
 │   ├── ssl-setup.sh                ← Set up HTTPS with Let's Encrypt
 │   ├── add-domain.sh               ← Add domains (one certificate each)
 │   ├── remove-domain.sh            ← Stop serving domains, delete their certificates
