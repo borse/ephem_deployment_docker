@@ -158,7 +158,16 @@ native_env() {
 # unix socket (no password). Maintenance only: Odoo never connects this way.
 psql_admin() { env -u PGHOST -u PGUSER -u PGPASSWORD "$PG_BIN/psql" -X -p "$(db_port)" -d postgres "$@"; }
 
-pg_ready() { "$PG_BIN/pg_isready" -q -h 127.0.0.1 -p "$(db_port)" 2>/dev/null; }
+# -d postgres: without a database name pg_isready asks for one named after
+# the role, and the server logs "database odoo does not exist" at every call.
+pg_ready() { "$PG_BIN/pg_isready" -q -h 127.0.0.1 -p "$(db_port)" -d postgres 2>/dev/null; }
+
+# Drop a database, as the superuser: the app role may not end every session
+# on it (Postgres's own autovacuum worker on a database that was just
+# created is one it cannot), and DROP ... WITH (FORCE) then fails for it.
+drop_db() {  # drop_db NAME
+    echo 'DROP DATABASE IF EXISTS :"db" WITH (FORCE);' | psql_admin -q -v ON_ERROR_STOP=1 -v db="$1"
+}
 
 # ── Instances ─────────────────────────────────
 # An instance is its number, 1 to 9. Everything else follows from it.

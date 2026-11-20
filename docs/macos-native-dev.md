@@ -129,6 +129,39 @@ worktree, the config, the `CLAUDE.md` and the database, and starts it:
 
 `create N [BRANCH]` followed by `initdb N` does the same without questions.
 
+**Removing an instance** is `remove N`, in the menu or as
+`bash scripts/macos/dev.sh remove N`. It lists what goes, offers a backup of
+the database first, and asks you to type the database name:
+
+- deleted: the database `ephem_N`, `data/N/` (filestore, sessions), the folder
+  `odcaN/`, `conf/odoo-N.conf` and the log;
+- kept: the backups, and every commit. A branch `odcaN/...` that holds commits
+  origin does not have stays in the `ePHEM/` clone (`git -C ePHEM log
+  odcaN/18_ephem_2`); one with nothing of its own is deleted with the instance;
+- it stops, changing nothing, when `odcaN/` has uncommitted changes: commit
+  them (they then stay on the branch) or pass `--force` to lose them.
+
+### Ports
+
+The port is not chosen and not stored: it follows from the instance number.
+
+| Instance | Port | |
+|---|---|---|
+| N | `80N0` | 1 → 8010, 2 → 8020, ... 9 → 8090 |
+
+- That is why an instance is a number from 1 to 9, and why removing instance 2
+  leaves 8020 free without moving the others: instance 3 stays on 8030. `new`
+  proposes the lowest free number, so the gap is filled first.
+- Instances listen on `127.0.0.1` only (`BIND_HOST` in `conf/native.env`).
+- `start` checks the port first and says which program holds it when it is
+  taken, instead of starting and failing.
+- `80N2` (8012, 8022, ...) is written to the config as `gevent_port` and is
+  not opened: Odoo only uses it when it runs with workers. In the threaded
+  mode used here, live updates (the bus) go through `80N0` too.
+- The Docker multi-instance stack uses the same numbers, but by position: its
+  first instance is 8010 whatever its name. Run one stack or the other.
+- PostgreSQL is one server for all of them, on `127.0.0.1:5432` (`DB_PORT`).
+
 Every command, directly:
 
 ```bash
@@ -148,6 +181,7 @@ bash scripts/macos/dev.sh switch 2 18_national_main
 bash scripts/macos/dev.sh backup 2
 bash scripts/macos/dev.sh restore 2              # the latest backup of ephem_2; asks first
 bash scripts/macos/dev.sh new                    # add an instance: asks number, branch, database
+bash scripts/macos/dev.sh remove 4               # delete an instance (asks first; commits and backups are kept)
 bash scripts/macos/dev.sh create 4               # the same without questions: a fourth instance on 18_ephem_2
 bash scripts/macos/dev.sh create 5 18_emt_v2     # a fifth on another branch
 bash scripts/macos/dev.sh initdb 4               # its empty database
@@ -163,7 +197,7 @@ Compared with `scripts/dev-instances.sh` (Docker):
 |---|---|---|
 | `dev-instances.sh up 1 2 3` | `dev.sh create N [BRANCH]`, then `start` | creating an instance and starting it are two steps |
 | `dev-instances.sh down` | `dev.sh stop all` | data is kept |
-| `dev-instances.sh down -v` | none | see [Removing it](#removing-it) |
+| `dev-instances.sh down -v` | `dev.sh remove N` | one instance at a time, and it asks first |
 | `dev-instances.sh status`, `logs N` | the same words | |
 | `dev-logs.sh N -u MODULE` | `dev.sh update N MODULE`, then `logs N` | |
 | `dev-logs.sh N -i MODULE` | `dev.sh install N MODULE` | |
@@ -409,15 +443,13 @@ then run `install.sh` again.
 
 ## Removing it
 
-Nothing here is done by a script; these delete data.
+One instance: `bash scripts/macos/dev.sh remove N`. The whole setup is not
+done by a script; these delete data.
 
 ```bash
 bash scripts/macos/dev.sh stop all
 
-# one instance (N = 3):
-/opt/homebrew/opt/postgresql@16/bin/dropdb ephem_3
-git -C ~/Developer/ephem/ePHEM worktree remove ../odca3      # refuses if it has uncommitted changes
-rm -rf ~/Developer/ephem/data/3 ~/Developer/ephem/conf/odoo-3.conf* ~/Developer/ephem/logs/odoo-3.log
+# one instance: bash scripts/macos/dev.sh remove 3   (see Daily commands)
 
 # everything:
 rm ~/Developer/ephem_deployment_docker/.macos-native       # manage.sh is the Docker menu again

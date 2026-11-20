@@ -15,7 +15,8 @@
 #
 # Usage:
 #   bash scripts/macos/dev.sh new                   # add an instance: asks number, branch, database
-#   bash scripts/macos/dev.sh create N [BRANCH]     # the same without questions: worktree odcaN + config (default branch: 18_ephem_2)
+#   bash scripts/macos/dev.sh remove N              # delete an instance: database, files, folder (asks first)
+#   bash scripts/macos/dev.sh create N [BRANCH]     # the same as new, without questions: worktree odcaN + config (default branch: 18_ephem_2)
 #   bash scripts/macos/dev.sh initdb N [MODULES]    # create database ephem_N (base, plus MODULES)
 #   bash scripts/macos/dev.sh start|stop|restart N  # N, several N, or all
 #   bash scripts/macos/dev.sh status                # ports, databases, branches, health
@@ -657,7 +658,7 @@ cmd_restore() {
 
     was="$(inst_pid "$n")"
     [ -n "$was" ] && stop_one "$n"
-    if db_exists "$db"; then "$PG_BIN/dropdb" --force "$db"; fi
+    if db_exists "$db"; then drop_db "$db"; fi
     "$PG_BIN/createdb" -E UTF8 -T template0 "$db"
     case "$dump" in
         *.dump)   "$PG_BIN/pg_restore" --no-owner --no-privileges -d "$db" "$dump" ;;
@@ -857,12 +858,108 @@ cmd_new() {
     echo "  Folder for your editor or coding agent: $(inst_dir "$n")"
 }
 
+# ── remove: take an instance away ─────────────
+# Deletes the instance's database, filestore, worktree folder, config and
+# log. Kept: its backups, and every commit (a branch odcaN/… that holds
+# commits its origin branch does not have is left in the ePHEM clone).
+# Stops, without touching anything, when the worktree has uncommitted
+# changes (--force discards them). Asks for the database name first.
+cmd_remove() {
+    need_install; need_pg
+    local yes=0 force=0 backup="" args=() a
+    for a in "$@"; do
+        case "$a" in
+            --yes|-y)    yes=1 ;;
+            --force)     force=1 ;;
+            --no-backup) backup=no ;;
+            *)           args+=("$a") ;;
+        esac
+    done
+    need_n "${args[0]:-}" remove
+    local n="${args[0]}" db dir conf has_db=0 b branches="" kept=""
+    db="$(inst_db "$n")"; dir="$(inst_dir "$n")"; conf="$(inst_conf "$n")"
+    [ -f "$conf" ] || [ -e "$dir" ] || die "There is no instance $n."
+    db_exists "$db" && has_db=1
+
+    if [ -e "$dir/.git" ] && inst_dirty "$n" && [ "$force" != 1 ]; then
+        err "odca$n has uncommitted changes: commit them (they then stay on its branch), or discard them, first."
+        git -C "$dir" status --short | head -20 >&2
+        echo "  To remove the instance and lose these changes:  $ME remove $n --force" >&2
+        exit 1
+    fi
+    # The local branches of this instance, and which of them hold commits
+    # that are nowhere on origin.
+    branches=$(core_git for-each-ref --format='%(refname:short)' "refs/heads/odca$n/" 2>/dev/null || true)
+    for b in $branches; do
+        if [ -n "$(core_git rev-list -1 "$b" --not --remotes=origin 2>/dev/null || true)" ]; then kept="$kept $b"; fi
+    done
+
+    echo ""
+    echo -e "  ${BOLD}Remove instance $n${NC}  ($(inst_url "$n"))"
+    if [ "$has_db" = 1 ]; then
+        echo "    database   $db: DROPPED"
+    else
+        echo "    database   $db: none"
+    fi
+    echo "    files      $(inst_data "$n") (filestore, sessions): DELETED"
+    if [ -e "$dir" ]; then
+        echo "    folder     $dir: DELETED$( [ "$force" = 1 ] && inst_dirty "$n" && echo ', uncommitted changes included')"
+    fi
+    echo "    config     $conf, its log: DELETED"
+    if [ -n "$kept" ]; then
+        echo "    commits    kept: branch(es)$kept hold commits that origin does not have and stay in $CORE_CLONE"
+    else
+        echo "    commits    nothing to keep: the instance has no commit that origin does not have"
+    fi
+    echo "    backups    $BACKUP_DIR: kept"
+    echo ""
+    if [ "$yes" != 1 ]; then
+        if [ "$has_db" = 1 ] && [ -z "$backup" ]; then
+            if confirm "  Back up $db first?" Y; then backup=yes; else backup=no; fi
+        fi
+        read -r -p "  Type the database name ($db) to remove instance $n: " a || a=""
+        [ "$a" = "$db" ] || { echo "  Nothing changed."; exit 1; }
+    fi
+
+    if [ "$has_db" = 1 ] && [ "$backup" = yes ]; then cmd_backup "$n"; fi
+    stop_one "$n"
+    if [ "$has_db" = 1 ]; then
+        drop_db "$db"
+        db_exists "$db" && die "database $db is still there: nothing else was removed."
+        ok "database $db dropped"
+    fi
+    if [ -e "$dir/.git" ]; then
+        if [ "$force" = 1 ]; then
+            core_git worktree remove --force "$dir"
+        else
+            core_git worktree remove "$dir"
+        fi
+    elif [ -d "$dir" ]; then
+        rmdir "$dir" 2>/dev/null || warn "$dir is not a worktree and not empty: left where it is"
+    fi
+    core_git worktree prune
+    ok "odca$n/ removed"
+    for b in $branches; do
+        case " $kept " in
+            *" $b "*) echo "  branch $b kept (it has commits of its own)" ;;
+            *)        core_git branch -D "$b" >/dev/null 2>&1 && echo "  branch $b deleted (nothing of its own on it)" ;;
+        esac
+    done
+    rm -rf "$(inst_data "$n")"
+    rm -f "$conf" "$conf.bak" "$(inst_log "$n")" "$(inst_pidf "$n")"
+    ok "instance $n removed; port $(inst_port "$n") is free again"
+    if [ -n "$kept" ]; then
+        echo "  Its commits: git -C $CORE_CLONE log$kept"
+    fi
+}
+
 # ── Menu (bash manage.sh lands here on a native Mac setup) ─
 cmd_help() {
     cat <<EOF
 
   new                  add an instance: asks its number, its branch, its database
-  create N [BRANCH]    the same without questions: worktree odcaN + config (default branch: $DEFAULT_BRANCH)
+  remove N             delete an instance: its database, files and folder (asks first; commits are kept)
+  create N [BRANCH]    the same as new, without questions: worktree odcaN + config (default branch: $DEFAULT_BRANCH)
   initdb N [MODULES]   create database ephem_N
   start | stop | restart  N…|all
   status               ports, databases, branches, health
@@ -902,8 +999,11 @@ cmd_menu() {
             menu)       continue ;;
             status)     continue ;;
         esac
-        # A subshell: a command that stops with an error brings the menu back.
-        ( dispatch "$@" ) || true
+        # Its own process, not a subshell: inside `( … ) || true` bash turns
+        # `set -e` off, and a command that failed halfway would carry on. This
+        # way a failed command stops as it does outside the menu, and the menu
+        # comes back.
+        bash "$0" "$@" || true
         read -r -p "  Enter to continue " line || exit 0
     done
 }
@@ -913,6 +1013,7 @@ dispatch() {
     [ $# -gt 0 ] && shift
     case "$verb" in
         new|add) cmd_new ;;
+        remove)  cmd_remove "$@" ;;
         create)  cmd_create "$@" ;;
         initdb)  cmd_initdb "$@" ;;
         start)   cmd_start "$@" ;;
