@@ -387,7 +387,7 @@ How should the developer setup run on this Mac?
 | 2 | `http://localhost:8020` | `ephem_2` | `~/Developer/ephem/odca2/` |
 | 3 | `http://localhost:8030` | `ephem_3` | `~/Developer/ephem/odca3/` |
 
-Each `odcaN/` is a git worktree of one ePHEM clone, on its own local branch `odcaN/18_ephem_2` that tracks `origin/18_ephem_2`, with a `CLAUDE.md` describing the instance for a coding agent started there.
+Each `odcaN/` has the same layout as in the Docker developer stack: `odcaN/ePHEM-core/` is a git worktree of one ePHEM clone, on its own local branch `odcaN/18_ephem_2` that tracks `origin/18_ephem_2`, and other repositories of that instance go next to it (`bash scripts/macos/dev.sh repo add 3 borse/ePHEM_uganda`). A `CLAUDE.md` in `odcaN/` describes the instance for a coding agent started there.
 
 ```bash
 bash manage.sh                               # the native menu (bash manage.sh --docker: the Docker one)

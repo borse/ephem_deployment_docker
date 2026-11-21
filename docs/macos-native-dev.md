@@ -13,6 +13,7 @@ developer mode is the Docker stack described in the [README](../README.md#mode-3
 - [Layout](#layout)
 - [Daily commands](#daily-commands)
 - [Branches and worktrees](#branches-and-worktrees)
+- [More repositories in an instance](#more-repositories-in-an-instance)
 - [One coding agent per instance](#one-coding-agent-per-instance)
 - [PyCharm](#pycharm)
 - [Databases: create, back up, restore](#databases-create-back-up-restore)
@@ -25,9 +26,9 @@ developer mode is the Docker stack described in the [README](../README.md#mode-3
 
 ## What you get
 
-| Instance | URL | Database | Addons folder | Config | Log |
+| Instance | URL | Database | Folder | Config | Log |
 |---|---|---|---|---|---|
-| 1 | `http://localhost:8010` | `ephem_1` | `odca1/` | `conf/odoo-1.conf` | `logs/odoo-1.log` |
+| 1 | `http://localhost:8010` | `ephem_1` | `odca1/` (`ePHEM-core/` + repos) | `conf/odoo-1.conf` | `logs/odoo-1.log` |
 | 2 | `http://localhost:8020` | `ephem_2` | `odca2/` | `conf/odoo-2.conf` | `logs/odoo-2.log` |
 | 3 | `http://localhost:8030` | `ephem_3` | `odca3/` | `conf/odoo-3.conf` | `logs/odoo-3.log` |
 
@@ -89,10 +90,13 @@ home*, `~/Developer/ephem` unless you chose another folder:
 ├── odoo/               Odoo source, branch 18.0 (read only for you)
 ├── venv/               Python 3.12 virtualenv, shared by every instance
 ├── ePHEM/              the main clone of borse/ePHEM: the base checkout
-├── odca1/              instance 1: a git worktree of ePHEM/
+├── odca1/              instance 1, the same layout as the Docker developer stack:
+│   ├── CLAUDE.md           for the coding agent of this instance (not in any repo)
+│   ├── ePHEM-core/         a git worktree of ePHEM/
+│   └── ePHEM_uganda/       any other repository of this instance (dev.sh repo add)
 ├── odca2/              instance 2
 ├── odca3/              instance 3
-├── extra-addons/       other addon repositories, one subfolder each
+├── extra-addons/       addon repositories every instance uses, one subfolder each
 ├── tools/              wkhtmltox/ (patched wkhtmltopdf), node/ (rtlcss)
 ├── conf/
 │   ├── native.env      settings and the database password (mode 600)
@@ -106,10 +110,15 @@ home*, `~/Developer/ephem` unless you chose another folder:
 The deployment repo keeps one file about it, `.macos-native` (not in git),
 which records where the native home is. `bash manage.sh` reads it.
 
-A repository cloned into `extra-addons/NAME/` is added to the `addons_path` of
-every instance by `bash scripts/macos/dev.sh conf N` (then restart). The
-`borrs/ephem` image itself contains no addon repository: the only one is
-`borse/ePHEM`.
+A repository for **one** instance goes next to its `ePHEM-core/`: see
+[More repositories in an instance](#more-repositories-in-an-instance). A
+repository cloned into `extra-addons/NAME/` is added to the `addons_path` of
+**every** instance by `bash scripts/macos/dev.sh conf N` (then restart).
+
+Instances made before this layout had the worktree as `odcaN/` itself.
+`bash scripts/macos/dev.sh migrate all` moves them (stop them first if PyCharm
+runs one); `status` points out any that are left, and `install.sh` does it on
+its next run.
 
 ## Daily commands
 
@@ -214,7 +223,7 @@ After the Mac restarts, PostgreSQL comes back by itself; the instances do not:
 
 ## Branches and worktrees
 
-There is one clone, `ePHEM/`, and each `odcaN/` is a **git worktree** of it:
+There is one clone, `ePHEM/`, and each `odcaN/ePHEM-core/` is a **git worktree** of it:
 its own files and its own checked-out branch, sharing a single `.git`. One
 `fetch` serves every instance, and a commit made in one instance is visible to
 the others at once, with no push.
@@ -224,10 +233,10 @@ sits on `18_ephem_2` itself: instance N on branch `B` works on **its own local
 branch `odcaN/B`, which tracks `origin/B`**.
 
 ```
-ePHEM/    18_ephem_2            the base checkout: where work is merged and pushed
-odca1/    odca1/18_ephem_2      tracks origin/18_ephem_2
-odca2/    odca2/18_ephem_2      tracks origin/18_ephem_2
-odca3/    odca3/18_ephem_2      tracks origin/18_ephem_2
+ePHEM/               18_ephem_2            the base checkout: where work is merged and pushed
+odca1/ePHEM-core/    odca1/18_ephem_2      tracks origin/18_ephem_2
+odca2/ePHEM-core/    odca2/18_ephem_2      tracks origin/18_ephem_2
+odca3/ePHEM-core/    odca3/18_ephem_2      tracks origin/18_ephem_2
 ```
 
 Why branches and not a detached HEAD: with one agent per instance, each
@@ -245,7 +254,7 @@ them up again.
 
 ```bash
 bash scripts/macos/dev.sh fetch
-git -C ~/Developer/ephem/odca2 pull          # merges origin/18_ephem_2 into odca2/18_ephem_2
+bash scripts/macos/dev.sh repo pull 2        # ePHEM-core and the instance's other repos, fast-forward only
 bash scripts/macos/dev.sh update 2
 ```
 
@@ -261,10 +270,10 @@ git push
 or as a branch of its own on GitHub, for a pull request:
 
 ```bash
-git -C ~/Developer/ephem/odca2 push origin odca2/18_ephem_2:my-feature
+git -C ~/Developer/ephem/odca2/ePHEM-core push origin odca2/18_ephem_2:my-feature
 ```
 
-A plain `git push` inside `odcaN/` stops with "the upstream branch of your
+A plain `git push` inside `odcaN/ePHEM-core/` stops with "the upstream branch of your
 current branch does not match the name of your current branch". That is the
 intended guard: an instance (or its agent) cannot push to the shared base
 branch by accident.
@@ -273,23 +282,57 @@ branch by accident.
 `git worktree remove`, `git gc --prune=now` or `git stash clear` casually: the
 object store and the stash are shared by all instances.
 
+## More repositories in an instance
+
+As in the Docker developer stack (`manage.sh` → `+ N`), an instance can have
+other addon repositories next to `ePHEM-core/`, a country's for example:
+
+```bash
+bash scripts/macos/dev.sh repo add 3 borse/ePHEM_uganda           # → odca3/ePHEM_uganda/
+bash scripts/macos/dev.sh repo add 3 borse/ePHEM_uganda main      # a given branch
+bash scripts/macos/dev.sh repo add 3 git@github.com:OCA/web.git --name oca-web
+bash scripts/macos/dev.sh repo list                               # every instance's repositories
+bash scripts/macos/dev.sh repo pull 3                             # ePHEM-core and the others, fast-forward only
+bash scripts/macos/dev.sh repo switch 3 ePHEM_uganda BRANCH
+bash scripts/macos/dev.sh repo remove 3 ePHEM_uganda              # asks first
+```
+
+- `owner/name` means GitHub over SSH, with the same key as the ePHEM clone.
+  Any git URL or a local path works too.
+- Without a branch, it takes the branch `ePHEM-core` follows (`18_ephem_2`)
+  when the repository has one by that name, else the repository's default.
+- The instance's `addons_path` becomes `ePHEM-core`, then its repositories,
+  then `extra-addons/*`, then Odoo's addons. On a module name clash
+  `ePHEM-core` wins (`repo add` says so). A running instance is restarted.
+- `update N` without modules covers every module of these repositories as
+  well, as in Docker. Install new ones with `install N MODULE` or Apps →
+  Update Apps List.
+- Each is an ordinary clone (one per instance, so instances can follow
+  different branches of it), on the shared branch itself: unlike
+  `ePHEM-core` there is no `odcaN/` branch guarding against a push.
+- `repo remove` and `remove N` refuse while one has uncommitted or unpushed
+  work (`--force` deletes it anyway). Uninstall its modules from the database
+  before removing a repository.
+
 ## One coding agent per instance
 
-`create` and `switch` write a `CLAUDE.md` into each `odcaN/` with the instance
-number, URL, database, branch, config and log paths, the `dev.sh` commands for
-restart and module update, and the rule to stay inside this worktree and this
-database. Start the agent in `~/Developer/ephem/odcaN`.
+`create`, `switch` and `repo add/remove` write a `CLAUDE.md` into each
+`odcaN/` with the instance number, URL, database, its repositories and their
+branches, config and log paths, the `dev.sh` commands for restart and module
+update, and the rule to stay inside this folder and this database. Start the
+agent in `~/Developer/ephem/odcaN` (Claude Code also reads it when started in
+a repository below it).
 
-The file is not tracked: it is listed in the clone's `.git/info/exclude`, which
-all worktrees share. If the ePHEM repository ever tracks a `CLAUDE.md` of its
-own, that one is left alone and the instance file is written as
-`CLAUDE.local.md` instead. A file you wrote yourself (without the first-line
-marker) is never overwritten.
+The file sits in `odcaN/` itself, outside every repository, so nothing keeps
+it out of git. A file you wrote yourself (without the first-line marker) is
+never overwritten.
 
 ## PyCharm
 
-- Open `~/Developer/ephem/odcaN` (one window per instance), or
-  `~/Developer/ephem` to see all of them.
+- Open `~/Developer/ephem` to see every instance in one window (the lighter
+  choice), or `~/Developer/ephem/odcaN` for one. Add each repository
+  (`odcaN/ePHEM-core`, `odcaN/ePHEM_uganda`, …) under Settings → Version
+  Control → Directory Mappings, so each shows its own branch.
 - Interpreter: **Add Interpreter → Existing**, `~/Developer/ephem/venv/bin/python`.
 - Mark `~/Developer/ephem/odoo` as a source root (or attach it as a content
   root) for code completion into Odoo.
@@ -410,10 +453,20 @@ or the other. `dev.sh start` says so when a port is taken.
 | What | How |
 |---|---|
 | The deployment scripts | `git pull` in the deployment repo |
-| ePHEM code | `dev.sh fetch`, `git -C odcaN pull`, `dev.sh update N` |
+| ePHEM code | `dev.sh fetch`, `dev.sh repo pull N`, `dev.sh update N` |
 | Odoo source | `bash scripts/macos/install.sh --update-odoo`, then `dev.sh update N base` per instance |
 | Python packages | change `requirements-ephem.txt` (or pull Odoo), run `install.sh` again |
 | PostgreSQL minor version | `brew upgrade postgresql@16` |
+
+**A Mac set up before the `ePHEM-core/` layout** (each `odcaN/` was itself the
+ePHEM worktree): after `git pull` in the deployment repo, open `bash manage.sh`.
+It lists the old-layout instances and offers to move them into
+`odcaN/ePHEM-core/` (Enter says yes). Branches, commits and uncommitted changes
+move with them, and running instances are restarted. Stop an instance that
+PyCharm runs first. Without the menu: `bash scripts/macos/dev.sh migrate all`.
+Afterwards, reopen editors and coding agents that were opened in `odcaN/`, and
+in PyCharm point the git roots at `odcaN/ePHEM-core` (Settings → Version
+Control → Directory Mappings).
 
 ## Troubleshooting
 

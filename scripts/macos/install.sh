@@ -322,7 +322,7 @@ FIRST="${OPT_INSTANCES%% *}"
 cat <<EOF
 
 ─────────────────────────────────────────
-Done. Each instance: its folder $NATIVE_HOME/odcaN (open that in your editor
+Done. Each instance: its folder $NATIVE_HOME/odcaN (ePHEM-core/ plus its other repositories; open that in your editor
 or start your coding agent there), its database ephem_N, its port 80N0.
 Login of a new database: admin / admin.  Master password: $(admin_passwd).
 

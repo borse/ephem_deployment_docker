@@ -17,8 +17,13 @@
 #       odoo/               Odoo source, branch 18.0
 #       venv/               one Python 3.12 virtualenv for every instance
 #       ePHEM/              the main clone of borse/ePHEM (the base branch)
-#       odca1/ odca2/ ...   one git worktree of that clone per instance
-#       extra-addons/       other addon repositories, one subfolder each
+#       odca1/ odca2/ ...   one folder per instance, the same layout as the
+#                           Docker developer stack:
+#           CLAUDE.md           what a coding agent started here has to know
+#           ePHEM-core/         a git worktree of ePHEM/ (EPHEM_CORE_NAME)
+#           <repo>/             other addon repositories of this instance
+#                               only (dev.sh repo add N …), one clone each
+#       extra-addons/       addon repositories every instance uses
 #       tools/              patched wkhtmltopdf, rtlcss
 #       conf/               odoo-N.conf per instance, native.env (settings)
 #       data/N/             filestore and sessions of instance N
@@ -88,6 +93,10 @@ native_paths() {  # native_paths [HOME]: every path below, from one root
     RUN_DIR="$NATIVE_HOME/run"
     BACKUP_DIR="$NATIVE_HOME/backups"
     NATIVE_ENV="$CONF_DIR/native.env"
+    # The ePHEM worktree's folder name inside each odcaN/: ePHEM-core, the
+    # name the Docker developer stack uses (EPHEM_CORE_NAME in its .env).
+    CORE_NAME="$(grep '^EPHEM_CORE_NAME=' "$NATIVE_ENV" 2>/dev/null | head -1 | cut -d'=' -f2- || true)"
+    CORE_NAME="${CORE_NAME:-ePHEM-core}"
 }
 native_paths
 
@@ -175,7 +184,8 @@ valid_n()     { [[ "${1:-}" =~ ^[1-9]$ ]]; }
 inst_port()   { echo "80${1}0"; }
 inst_gevent() { echo "80${1}2"; }
 inst_db()     { echo "ephem_$1"; }
-inst_dir()    { echo "$NATIVE_HOME/odca$1"; }
+inst_dir()    { echo "$NATIVE_HOME/odca$1"; }          # the instance's folder
+inst_core()   { echo "$NATIVE_HOME/odca$1/$CORE_NAME"; }  # its ePHEM worktree
 inst_conf()   { echo "$CONF_DIR/odoo-$1.conf"; }
 inst_log()    { echo "$LOG_DIR/odoo-$1.log"; }
 inst_pidf()   { echo "$RUN_DIR/odoo-$1.pid"; }
@@ -208,12 +218,36 @@ port_owner() {
 # DIR directly holds Odoo modules (name/__manifest__.py).
 dir_has_modules() { local m; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && return 0; done; return 1; }
 
-# addons_path of instance N: its own worktree first (its modules win over a
-# same-named one elsewhere), then every repository under extra-addons/, then
-# Odoo's own addons. odoo/odoo/addons (base) is added by Odoo itself.
+# Instance N still has the layout from before ePHEM-core/: odcaN/ itself is
+# the worktree. `dev.sh migrate N` (and install.sh, through create) moves it.
+inst_old_layout() { [ -e "$(inst_dir "$1")/.git" ]; }
+
+# The repositories of instance N other than ePHEM-core: the folders next to
+# it in odcaN/, by name. Hidden folders do not count.
+inst_repos() {
+    local d name
+    inst_old_layout "$1" && return 0
+    for d in "$(inst_dir "$1")"/*/; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        [ "$name" = "$CORE_NAME" ] && continue
+        echo "$name"
+    done
+}
+
+# addons_path of instance N, the order of the Docker stack: ePHEM-core first
+# (its modules win over a same-named one elsewhere), then the instance's own
+# repositories, then every repository under extra-addons/, then Odoo's own
+# addons. odoo/odoo/addons (base) is added by Odoo itself. A folder without
+# modules at its top level is left out (Odoo would refuse it).
 inst_addons_path() {
-    local out d
-    out="$(inst_dir "$1")"
+    local out d r
+    if inst_old_layout "$1"; then out="$(inst_dir "$1")"; else out="$(inst_core "$1")"; fi
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        d="$(inst_dir "$1")/$r"
+        dir_has_modules "$d" && out="$out,$d"
+    done < <(inst_repos "$1")
     for d in "$EXTRA_ADDONS"/*/; do
         [ -d "$d" ] || continue
         dir_has_modules "$d" && out="$out,${d%/}"

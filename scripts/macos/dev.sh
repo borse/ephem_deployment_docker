@@ -8,7 +8,9 @@
 #
 # Instance N gets:
 #   • its own port                 80N0 (8010, 8020, 8030, …)
-#   • its own addons folder        odcaN/, a git worktree of the ePHEM clone
+#   • its own folder               odcaN/: ePHEM-core/ (a git worktree of the
+#                                  ePHEM clone) plus any repository added next
+#                                  to it (dev.sh repo add N …), as in Docker
 #   • its own odoo config          conf/odoo-N.conf
 #   • its own database + filestore ephem_N, data/N/
 #   • its own log                  logs/odoo-N.log
@@ -16,7 +18,7 @@
 # Usage:
 #   bash scripts/macos/dev.sh new                   # add an instance: asks number, branch, database
 #   bash scripts/macos/dev.sh remove N              # delete an instance: database, files, folder (asks first)
-#   bash scripts/macos/dev.sh create N [BRANCH]     # the same as new, without questions: worktree odcaN + config (default branch: 18_ephem_2)
+#   bash scripts/macos/dev.sh create N [BRANCH]     # the same as new, without questions: odcaN/ePHEM-core + config (default branch: 18_ephem_2)
 #   bash scripts/macos/dev.sh initdb N [MODULES]    # create database ephem_N (base, plus MODULES)
 #   bash scripts/macos/dev.sh start|stop|restart N  # N, several N, or all
 #   bash scripts/macos/dev.sh status                # ports, databases, branches, health
@@ -24,7 +26,13 @@
 #   bash scripts/macos/dev.sh update N [MODULES]    # -u MODULES (default: every ePHEM module), then start again
 #   bash scripts/macos/dev.sh install N MODULES     # -i MODULES, then start again
 #   bash scripts/macos/dev.sh shell N               # Odoo shell on ephem_N
-#   bash scripts/macos/dev.sh switch N BRANCH       # move odcaN to another branch
+#   bash scripts/macos/dev.sh switch N BRANCH       # move odcaN/ePHEM-core to another branch
+#   bash scripts/macos/dev.sh repo add N REPO [BRANCH]  # clone another addon repository into odcaN/ (owner/name, or a git URL)
+#   bash scripts/macos/dev.sh repo list [N]         # each instance's repositories: branch, modules, state
+#   bash scripts/macos/dev.sh repo pull N [NAME]    # pull ePHEM-core and the instance's repositories (fast-forward only)
+#   bash scripts/macos/dev.sh repo switch N NAME BRANCH  # move one added repository to another branch
+#   bash scripts/macos/dev.sh repo remove N NAME    # delete an added repository (asks first)
+#   bash scripts/macos/dev.sh migrate [N|all]       # move instances of the old layout (odcaN/ = the worktree) into odcaN/ePHEM-core/
 #   bash scripts/macos/dev.sh fetch                 # fetch every branch from origin (one fetch serves all instances)
 #   bash scripts/macos/dev.sh backup N              # pg_dump + filestore into backups/
 #   bash scripts/macos/dev.sh restore N [SOURCE]    # replace ephem_N from a backup (asks first)
@@ -34,7 +42,7 @@
 #
 # Branches. One clone (ePHEM/) and one worktree per instance share a single
 # .git, and git refuses to check the same branch out twice. So instance N on
-# BRANCH works on its own local branch, odcaN/BRANCH, which tracks
+# BRANCH works on its own local branch, odcaN/BRANCH (in odcaN/ePHEM-core), which tracks
 # origin/BRANCH: three instances can all follow 18_ephem_2, each commits on
 # its own branch, and every worktree sees the others' branches at once (no
 # push, no fetch). docs/macos-native-dev.md has the merge-back steps.
@@ -55,10 +63,14 @@ need_n() {  # need_n N VERB
     valid_n "${1:-}" || die "Usage: $ME $2 N   (N is an instance number, 1 to 9)"
 }
 
-need_instance() {  # the instance exists (config + worktree)
+need_instance() {  # the instance exists (config + ePHEM-core worktree, new layout)
     need_n "$1" "$2"
     [ -f "$(inst_conf "$1")" ] || die "Instance $1 has no config yet. Create it: $ME create $1"
     [ -d "$(inst_dir "$1")" ] || die "$(inst_dir "$1") is missing. Create it again: $ME create $1"
+    if inst_old_layout "$1"; then
+        die "odca$1/ still has the old layout (odca$1/ itself is the ePHEM worktree). Move it into odca$1/$CORE_NAME/ first: $ME migrate $1"
+    fi
+    [ -e "$(inst_core "$1")/.git" ] || die "$(inst_core "$1") is missing. Create it again: $ME create $1"
 }
 
 # "all", or nothing at all, means every instance; else the numbers given.
@@ -94,15 +106,24 @@ fix_refspec() {
     fi
 }
 
+# The ePHEM worktree of instance N: odcaN/ePHEM-core, or odcaN itself while
+# the instance has the old layout (so status still reads it before migrate).
+inst_wt() { if inst_old_layout "$1"; then inst_dir "$1"; else inst_core "$1"; fi; }
+
 inst_branch() {
-    local b; b=$(git -C "$(inst_dir "$1")" branch --show-current 2>/dev/null) || b=""
+    local b; b=$(git -C "$(inst_wt "$1")" branch --show-current 2>/dev/null) || b=""
     echo "${b:-(detached)}"
 }
 
+# The origin branch instance N follows: odcaN/18_ephem_2 → 18_ephem_2.
+inst_base() { local b; b="$(inst_branch "$1")"; echo "${b#odca$1/}"; }
+
 # "2 ahead, 1 behind" of the branch this worktree tracks, from what the last
 # fetch learned (no network).
-inst_sync() {
-    local d a b; d="$(inst_dir "$1")"
+inst_sync() { repo_sync "$(inst_wt "$1")"; }
+
+repo_sync() {  # repo_sync DIR
+    local d="$1" a b
     git -C "$d" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1 || { echo "no upstream"; return 0; }
     a=$(git -C "$d" rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)
     b=$(git -C "$d" rev-list --count 'HEAD..@{upstream}' 2>/dev/null || echo 0)
@@ -112,17 +133,24 @@ inst_sync() {
     else echo "$a ahead, $b behind"; fi
 }
 
-inst_dirty() { [ -n "$(git -C "$(inst_dir "$1")" status --porcelain 2>/dev/null)" ]; }
+inst_dirty() { repo_dirty "$(inst_wt "$1")"; }
+repo_dirty() { [ -n "$(git -C "$1" status --porcelain 2>/dev/null)" ]; }
+repo_branch() { local b; b=$(git -C "$1" branch --show-current 2>/dev/null) || b=""; echo "${b:-(detached)}"; }
+# Commits in DIR that no remote branch has (lost if the folder is deleted).
+repo_unpushed() { git -C "$1" rev-list --count HEAD --not --remotes 2>/dev/null || echo 0; }
+module_count() { local m c=0; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && c=$((c + 1)); done; echo "$c"; }
+module_names() { local m out=""; for m in "$1"/*/__manifest__.py; do [ -f "$m" ] && out="$out,$(basename "$(dirname "$m")")"; done; echo "${out#,}"; }
 
 # Put instance N on BASE: its own local branch odcaN/BASE, created from
 # origin/BASE and tracking it the first time, simply checked out afterwards
 # (what was committed on it earlier is still there).
 checkout_instance_branch() {  # checkout_instance_branch N BASE
     local n="$1" base="$2" dir local_branch
-    dir="$(inst_dir "$n")"; local_branch="odca$n/$base"
+    dir="$(inst_core "$n")"; local_branch="odca$n/$base"
     core_git rev-parse --verify -q "refs/remotes/origin/$base" >/dev/null \
         || die "origin has no branch '$base' (after a fetch). See them: git -C $CORE_CLONE branch -r"
     if [ ! -d "$dir" ]; then
+        mkdir -p "$(inst_dir "$n")"
         core_git worktree prune
         if core_git rev-parse --verify -q "refs/heads/$local_branch" >/dev/null; then
             core_git worktree add "$dir" "$local_branch"
@@ -136,30 +164,33 @@ checkout_instance_branch() {  # checkout_instance_branch N BASE
     fi
 }
 
-# ── CLAUDE.md per worktree ────────────────────
-# What an AI coding agent started in odcaN/ has to know: which instance this
-# is and how to stay inside it. Kept out of git through .git/info/exclude
-# (one file for the clone and all its worktrees). When the repository tracks
-# a CLAUDE.md of its own, that one is left alone and this goes to
-# CLAUDE.local.md, which Claude Code reads as well.
-AGENT_MARK="<!-- generated by scripts/macos/dev.sh: edits are lost when the instance is created or switched again -->"
+# ── CLAUDE.md per instance ────────────────────
+# What an AI coding agent started in odcaN/ (or in a repository inside it)
+# has to know: which instance this is and how to stay inside it. It sits in
+# odcaN/ itself, outside every repository, so nothing has to keep it out of
+# git; Claude Code reads the CLAUDE.md of the folders above where it starts.
+AGENT_MARK="<!-- generated by scripts/macos/dev.sh: edits are lost when the instance is created, switched or its repositories change -->"
+OLD_AGENT_MARK="<!-- generated by scripts/macos/dev.sh: edits are lost"
 
 write_agent_file() {  # write_agent_file N
-    local n="$1" dir name file excl cur up
-    dir="$(inst_dir "$n")"
+    local n="$1" dir core file cur up r repos="" f
+    dir="$(inst_dir "$n")"; core="$(inst_core "$n")"
     cur="$(inst_branch "$n")"
-    up="$(git -C "$dir" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
-    name="CLAUDE.md"
-    if git -C "$dir" ls-files --error-unmatch CLAUDE.md >/dev/null 2>&1; then name="CLAUDE.local.md"; fi
-    file="$dir/$name"
-    if [ -f "$file" ] && ! grep -qF "$AGENT_MARK" "$file"; then
+    up="$(git -C "$core" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+    file="$dir/CLAUDE.md"
+    if [ -f "$file" ] && ! grep -qF "$OLD_AGENT_MARK" "$file"; then
         warn "$file exists and was not written by dev.sh: left as it is"
         return 0
     fi
-    excl="$(core_git rev-parse --git-common-dir)/info/exclude"
-    case "$excl" in /*) ;; *) excl="$CORE_CLONE/$excl" ;; esac
-    mkdir -p "$(dirname "$excl")"
-    grep -qxF "/$name" "$excl" 2>/dev/null || echo "/$name" >> "$excl"
+    # The copy an older dev.sh wrote inside the worktree: replaced by this one.
+    for f in CLAUDE.md CLAUDE.local.md; do
+        if [ -f "$core/$f" ] && grep -qF "$OLD_AGENT_MARK" "$core/$f"; then rm -f "$core/$f"; fi
+    done
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        repos="$repos
+| \`$r/\` | $(git -C "$dir/$r" remote get-url origin 2>/dev/null || echo 'no remote'), branch \`$(repo_branch "$dir/$r")\`, $(module_count "$dir/$r") module(s) |"
+    done < <(inst_repos "$n")
     cat > "$file" <<EOF
 $AGENT_MARK
 # ePHEM dev instance $n (native macOS)
@@ -170,14 +201,20 @@ Other instances (other \`odcaN/\` folders next to this one) belong to other agen
 | | |
 |---|---|
 | Instance | $n |
-| This folder | \`$dir\` (a git worktree of \`$CORE_CLONE\`) |
+| This folder | \`$dir\` |
 | URL | $(inst_url "$n") (login of a new database: admin / admin) |
 | Database | \`$(inst_db "$n")\` |
-| Branch | \`$cur\`, tracking \`${up:-nothing}\` (now: \`git branch --show-current\`) |
 | Config | \`$(inst_conf "$n")\` |
 | Log | \`$(inst_log "$n")\` |
 | Odoo source (read only) | \`$ODOO_SRC\` (branch $ODOO_BRANCH) |
 | Python | \`$PY\` |
+
+Repositories in this folder (Odoo's addons path, in this order; on a module
+name clash the first one wins):
+
+| Folder | What |
+|---|---|
+| \`$CORE_NAME/\` | ePHEM, a git worktree of \`$CORE_CLONE\`: branch \`$cur\`, tracking \`${up:-nothing}\` |$repos
 
 ## Commands
 
@@ -188,9 +225,10 @@ log, use \`tail\` on it instead.
 bash $MAC_DIR/dev.sh status                 # every instance: port, database, branch, running or not
 bash $MAC_DIR/dev.sh restart $n              # restart this instance
 bash $MAC_DIR/dev.sh update $n eoc_base      # update modules (-u) on $(inst_db "$n"), then start again
-bash $MAC_DIR/dev.sh update $n               # update every ePHEM module of this worktree
+bash $MAC_DIR/dev.sh update $n               # update every module of this instance's repositories
 bash $MAC_DIR/dev.sh install $n my_module    # install a module that is not installed yet
 bash $MAC_DIR/dev.sh shell $n                # Odoo shell on $(inst_db "$n") (reads a script from stdin too)
+bash $MAC_DIR/dev.sh repo list $n            # the repositories of this instance
 tail -n 200 $(inst_log "$n")
 \`\`\`
 
@@ -203,14 +241,17 @@ new file in a manifest or changed data still need \`update $n MODULE\`.
 - Work only in this folder and only on database \`$(inst_db "$n")\`. Never start, stop,
   update, restore or edit another instance (\`odca<other>/\`, \`ephem_<other>\`).
 - Do not edit \`$ODOO_SRC\`, the virtualenv, or \`$CORE_CLONE\`.
-- Commit on the current branch (\`$cur\`). It is local to this instance:
-  do not push it, and do not merge into or push the base branch, unless the
-  developer asks. Do not run \`git switch\`/\`git checkout\` to another branch here;
-  changing branch is \`dev.sh switch $n BRANCH\`, and the developer decides it.
-- Do not run \`git worktree\`, \`git gc --prune\` or \`git stash drop/clear\`: the
-  object store is shared with the other instances.
+- In \`$CORE_NAME/\`, commit on the current branch (\`$cur\`). It is local to this
+  instance: do not push it, and do not merge into or push the base branch, unless
+  the developer asks. Do not run \`git switch\`/\`git checkout\` to another branch
+  there; changing branch is \`dev.sh switch $n BRANCH\`, and the developer decides it.
+- The other repositories here are ordinary clones on a shared branch: commit
+  there only when asked, and never push unless the developer asks. Adding or
+  removing one is \`dev.sh repo add|remove $n …\`, decided by the developer.
+- Do not run \`git worktree\`, \`git gc --prune\` or \`git stash drop/clear\` in
+  \`$CORE_NAME/\`: its object store is shared with the other instances.
 EOF
-    ok "$name written in odca$n/ (not tracked: .git/info/exclude)"
+    ok "CLAUDE.md written in odca$n/"
 }
 
 # ── Config ────────────────────────────────────
@@ -226,7 +267,8 @@ write_conf() {  # write_conf N
 
 admin_passwd = $(admin_passwd)
 
-; This instance's worktree first, then extra-addons/*, then Odoo's own addons.
+; $CORE_NAME first, then this instance's other repositories (odca$n/*), then
+; extra-addons/*, then Odoo's own addons. dev.sh repo add/remove rewrites it.
 addons_path = $(inst_addons_path "$n")
 data_dir = $(inst_data "$n")
 
@@ -262,7 +304,7 @@ cmd_conf() {
     need_install
     need_n "${1:-}" conf
     local conf; conf="$(inst_conf "$1")"
-    [ -d "$(inst_dir "$1")" ] || die "$(inst_dir "$1") is missing. Create the instance: $ME create $1"
+    [ -e "$(inst_wt "$1")/.git" ] || die "$(inst_core "$1") is missing. Create the instance: $ME create $1"
     if [ -f "$conf" ]; then cp -p "$conf" "$conf.bak"; fi
     write_conf "$1"
     ok "$conf written$( [ -f "$conf.bak" ] && echo " (previous: $conf.bak)")"
@@ -273,24 +315,26 @@ cmd_conf() {
 cmd_create() {
     need_install
     need_n "${1:-}" "create"
-    local n="$1" base="${2:-$DEFAULT_BRANCH}" dir conf
-    dir="$(inst_dir "$n")"; conf="$(inst_conf "$n")"
+    local n="$1" base="${2:-$DEFAULT_BRANCH}" core conf
+    core="$(inst_core "$n")"; conf="$(inst_conf "$n")"
     [ -d "$CORE_CLONE/.git" ] || die "$CORE_CLONE is not a clone yet. Run: bash scripts/macos/install.sh"
 
     step "Instance $n → $(inst_url "$n")  (db: $(inst_db "$n"), branch: $base)"
-    if [ -e "$dir/.git" ]; then
-        ok "odca$n/ already there (branch: $(inst_branch "$n")): left as it is"
+    # An instance of the old layout (install.sh run again over it): moved first.
+    if inst_old_layout "$n"; then migrate_one "$n"; fi
+    if [ -e "$core/.git" ]; then
+        ok "odca$n/$CORE_NAME/ already there (branch: $(inst_branch "$n")): left as it is"
         if [ -n "${2:-}" ] && [ "$(inst_branch "$n")" != "odca$n/$base" ]; then
             echo "  To move it to $base:  $ME switch $n $base"
         fi
-    elif [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
-        die "$dir has files but is not a worktree of $CORE_CLONE: move it away first."
+    elif [ -n "$(ls -A "$core" 2>/dev/null)" ]; then
+        die "$core has files but is not a worktree of $CORE_CLONE: move it away first."
     else
         fix_refspec
         echo "  Fetching $base from origin…"
         core_git fetch origin "$base" || die "Could not fetch '$base' from origin (does it exist? SSH access?)"
         checkout_instance_branch "$n" "$base"
-        ok "odca$n/ is a worktree on its own branch odca$n/$base (tracks origin/$base)"
+        ok "odca$n/$CORE_NAME/ is a worktree on its own branch odca$n/$base (tracks origin/$base)"
     fi
 
     if [ -f "$conf" ]; then
@@ -420,13 +464,22 @@ cmd_status() {
         if pg_ready && ! db_exists "$db"; then db="$db?"; fi
         printf '  %-3s %-24s %-9s %-34s %-18s %b\n' "$n" "$(inst_url "$n")" "$db" \
             "$(inst_branch "$n")$(inst_dirty "$n" && echo ' *')" "$(inst_sync "$n")" "$state"
+        if inst_old_layout "$n"; then
+            echo -e "      ${YELLOW}old layout${NC}: odca$n/ is the worktree itself. Move it into odca$n/$CORE_NAME/: $ME migrate $n"
+        fi
+        local r rd
+        while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            rd="$(inst_dir "$n")/$r"
+            printf '      + %-30s %-34s %s\n' "$r/" "$(repo_branch "$rd")$(repo_dirty "$rd" && echo ' *')" "$(repo_sync "$rd")"
+        done < <(inst_repos "$n")
     done < <(instances)
     if [ "$any" = 0 ]; then
         echo "  (none yet)   $ME create 1"
         return 0
     fi
     echo ""
-    echo "  * = uncommitted changes   ? = database not created yet ($ME initdb N)"
+    echo "  * = uncommitted changes   ? = database not created yet ($ME initdb N)   + = a repository next to $CORE_NAME"
     echo "  ORIGIN compares with the tracked branch as of the last fetch ($ME fetch)."
     if [ "$(nenv_get OFFICE)" = 1 ]; then echo "  Document converter: on (http://127.0.0.1:2003, $ME office status)"; fi
 }
@@ -434,7 +487,7 @@ cmd_status() {
 cmd_list() {
     need_install
     local n
-    while IFS= read -r n; do [ -n "$n" ] && echo "  • $n → $(inst_url "$n")   (db: $(inst_db "$n"), addons: odca$n/, branch: $(inst_branch "$n"))"; done < <(instances)
+    while IFS= read -r n; do [ -n "$n" ] && echo "  • $n → $(inst_url "$n")   (db: $(inst_db "$n"), folder: odca$n/, branch: $(inst_branch "$n"))"; done < <(instances)
 }
 
 cmd_logs() {
@@ -446,14 +499,22 @@ cmd_logs() {
 
 # ── Modules ───────────────────────────────────
 # What a routine update covers, as in scripts/stack-lib.sh
-# (addons_update_modules): the eoc_*, ephem_* and cmp_* modules of the ePHEM
-# worktree, and every module of a repository under extra-addons/. Odoo skips
-# the names that are not installed in the database.
+# (addons_update_modules): the eoc_*, ephem_* and cmp_* modules of
+# ePHEM-core, and every module of the instance's other repositories and of a
+# repository under extra-addons/. Odoo skips the names that are not installed
+# in the database.
 default_modules() {
-    local n="$1" d m out=""
-    for m in "$(inst_dir "$n")"/eoc_*/ "$(inst_dir "$n")"/ephem_*/ "$(inst_dir "$n")"/cmp_*/; do
+    local n="$1" d m r core out=""
+    core="$(inst_core "$n")"
+    for m in "$core"/eoc_*/ "$core"/ephem_*/ "$core"/cmp_*/; do
         [ -f "$m/__manifest__.py" ] && out="$out,$(basename "$m")"
     done
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        for m in "$(inst_dir "$n")/$r"/*/; do
+            [ -f "$m/__manifest__.py" ] && out="$out,$(basename "$m")"
+        done
+    done < <(inst_repos "$n")
     for d in "$EXTRA_ADDONS"/*/; do
         [ -d "$d" ] || continue
         for m in "$d"*/; do
@@ -515,7 +576,7 @@ cmd_update() {
     need_instance "${1:-}" update
     local mods="${2:-}"
     [ -n "$mods" ] || mods="$(default_modules "$1")"
-    [ -n "$mods" ] || die "No ePHEM module found in $(inst_dir "$1")."
+    [ -n "$mods" ] || die "No ePHEM module found in $(inst_dir "$1")/."
     modules_run -u "$1" "$mods"
 }
 
@@ -542,8 +603,8 @@ cmd_switch() {
     [ -n "$base" ] || die "Usage: $ME switch N BRANCH   (a branch of origin, e.g. $DEFAULT_BRANCH)"
     base="${base#origin/}"
     if inst_dirty "$n"; then
-        err "odca$n has uncommitted changes: commit or stash them first."
-        git -C "$(inst_dir "$n")" status --short | head -20 >&2
+        err "odca$n/$CORE_NAME has uncommitted changes: commit or stash them first."
+        git -C "$(inst_core "$n")" status --short | head -20 >&2
         exit 1
     fi
     local from; from="$(inst_branch "$n")"
@@ -551,7 +612,7 @@ cmd_switch() {
     echo "  Fetching $base from origin…"
     core_git fetch origin "$base" || die "Could not fetch '$base' from origin (does it exist?)"
     checkout_instance_branch "$n" "$base"
-    ok "odca$n: $from → odca$n/$base (tracks origin/$base). Commits on $from stay on that branch."
+    ok "odca$n/$CORE_NAME: $from → odca$n/$base (tracks origin/$base). Commits on $from stay on that branch."
     write_agent_file "$n"
     echo ""
     echo "  A different branch usually means different models: update the database next."
@@ -565,12 +626,19 @@ cmd_fetch() {
     echo "  Fetching every branch from origin (one fetch serves every instance)…"
     core_git fetch --prune origin
     ok "fetched"
-    local n
+    local n r rd
     while IFS= read -r n; do
-        [ -n "$n" ] && echo "  • odca$n  $(inst_branch "$n"): $(inst_sync "$n")"
+        [ -n "$n" ] || continue
+        echo "  • odca$n  $(inst_branch "$n"): $(inst_sync "$n")"
+        while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            rd="$(inst_dir "$n")/$r"
+            git -C "$rd" fetch --prune --quiet origin 2>/dev/null || warn "odca$n/$r: fetch failed"
+            echo "      + $r  $(repo_branch "$rd"): $(repo_sync "$rd")"
+        done < <(inst_repos "$n")
     done < <(instances)
     echo ""
-    echo "  Bring an instance up to date with the branch it tracks:  git -C $NATIVE_HOME/odcaN pull"
+    echo "  Bring an instance up to date with what it tracks:  $ME repo pull N"
 }
 
 # ── backup, restore ───────────────────────────
@@ -598,7 +666,11 @@ cmd_backup() {
         echo "database=$db"
         echo "date=$(date '+%Y-%m-%d %H:%M:%S %z')"
         echo "branch=$(inst_branch "$n")"
-        echo "commit=$(git -C "$(inst_dir "$n")" rev-parse HEAD 2>/dev/null || true)"
+        echo "commit=$(git -C "$(inst_core "$n")" rev-parse HEAD 2>/dev/null || true)"
+        local r
+        while IFS= read -r r; do
+            [ -n "$r" ] && echo "repo.$r=$(repo_branch "$(inst_dir "$n")/$r") $(git -C "$(inst_dir "$n")/$r" rev-parse HEAD 2>/dev/null || true)"
+        done < <(inst_repos "$n")
         echo "odoo_commit=$(git -C "$ODOO_SRC" rev-parse HEAD 2>/dev/null || true)"
     } > "$dest/manifest.txt"
     echo ""
@@ -840,7 +912,7 @@ cmd_new() {
     fi
 
     echo ""
-    echo -e "  ${BOLD}Instance $n${NC}: $(inst_url "$n"), folder odca$n/, branch odca$n/$base (tracks origin/$base),"
+    echo -e "  ${BOLD}Instance $n${NC}: $(inst_url "$n"), folder odca$n/ ($CORE_NAME/ on branch odca$n/$base, tracks origin/$base),"
     case "$dbmode" in
         2) echo "  database $(inst_db "$n") copied from $(inst_db "$dbsrc")." ;;
         3) echo "  no new database." ;;
@@ -861,6 +933,8 @@ cmd_new() {
         echo "    $ME update $n"
     fi
     echo "  Folder for your editor or coding agent: $(inst_dir "$n")"
+    echo "  Another addon repository next to $CORE_NAME (a country's, for example):"
+    echo "    $ME repo add $n OWNER/REPO"
 }
 
 # ── remove: take an instance away ─────────────
@@ -881,15 +955,27 @@ cmd_remove() {
         esac
     done
     need_n "${args[0]:-}" remove
-    local n="${args[0]}" db dir conf has_db=0 b branches="" kept=""
-    db="$(inst_db "$n")"; dir="$(inst_dir "$n")"; conf="$(inst_conf "$n")"
+    local n="${args[0]}" db dir wt conf has_db=0 b branches="" kept="" r rd risky=""
+    db="$(inst_db "$n")"; dir="$(inst_dir "$n")"; conf="$(inst_conf "$n")"; wt="$(inst_wt "$n")"
     [ -f "$conf" ] || [ -e "$dir" ] || die "There is no instance $n."
     db_exists "$db" && has_db=1
 
-    if [ -e "$dir/.git" ] && inst_dirty "$n" && [ "$force" != 1 ]; then
-        err "odca$n has uncommitted changes: commit them (they then stay on its branch), or discard them, first."
-        git -C "$dir" status --short | head -20 >&2
+    if [ -e "$wt/.git" ] && inst_dirty "$n" && [ "$force" != 1 ]; then
+        err "odca$n/$( inst_old_layout "$n" || echo "$CORE_NAME") has uncommitted changes: commit them (they then stay on its branch), or discard them, first."
+        git -C "$wt" status --short | head -20 >&2
         echo "  To remove the instance and lose these changes:  $ME remove $n --force" >&2
+        exit 1
+    fi
+    # The added repositories are plain clones: deleting the folder deletes
+    # whatever is not committed and pushed.
+    while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        rd="$dir/$r"
+        if repo_dirty "$rd" || [ "$(repo_unpushed "$rd")" != 0 ]; then risky="$risky $r"; fi
+    done < <(inst_repos "$n")
+    if [ -n "$risky" ] && [ "$force" != 1 ]; then
+        err "odca$n has repositories with uncommitted or unpushed work:$risky"
+        echo "  Commit and push it first, or lose it with:  $ME remove $n --force" >&2
         exit 1
     fi
     # The local branches of this instance, and which of them hold commits
@@ -909,6 +995,13 @@ cmd_remove() {
     echo "    files      $(inst_data "$n") (filestore, sessions): DELETED"
     if [ -e "$dir" ]; then
         echo "    folder     $dir: DELETED$( [ "$force" = 1 ] && inst_dirty "$n" && echo ', uncommitted changes included')"
+        local note
+        while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            note=""
+            case " $risky " in *" $r "*) note=" (its uncommitted or unpushed work too)" ;; esac
+            echo "               with odca$n/$r/$note"
+        done < <(inst_repos "$n")
     fi
     echo "    config     $conf, its log: DELETED"
     if [ -n "$kept" ]; then
@@ -933,14 +1026,22 @@ cmd_remove() {
         db_exists "$db" && die "database $db is still there: nothing else was removed."
         ok "database $db dropped"
     fi
-    if [ -e "$dir/.git" ]; then
+    if [ -e "$wt/.git" ]; then
+        # The generated CLAUDE.md is not part of the worktree: git would refuse.
+        if inst_old_layout "$n"; then rm -f "$wt/CLAUDE.md" "$wt/CLAUDE.local.md"; fi
         if [ "$force" = 1 ]; then
-            core_git worktree remove --force "$dir"
+            core_git worktree remove --force "$wt"
         else
-            core_git worktree remove "$dir"
+            core_git worktree remove "$wt"
         fi
-    elif [ -d "$dir" ]; then
-        rmdir "$dir" 2>/dev/null || warn "$dir is not a worktree and not empty: left where it is"
+    fi
+    if [ -d "$dir" ] && ! inst_old_layout "$n"; then
+        while IFS= read -r r; do
+            [ -n "$r" ] && rm -rf "${dir:?}/$r" && echo "  odca$n/$r/ deleted"
+        done < <(inst_repos "$n")
+        if [ -f "$dir/CLAUDE.md" ] && grep -qF "$OLD_AGENT_MARK" "$dir/CLAUDE.md"; then rm -f "$dir/CLAUDE.md"; fi
+        rm -f "$dir/.DS_Store"
+        rmdir "$dir" 2>/dev/null || warn "$dir still holds files dev.sh did not put there: left where it is"
     fi
     core_git worktree prune
     ok "odca$n/ removed"
@@ -958,13 +1059,262 @@ cmd_remove() {
     fi
 }
 
+# ── migrate: the old layout → odcaN/ePHEM-core ─
+# Until this layout, odcaN/ itself was the ePHEM worktree. git moves the
+# worktree (branch, commits, uncommitted and untracked files go with it), the
+# config follows, and the generated CLAUDE.md moves up into odcaN/.
+migrate_one() {  # migrate_one N
+    local n="$1" dir core tmp was owner
+    dir="$(inst_dir "$n")"; core="$(inst_core "$n")"
+    inst_old_layout "$n" || { ok "odca$n/ already has the $CORE_NAME/ layout"; return 0; }
+    [ -e "$dir/$CORE_NAME" ] && die "odca$n/$CORE_NAME already exists inside the old worktree: move it away first."
+    was="$(inst_pid "$n")"
+    owner="$(port_owner "$(inst_port "$n")")"
+    if [ -z "$was" ] && [ -n "$owner" ]; then
+        die "port $(inst_port "$n") is in use by pid and name: $owner (an instance started from PyCharm?). Stop it, then: $ME migrate $n"
+    fi
+    [ -n "$was" ] && stop_one "$n"
+    step "odca$n/ → odca$n/$CORE_NAME/"
+    tmp="$NATIVE_HOME/.odca$n-moving"
+    [ -e "$tmp" ] && die "$tmp exists (an earlier move stopped halfway?). Look at it, then remove it and run this again."
+    core_git worktree move "$dir" "$tmp"
+    mkdir -p "$dir"
+    if ! core_git worktree move "$tmp" "$core"; then
+        rmdir "$dir" 2>/dev/null || true
+        core_git worktree move "$tmp" "$dir" || true
+        die "Could not move the worktree into odca$n/$CORE_NAME: odca$n/ is back as it was."
+    fi
+    ok "worktree moved: branch $(inst_branch "$n"), its commits and uncommitted changes went with it"
+    if [ -f "$(inst_conf "$n")" ]; then
+        cp -p "$(inst_conf "$n")" "$(inst_conf "$n").bak"
+        write_conf "$n"
+        ok "conf/odoo-$n.conf: addons_path now starts at odca$n/$CORE_NAME (previous: odoo-$n.conf.bak)"
+    fi
+    write_agent_file "$n"
+    [ -n "$was" ] && start_one "$n"
+    return 0
+}
+
+cmd_migrate() {
+    need_install
+    local n any=0
+    if [ $# -eq 0 ] || [ "$1" = all ]; then
+        while IFS= read -r n; do
+            [ -n "$n" ] || continue
+            if inst_old_layout "$n"; then migrate_one "$n"; any=1; fi
+        done < <(instances)
+        [ "$any" = 1 ] || ok "every instance already has the $CORE_NAME/ layout"
+    else
+        for n in "$@"; do need_n "$n" migrate; migrate_one "$n"; done
+    fi
+    echo "  Editors and agents: open odcaN/ (or odcaN/$CORE_NAME for the ePHEM repository alone)."
+}
+
+# ── repo: the other addon repositories of an instance ─
+# The Docker developer stack's "Add a repository": a git repository whose top
+# level holds Odoo modules, cloned into odcaN/<name>/ next to ePHEM-core and
+# put on this instance's addons path after it. One clone per instance, so
+# each instance can follow its own branch of it.
+
+# owner/name (GitHub over SSH, like the ePHEM clone), git@…, ssh://, https://
+# or a local path → the URL to clone.
+repo_url() {
+    case "$1" in
+        git@*|ssh://*|https://*|http://*|file://*|/*) echo "$1" ;;
+        [A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*) echo "git@github.com:${1%.git}.git" ;;
+        *) return 1 ;;
+    esac
+}
+
+restart_if_running() {  # restart_if_running N
+    if [ -n "$(inst_pid "$1")" ]; then
+        stop_one "$1"; start_one "$1" || true
+    else
+        echo "  Instance $1 is not running: the change applies at its next start."
+    fi
+}
+
+need_repo() {  # need_repo N NAME → REPO_DIR
+    [ -n "${2:-}" ] || die "Which repository? $ME repo list $1"
+    [ "$2" != "$CORE_NAME" ] || die "$CORE_NAME is the ePHEM worktree: $ME switch $1 BRANCH changes its branch."
+    REPO_DIR="$(inst_dir "$1")/$2"
+    [ -d "$REPO_DIR" ] || die "odca$1 has no repository '$2'. See them: $ME repo list $1"
+}
+
+cmd_repo_add() {
+    need_install
+    local args=() name="" a
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name)   name="${2:-}"; shift ;;
+            --name=*) name="${1#--name=}" ;;
+            *)        args+=("$1") ;;
+        esac
+        shift
+    done
+    need_instance "${args[0]:-}" "repo add"
+    local n="${args[0]}" spec="${args[1]:-}" branch="${args[2]:-}" url target base cnt dups="" m was
+    [ -n "$spec" ] || die "Usage: $ME repo add N REPO [BRANCH] [--name FOLDER]   (REPO: owner/name, e.g. borse/ePHEM_uganda, or a git URL)"
+    url="$(repo_url "$spec")" || die "Not a repository I can read: '$spec'. Examples: borse/ePHEM_uganda   git@github.com:OCA/web.git   https://github.com/OCA/web"
+    if [ -z "$name" ]; then name="$(basename "${spec%/}")"; name="${name%.git}"; fi
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "Folder names: letters, digits, dot, dash and underscore."
+    [ "$name" != "$CORE_NAME" ] || die "$CORE_NAME is the ePHEM worktree itself."
+    target="$(inst_dir "$n")/$name"
+    [ -e "$target" ] && die "odca$n/$name already exists. Another folder name: --name OTHER"
+
+    step "Add $spec to instance $n (odca$n/$name)"
+    GIT_TERMINAL_PROMPT=0 git ls-remote --heads "$url" >/dev/null 2>&1 \
+        || die "Cannot read $url: wrong name, or your SSH key has no access to it (try: git ls-remote $url)."
+    if [ -z "$branch" ]; then
+        base="$(inst_base "$n")"
+        if [ -n "$base" ] && GIT_TERMINAL_PROMPT=0 git ls-remote --exit-code --heads "$url" "$base" >/dev/null 2>&1; then
+            branch="$base"
+            echo "  Branch $branch: the one $CORE_NAME follows."
+        else
+            branch="$(GIT_TERMINAL_PROMPT=0 git ls-remote --symref "$url" HEAD 2>/dev/null | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')"
+            echo "  Branch ${branch:-?}: the repository's default ($CORE_NAME's ${base:-branch} is not one of its branches)."
+        fi
+    fi
+    echo -e "  ${CYAN}→${NC} git clone --branch $branch $url odca$n/$name"
+    GIT_TERMINAL_PROMPT=0 git clone --progress ${branch:+--branch "$branch"} "$url" "$target" \
+        || { rm -rf "$target"; die "Clone failed: see the git output above (wrong branch, or no access)."; }
+
+    cnt="$(module_count "$target")"
+    if [ "$cnt" -eq 0 ]; then
+        warn "odca$n/$name has no Odoo module at its top level (<module>/__manifest__.py): it is NOT on the addons path."
+    else
+        ok "odca$n/$name: $cnt module(s) on $(repo_branch "$target")"
+        for m in "$target"/*/__manifest__.py; do
+            m="$(basename "$(dirname "$m")")"
+            [ -f "$(inst_core "$n")/$m/__manifest__.py" ] && dups="$dups $m"
+        done
+        [ -n "$dups" ] && warn "also in $CORE_NAME, whose copy wins:$dups"
+    fi
+    cp -p "$(inst_conf "$n")" "$(inst_conf "$n").bak"
+    write_conf "$n"
+    ok "conf/odoo-$n.conf: addons_path updated"
+    write_agent_file "$n"
+    restart_if_running "$n"
+    if [ "$cnt" -gt 0 ]; then
+        echo ""
+        echo "  Its modules: $(module_names "$target")"
+        echo "  Install the ones you need:  $ME install $n MODULE[,MODULE…]   (or Apps → Update Apps List)"
+    fi
+}
+
+cmd_repo_list() {
+    need_install
+    local n r rd list
+    if [ -n "${1:-}" ]; then need_instance "$1" "repo list"; list="$1"; else list="$(instances)"; fi
+    for n in $list; do
+        echo -e "  ${BOLD}odca$n${NC}  ($(inst_url "$n"), $(inst_db "$n"))"
+        if inst_old_layout "$n"; then
+            echo "    (old layout: $ME migrate $n)"
+            continue
+        fi
+        printf '    %-26s %-34s %-18s %s\n' "$CORE_NAME/" "$(inst_branch "$n")$(inst_dirty "$n" && echo ' *')" "$(inst_sync "$n")" "$(module_count "$(inst_core "$n")") modules"
+        while IFS= read -r r; do
+            [ -n "$r" ] || continue
+            rd="$(inst_dir "$n")/$r"
+            printf '    %-26s %-34s %-18s %s\n' "$r/" "$(repo_branch "$rd")$(repo_dirty "$rd" && echo ' *')" "$(repo_sync "$rd")" "$(module_count "$rd") modules, $(git -C "$rd" remote get-url origin 2>/dev/null || echo 'no remote')"
+        done < <(inst_repos "$n")
+    done
+    echo ""
+    echo "  * = uncommitted changes. ORIGIN as of the last fetch ($ME fetch)."
+}
+
+cmd_repo_pull() {
+    need_install
+    need_instance "${1:-}" "repo pull"
+    local n="$1" r d rc=0 names
+    if [ -n "${2:-}" ]; then need_repo "$n" "$2"; names="$2"; else names="$CORE_NAME $(inst_repos "$n" | tr '\n' ' ')"; fi
+    for r in $names; do
+        d="$(inst_dir "$n")/$r"
+        echo -e "  ${CYAN}→${NC} odca$n/$r ($(repo_branch "$d"))"
+        if repo_dirty "$d"; then warn "  uncommitted changes: skipped (commit or stash them first)"; rc=1; continue; fi
+        GIT_TERMINAL_PROMPT=0 git -C "$d" pull --ff-only || { err "  odca$n/$r: not a fast-forward (local commits?): merge it yourself"; rc=1; }
+    done
+    echo "  New or changed modules need an update:  $ME update $n"
+    return "$rc"
+}
+
+cmd_repo_switch() {
+    need_install
+    need_instance "${1:-}" "repo switch"
+    need_repo "$1" "${2:-}"
+    local n="$1" name="$2" branch="${3:-}" d
+    d="$REPO_DIR"
+    [ -n "$branch" ] || die "Usage: $ME repo switch N NAME BRANCH"
+    branch="${branch#origin/}"
+    if repo_dirty "$d"; then
+        err "odca$n/$name has uncommitted changes: commit or stash them first."
+        git -C "$d" status --short | head -20 >&2
+        exit 1
+    fi
+    GIT_TERMINAL_PROMPT=0 git -C "$d" fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" \
+        || die "origin of odca$n/$name has no branch '$branch'."
+    if git -C "$d" rev-parse --verify -q "refs/heads/$branch" >/dev/null; then
+        git -C "$d" switch "$branch"
+    else
+        git -C "$d" switch --track -c "$branch" "origin/$branch"
+    fi
+    ok "odca$n/$name is on $branch"
+    write_conf "$n"; write_agent_file "$n"
+    restart_if_running "$n"
+    echo "  Different code usually means different models:  $ME update $n"
+}
+
+cmd_repo_remove() {
+    need_install
+    local yes=0 force=0 args=() a
+    for a in "$@"; do
+        case "$a" in
+            --yes|-y) yes=1 ;;
+            --force)  force=1 ;;
+            *)        args+=("$a") ;;
+        esac
+    done
+    need_instance "${args[0]:-}" "repo remove"
+    need_repo "${args[0]}" "${args[1]:-}"
+    local n="${args[0]}" name="${args[1]}" d unp
+    d="$REPO_DIR"; unp="$(repo_unpushed "$d")"
+    if { repo_dirty "$d" || [ "$unp" != 0 ]; } && [ "$force" != 1 ]; then
+        err "odca$n/$name has uncommitted changes or $unp commit(s) no remote has:"
+        git -C "$d" status --short | head -20 >&2
+        echo "  Commit and push them first, or delete them with it:  $ME repo remove $n $name --force" >&2
+        exit 1
+    fi
+    echo ""
+    echo -e "  ${BOLD}Remove odca$n/$name${NC}: the folder is DELETED and its modules leave instance $n's addons path."
+    echo "  Modules of it that are installed on $(inst_db "$n") should be uninstalled first (Apps),"
+    echo "  or Odoo logs errors about them at every start."
+    if [ "$yes" != 1 ]; then confirm "  Remove it?" N || { echo "  Nothing changed."; return 0; }; fi
+    rm -rf "${d:?}"
+    ok "odca$n/$name deleted"
+    write_conf "$n"; write_agent_file "$n"
+    restart_if_running "$n"
+}
+
+cmd_repo() {
+    local sub="${1:-list}"
+    [ $# -gt 0 ] && shift
+    case "$sub" in
+        add)           cmd_repo_add "$@" ;;
+        list|ls)       cmd_repo_list "$@" ;;
+        pull)          cmd_repo_pull "$@" ;;
+        switch)        cmd_repo_switch "$@" ;;
+        remove|rm)     cmd_repo_remove "$@" ;;
+        *) die "Usage: $ME repo add N REPO [BRANCH] [--name FOLDER] | list [N] | pull N [NAME] | switch N NAME BRANCH | remove N NAME" ;;
+    esac
+}
+
 # ── Menu (bash manage.sh lands here on a native Mac setup) ─
 cmd_help() {
     cat <<EOF
 
   new                  add an instance: asks its number, its branch, its database
   remove N             delete an instance: its database, files and folder (asks first; commits are kept)
-  create N [BRANCH]    the same as new, without questions: worktree odcaN + config (default branch: $DEFAULT_BRANCH)
+  create N [BRANCH]    the same as new, without questions: odcaN/$CORE_NAME + config (default branch: $DEFAULT_BRANCH)
   initdb N [MODULES]   create database ephem_N
   start | stop | restart  N…|all
   status               ports, databases, branches, health
@@ -972,7 +1322,13 @@ cmd_help() {
   update N [MODULES]   update modules, then start again
   install N MODULES    install modules, then start again
   shell N              Odoo shell
-  switch N BRANCH      move the instance to another branch
+  switch N BRANCH      move the instance's $CORE_NAME to another branch
+  repo add N REPO [BRANCH]   add a repository next to $CORE_NAME (e.g. borse/ePHEM_uganda)
+  repo list [N]        the repositories of each instance
+  repo pull N [NAME]   pull them (fast-forward only)
+  repo switch N NAME BRANCH  move an added repository to another branch
+  repo remove N NAME   delete an added repository (asks first)
+  migrate [N|all]      move an old-layout instance into odcaN/$CORE_NAME/
   fetch                fetch every branch from origin
   backup N             database + filestore into $BACKUP_DIR
   restore N [SOURCE] [--neutralize]
@@ -985,6 +1341,26 @@ cmd_menu() {
     need_install
     local line docker_line=""
     if [ -f "$EPHEM_ROOT/.env" ]; then docker_line="  docker               the Docker menu of this checkout (bash manage.sh --docker)"; fi
+    # Instances made before the ePHEM-core/ layout (a Mac set up with an
+    # older checkout): offered once per menu start, in their own process so
+    # a failure stops only the move.
+    local old="" n
+    while IFS= read -r n; do
+        if [ -n "$n" ] && inst_old_layout "$n"; then old="$old $n"; fi
+    done < <(instances)
+    if [ -n "$old" ]; then
+        echo ""
+        echo -e "  ${YELLOW}!${NC} Instance(s)$old still have the old layout: odcaN/ itself is the ePHEM worktree."
+        echo "     They move into odcaN/$CORE_NAME/, the layout of the Docker developer stack, so other"
+        echo "     repositories can go next to ePHEM (repo add N …). Branches, commits and uncommitted"
+        echo "     changes move with them; a running instance is restarted."
+        if confirm "  Move them now?" Y; then
+            # shellcheck disable=SC2086  # one word per instance number
+            bash "$0" migrate $old || true
+            echo "  Editors and coding agents opened in odcaN/ before: reopen them (PyCharm: the git roots are now odcaN/$CORE_NAME)."
+            read -r -p "  Enter to continue " line || exit 0
+        fi
+    fi
     while true; do
         echo ""
         cmd_status || true
@@ -1036,6 +1412,8 @@ dispatch() {
         restore) cmd_restore "$@" ;;
         conf)    cmd_conf "$@" ;;
         office)  cmd_office "$@" ;;
+        repo|repos) cmd_repo "$@" ;;
+        migrate) cmd_migrate "$@" ;;
         menu)    cmd_menu ;;
         help|-h|--help) echo "Usage: $ME VERB …"; cmd_help ;;
         *)       err "Unknown command: $verb"; echo "Usage: $ME VERB …"; cmd_help; exit 1 ;;
