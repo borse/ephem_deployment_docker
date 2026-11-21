@@ -94,8 +94,9 @@ is written to the database; a restart or an update empties it.
 **What the key holds**, so an answer is only ever given back to the same
 question from the same person:
 
-- the user, their groups, the last change to their user record (an area or a
-  clearance), the active companies, the whole context (language, time zone),
+- the database (one worker may serve several), the user, their groups, the
+  last change to their user record (an area or a clearance), the active
+  companies, the whole context (language, time zone),
   whether the request counts as a dashboards viewer;
 - the method, the records it was called on, every argument;
 - for each model named in the decorator, and always for the system parameters:
