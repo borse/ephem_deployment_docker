@@ -24,7 +24,7 @@ which before touching anything; if the developer has not said, look, then ask.
 |---|---|---|---|---|
 | Docker, multi instance (Linux, WSL) | `ephem-deploy/odca1/`, `odca2/`... and `.dev-instances` | `odcaN/ePHEM-core/` | `ephem_N` | `http://localhost:80N0` |
 | Docker, single instance | `ephem-deploy/addons/ePHEM-core/` | `addons/ePHEM-core/` | the one the developer created | `http://localhost:8069` |
-| macOS native | `ephem-deploy/.macos-native` points to `~/Developer/ephem` | `~/Developer/ephem/odcaN/` (a git worktree) | `ephem_N` | `http://localhost:80N0` |
+| macOS native | `ephem-deploy/.macos-native` points to `~/Developer/ephem` | `~/Developer/ephem/odcaN/ePHEM-core/` (a git worktree; other repos of the instance next to it) | `ephem_N` | `http://localhost:80N0` |
 
 The multi instance mapping, which never changes:
 

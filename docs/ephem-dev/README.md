@@ -30,7 +30,7 @@ and copy it again after each update.)
 
 Claude Code then loads it on its own for ePHEM work, or on request with
 `/ephem-dev`. Start it inside your clone (`odca1/ePHEM-core`,
-`addons/ePHEM-core`, or `~/Developer/ephem/odca1` on a native Mac), and check
+`addons/ePHEM-core`, or `~/Developer/ephem/odca1/ePHEM-core` on a native Mac), and check
 that it knows where it is: ask "which instance and branch are we on?".
 
 On the native macOS setup each instance also has a generated `CLAUDE.md`
