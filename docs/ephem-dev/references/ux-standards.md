@@ -167,8 +167,10 @@ glance: no more than five pieces of information.
 
 - **One request** returns the page: the server aggregates (`_read_group` or one
   query) and the client draws. Never a request per card.
-- It **runs as the user**, so the record rules apply. Any cache key holds the
-  user, the companies, the language and a data stamp.
+- It **runs as the user**, so the record rules apply.
+- Its data method is **cached with `@dashboard_cached(...)`** from `eoc_base`;
+  never a cache of its own. Server side loading, the cache and its rules:
+  `dashboards.md`.
 - **Nothing from a CDN**. Chart.js through Odoo's own `web.chartjs_lib`; other
   libraries ship in the addons.
 - First paint is a skeleton; a cached payload is painted while the fresh one

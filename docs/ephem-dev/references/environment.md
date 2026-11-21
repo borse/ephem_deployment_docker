@@ -140,6 +140,10 @@ macOS: `bash scripts/macos/dev.sh shell N < script.py`.
   call `env.cr.commit()` only when the change is meant.
 - A group change committed from a shell does not reach the running server's
   cache: restart the instance.
+- Dashboards keep their answers up to 120 seconds (`dashboards.md`). A change
+  made by raw SQL, or in a table the dashboard does not name, may not show
+  until then: set the system parameter `eoc_base.dashboard_cache_ttl` to `0`
+  while debugging, or restart the instance.
 - Write scripts outside the repository.
 
 **psql:** `docker exec ephem-db psql -U odoo -d ephem_1 -c "select id, name->>'en_US' from eoc_signal limit 5;"`.

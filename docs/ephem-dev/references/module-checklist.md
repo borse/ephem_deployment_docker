@@ -361,7 +361,14 @@ a card through `_extra_cards` on `eoc.field.desk` (see
   `eoc_demo_mode.active` to `'False'` in `setUpClass` first.
 - Tag tests that need every module loaded `@tagged('post_install', '-at_install')`.
 
-## 14. Icon and README
+## 14. Dashboards
+
+A dashboard or wall display is computed on the server, as the user, in one
+request, and its data method carries `@dashboard_cached(...)` naming the
+models it counts. Follow `dashboards.md`, and add the page to its table of
+what is cached.
+
+## 15. Icon and README
 
 - `static/description/icon.png`: the Apps page reads it from there. The ePHEM
   team generates the house icons (app artwork with the ePHEM badge); ask for

@@ -12,6 +12,7 @@ team reviews pull requests against these rules.
 | `references/module-checklist.md` | building a module, with skeletons: groups, `ephem_` roles, delegation, rules, menus, translations, tests |
 | `references/security.md` | the security gate and the house patterns to copy |
 | `references/ux-standards.md` | forms, lists, menus, wording, colour, dark mode, right to left, dashboards |
+| `references/dashboards.md` | dashboards loaded on the server and cached with `@dashboard_cached`: how, the rules, tests |
 | `references/domain.md` | what the models mean: signals, incidents, IMS, levels, clearance |
 | `references/pitfalls.md` | the mistakes reviews keep finding, and their fixes |
 

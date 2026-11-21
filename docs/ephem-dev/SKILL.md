@@ -256,8 +256,12 @@ reviewers check first:
   check dark mode and right to left before calling UI work done.
 - **Nothing from a CDN.** ePHEM runs offline in trainings and field sites:
   libraries ship inside the addons, maps use keyless basemaps.
-- **Dashboards cost one request** and are designed from their subject, not
-  assembled from generic cards and doughnuts.
+- **Dashboards cost one request**, counted on the server as the user, and
+  are designed from their subject, not assembled from generic cards and
+  doughnuts.
+- **Every dashboard data method is cached with `@dashboard_cached(...)`**
+  from `eoc_base` (models/dashboard_cache.py), naming the models it counts;
+  never a cache of your own. How, and the rules: `references/dashboards.md`.
 
 ---
 
@@ -300,6 +304,8 @@ The catalogue with fixes is `references/pitfalls.md`. The ones met most often:
    templates: use a component method).
 9. A dashboard or library loaded from a CDN.
 10. Tests run only as administrator.
+11. A dashboard that counts in the browser, or recomputes on every refresh
+    without `@dashboard_cached`.
 
 ---
 
@@ -317,6 +323,8 @@ Before saying a task is finished, and before a pull request:
       tokens, load nothing from a CDN.
 - [ ] Every user facing string translatable; `.pot` and the three catalogues
       updated.
+- [ ] A dashboard counts on the server, as the user, in one request, and its
+      data method carries `@dashboard_cached` (`references/dashboards.md`).
 - [ ] Version bumped and migration written where an existing database changes.
 - [ ] No credentials, no machine files, no unrelated changes in the diff.
 - [ ] Branch merged with the latest `origin/18_ephem_2`.
@@ -334,5 +342,6 @@ Before saying a task is finished, and before a pull request:
 | `references/module-checklist.md` | creating a module or adding models, groups, roles, menus, settings, tests |
 | `references/security.md` | any change covered by section 6 |
 | `references/ux-standards.md` | any form, list, search, menu, wizard, settings page, dashboard, label, colour or SCSS |
+| `references/dashboards.md` | a dashboard, wall display or analytics page: server side loading, the shared cache, its tests |
 | `references/domain.md` | designing a feature, naming a field, changing a workflow, anything scoped by place or clearance |
 | `references/pitfalls.md` | reviewing code, debugging something that works for admin only, before a pull request |

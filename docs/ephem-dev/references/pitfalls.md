@@ -167,3 +167,28 @@ diff against this list before asking for a review; reviewers check it too.
     "these files are tests": automated review is often wrong about this
     codebase.
     *Fix:* check in the code or a shell before changing anything.
+
+## Dashboards
+
+31. **A dashboard that counts in the browser.** `searchRead` of every record
+    and a count in JavaScript, or one request per card: slow at national
+    level, and the figures differ from the server's.
+    *Fix:* one data method that aggregates on the server (`dashboards.md`
+    section 1).
+
+32. **A dashboard recomputed on every refresh**, or given a cache of its own.
+    A wall display refetching every minute recomputes everything each time;
+    a private cache with a key that forgets the user hands one person's
+    figures to another.
+    *Fix:* `@dashboard_cached('model.it.counts', ...)` from `eoc_base`.
+
+33. **A cached method with a side effect, or that leaves a model out.** On a
+    hit the body does not run (no write, no email); a change to a model the
+    decorator does not name shows only after the TTL.
+    *Fix:* keep side effects out of the cached method; name every model whose
+    rows the figures count (`dashboards.md` sections 2 and 3).
+
+34. **Two pages, two answers.** The same measure computed twice drifts: one
+    page leaves out the duplicates and the other does not.
+    *Fix:* one engine and one hook (`eoc.signal._ebs_copy_domain`), called by
+    both pages.
