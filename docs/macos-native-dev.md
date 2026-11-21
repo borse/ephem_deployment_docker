@@ -122,10 +122,18 @@ its next run.
 
 ## Daily commands
 
-`bash manage.sh` opens a menu of the same commands: it shows every instance,
-then you type a command (`restart 2`, `new`, ...).
+`bash manage.sh` opens the same menu as on Windows and Linux (the Docker
+developer menu): the instances and their repositories in one table, numbered
+`1`, `1.1`, `1.2`, `2`, … and the same keys. `r 2` restarts instance 2 and
+follows its log, `s 3.2` switches the branch of repository 3.2, `+ 3` adds a
+repository to instance 3, `3` opens instance 3, `d` the databases and backups,
+`m` maintenance (add or remove an instance, the office converter, the
+installer), `h` the list of keys. `bash manage.sh 3` opens instance 3 straight
+away. Ctrl+C stops what is running (a log, an update) and returns to the menu.
+It is `scripts/macos/menu.sh`, acting through the `dev.sh` commands below;
+`bash scripts/macos/dev.sh menu-plain` is the older typed-command menu.
 
-**Adding an instance** is `new`, in that menu or as
+**Adding an instance** is `m` then `a` in that menu, or
 `bash scripts/macos/dev.sh new`. It asks three things, then creates the
 worktree, the config, the `CLAUDE.md` and the database, and starts it:
 
@@ -138,7 +146,7 @@ worktree, the config, the `CLAUDE.md` and the database, and starts it:
 
 `create N [BRANCH]` followed by `initdb N` does the same without questions.
 
-**Removing an instance** is `remove N`, in the menu or as
+**Removing an instance** is `m` then `k` in the menu, or
 `bash scripts/macos/dev.sh remove N`. It lists what goes, offers a backup of
 the database first, and asks you to type the database name:
 

@@ -31,6 +31,7 @@
 #   bash scripts/macos/dev.sh repo list [N]         # each instance's repositories: branch, modules, state
 #   bash scripts/macos/dev.sh repo pull N [NAME]    # pull ePHEM-core and the instance's repositories (fast-forward only)
 #   bash scripts/macos/dev.sh repo switch N NAME BRANCH  # move one added repository to another branch
+#   bash scripts/macos/dev.sh repo rename N NAME NEW  # rename an added repository's folder
 #   bash scripts/macos/dev.sh repo remove N NAME    # delete an added repository (asks first)
 #   bash scripts/macos/dev.sh migrate [N|all]       # move instances of the old layout (odcaN/ = the worktree) into odcaN/ePHEM-core/
 #   bash scripts/macos/dev.sh fetch                 # fetch every branch from origin (one fetch serves all instances)
@@ -38,7 +39,7 @@
 #   bash scripts/macos/dev.sh restore N [SOURCE]    # replace ephem_N from a backup (asks first)
 #   bash scripts/macos/dev.sh conf N                # write conf/odoo-N.conf again (the old one is kept as .bak)
 #   bash scripts/macos/dev.sh office start|stop|status   # optional document converter (a Docker container)
-#   bash scripts/macos/dev.sh list | menu | help
+#   bash scripts/macos/dev.sh list | menu | menu-plain | help   # menu: what bash manage.sh opens (scripts/macos/menu.sh)
 #
 # Branches. One clone (ePHEM/) and one worktree per instance share a single
 # .git, and git refuses to check the same branch out twice. So instance N on
@@ -1227,7 +1228,9 @@ cmd_repo_pull() {
     need_install
     need_instance "${1:-}" "repo pull"
     local n="$1" r d rc=0 names
-    if [ -n "${2:-}" ]; then need_repo "$n" "$2"; names="$2"; else names="$CORE_NAME $(inst_repos "$n" | tr '\n' ' ')"; fi
+    if [ "${2:-}" = "$CORE_NAME" ]; then names="$CORE_NAME"
+    elif [ -n "${2:-}" ]; then need_repo "$n" "$2"; names="$2"
+    else names="$CORE_NAME $(inst_repos "$n" | tr '\n' ' ')"; fi
     for r in $names; do
         d="$(inst_dir "$n")/$r"
         echo -e "  ${CYAN}→${NC} odca$n/$r ($(repo_branch "$d"))"
@@ -1295,6 +1298,21 @@ cmd_repo_remove() {
     restart_if_running "$n"
 }
 
+cmd_repo_rename() {
+    need_install
+    need_instance "${1:-}" "repo rename"
+    need_repo "$1" "${2:-}"
+    local n="$1" old="$2" new="${3:-}"
+    [ -n "$new" ] || die "Usage: $ME repo rename N NAME NEW_NAME"
+    [[ "$new" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "Folder names: letters, digits, dot, dash and underscore."
+    [ "$new" != "$CORE_NAME" ] || die "$CORE_NAME is the ePHEM worktree's name."
+    [ -e "$(inst_dir "$n")/$new" ] && die "odca$n/$new already exists."
+    mv "$REPO_DIR" "$(inst_dir "$n")/$new"
+    ok "odca$n/$old → odca$n/$new"
+    write_conf "$n"; write_agent_file "$n"
+    restart_if_running "$n"
+}
+
 cmd_repo() {
     local sub="${1:-list}"
     [ $# -gt 0 ] && shift
@@ -1304,7 +1322,8 @@ cmd_repo() {
         pull)          cmd_repo_pull "$@" ;;
         switch)        cmd_repo_switch "$@" ;;
         remove|rm)     cmd_repo_remove "$@" ;;
-        *) die "Usage: $ME repo add N REPO [BRANCH] [--name FOLDER] | list [N] | pull N [NAME] | switch N NAME BRANCH | remove N NAME" ;;
+        rename|mv)     cmd_repo_rename "$@" ;;
+        *) die "Usage: $ME repo add N REPO [BRANCH] [--name FOLDER] | list [N] | pull N [NAME] | switch N NAME BRANCH | rename N NAME NEW | remove N NAME" ;;
     esac
 }
 
@@ -1327,6 +1346,7 @@ cmd_help() {
   repo list [N]        the repositories of each instance
   repo pull N [NAME]   pull them (fast-forward only)
   repo switch N NAME BRANCH  move an added repository to another branch
+  repo rename N NAME NEW     rename an added repository's folder
   repo remove N NAME   delete an added repository (asks first)
   migrate [N|all]      move an old-layout instance into odcaN/$CORE_NAME/
   fetch                fetch every branch from origin
@@ -1337,7 +1357,15 @@ cmd_help() {
 EOF
 }
 
+# The menu `bash manage.sh` opens: scripts/macos/menu.sh, the screens of the
+# Docker developer menu. This older one, a typed command line, stays as
+# `dev.sh menu-plain`.
 cmd_menu() {
+    need_install
+    exec bash "$MAC_DIR/menu.sh" "$@"
+}
+
+cmd_menu_plain() {
     need_install
     local line docker_line=""
     if [ -f "$EPHEM_ROOT/.env" ]; then docker_line="  docker               the Docker menu of this checkout (bash manage.sh --docker)"; fi
@@ -1414,7 +1442,8 @@ dispatch() {
         office)  cmd_office "$@" ;;
         repo|repos) cmd_repo "$@" ;;
         migrate) cmd_migrate "$@" ;;
-        menu)    cmd_menu ;;
+        menu)    cmd_menu "$@" ;;
+        menu-plain) cmd_menu_plain ;;
         help|-h|--help) echo "Usage: $ME VERB …"; cmd_help ;;
         *)       err "Unknown command: $verb"; echo "Usage: $ME VERB …"; cmd_help; exit 1 ;;
     esac
