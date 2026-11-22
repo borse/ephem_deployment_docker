@@ -635,15 +635,18 @@ m_add_repo() {  # m_add_repo N
 m_update() {  # m_update N
     local n="$1" mods
     v2_title "Update modules: odca$n" "Database $(inst_db "$n"). The instance stops for it and starts again if it was running."
+    dev changed "$n" 2>/dev/null || true
     v2_head "Which modules"
-    v2_opt Enter "Every module of odca$n's repositories (Odoo skips the ones not installed)"
+    v2_opt Enter "Only what changed (with no record yet, every installed module once)"
+    v2_opt a "Every module of odca$n's repositories (Odoo skips the ones not installed)"
     v2_opt names "Type them, comma separated: eoc_signals,eoc_base"
     v2_opt b "Back"
     v2_prompt
     case "$V2_ANS" in
         b|B) V2_NO_PAUSE=1; return 0 ;;
         x|X) v2_bye ;;
-        "")  mods="" ;;
+        "")  v2_clear; dev update "$n" --changed; return ;;
+        a|A) mods="" ;;
         *)
             if ! [[ "$V2_ANS" =~ ^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$ ]]; then
                 v2_cancel "Module names: letters, digits and underscores, separated by commas."; return 0

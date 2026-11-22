@@ -24,6 +24,8 @@
 #   bash scripts/macos/dev.sh status                # ports, databases, branches, health
 #   bash scripts/macos/dev.sh logs N                # follow one instance
 #   bash scripts/macos/dev.sh update N [MODULES]    # -u MODULES (default: every ePHEM module), then start again
+#   bash scripts/macos/dev.sh update N --changed    # only the modules whose code changed since ephem_N last updated them
+#   bash scripts/macos/dev.sh changed N             # which those are (nothing runs)
 #   bash scripts/macos/dev.sh install N MODULES     # -i MODULES, then start again
 #   bash scripts/macos/dev.sh shell N               # Odoo shell on ephem_N
 #   bash scripts/macos/dev.sh switch N BRANCH       # move odcaN/ePHEM-core to another branch
@@ -556,6 +558,145 @@ cmd_initdb() {
     if [ -n "$was" ]; then start_one "$n"; fi
 }
 
+# ── What changed (as scripts/update-modules.sh) ─
+# Every database keeps a small table, ephem_update_state, with a fingerprint
+# of each module's code as it was when that database last updated it: the
+# same table, and the same fingerprints, as the Docker and server stacks, so a
+# database brought over from Docker keeps its record. "Only what changed"
+# updates exactly the installed modules whose code on disk differs; every
+# successful update or install records what Odoo ran. A database with no
+# record yet updates every installed module of the instance's folders once,
+# which starts the record. The fingerprint is git's own hash of the module
+# folder; a folder with uncommitted changes, or outside git, is hashed file
+# by file.
+db_sql() {  # db_sql N SQL → rows, one per line ('' on any error)
+    "$PG_BIN/psql" -X -q -At -d "$(inst_db "$1")" -c "$2" 2>/dev/null || true
+}
+
+mod_sources() {  # mod_sources N: the folders holding its modules, in addons_path order
+    local r d
+    echo "$(inst_core "$1")"
+    while IFS= read -r r; do [ -n "$r" ] && echo "$(inst_dir "$1")/$r"; done < <(inst_repos "$1")
+    for d in "$EXTRA_ADDONS"/*/; do [ -d "$d" ] && echo "${d%/}"; done
+    return 0
+}
+
+dir_fingerprint() {  # every file but compiled Python, in a fixed order (sha1sum's output format)
+    (cd "$1" && find . -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0 \
+        | LC_ALL=C sort -z | xargs -0 shasum -a 1 2>/dev/null) | shasum -a 1 | cut -c1-40
+}
+
+# "module fingerprint", one line per module of instance N; the first folder
+# that has a module wins, as in Odoo's addons_path.
+FPS=""; FPS_N=""
+module_fps() {  # module_fps N → FPS
+    local n="$1" src prefix dirty _mode type hash name path out=""
+    [ "$FPS_N" = "$n" ] && return 0
+    while IFS= read -r src; do
+        [ -d "$src" ] || continue
+        if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            prefix="$(git -C "$src" rev-parse --show-prefix 2>/dev/null)"
+            # Folders with uncommitted or new files: their files, hashed.
+            dirty=" $(git -C "$src" status --porcelain=v1 --untracked-files=all -- . 2>/dev/null \
+                | sed -E 's/^.{3}//; s/^.* -> //; s/^"//' | sed "s#^$prefix##" | cut -d/ -f1 | sort -u | tr '\n' ' ') "
+            # Committed content: git's tree hash of each folder, in one call.
+            while read -r _mode type hash name; do
+                [ "$type" = tree ] && [ -f "$src/$name/__manifest__.py" ] || continue
+                case "$dirty" in *" $name "*) ;; *) out="$out$name $hash"$'\n' ;; esac
+            done < <(git -C "$src" ls-tree "HEAD:$prefix" 2>/dev/null || true)
+            for name in $dirty; do
+                [ -f "$src/$name/__manifest__.py" ] && out="$out$name $(dir_fingerprint "$src/$name")"$'\n'
+            done
+        else
+            for path in "$src"/*/; do
+                name="$(basename "$path")"
+                [ -f "$path/__manifest__.py" ] && out="$out$name $(dir_fingerprint "$path")"$'\n'
+            done
+        fi
+    done < <(mod_sources "$n")
+    FPS="$(printf '%s' "$out" | awk 'NF == 2 && !seen[$1]++')"
+    FPS_N="$n"
+}
+
+has_update_state() { [ "$(db_sql "$1" "SELECT to_regclass('ephem_update_state') IS NOT NULL")" = t ]; }
+
+# The installed modules whose code changed since this database last recorded
+# them (every installed module of these folders when it has no record yet).
+changed_modules() {  # changed_modules N → module names, one per line
+    local n="$1" known=""
+    module_fps "$n"
+    has_update_state "$n" && known="$(db_sql "$n" "SELECT module || ' ' || fingerprint FROM ephem_update_state")"
+    awk 'FILENAME == ARGV[1] && NF == 2 { fp[$1] = $2 }
+         FILENAME == ARGV[2] && NF == 1 { inst[$1] = 1 }
+         FILENAME == ARGV[3] && NF == 2 { k[$1] = $2 }
+         END { for (m in inst) if ((m in fp) && k[m] != fp[m]) print m }' \
+        <(printf '%s\n' "$FPS") \
+        <(db_sql "$n" "SELECT name FROM ir_module_module WHERE state = 'installed'") \
+        <(printf '%s\n' "$known") | LC_ALL=C sort
+}
+
+# Installed modules covered by a pick: the pick and every installed module
+# depending on it, directly or not (Odoo updates those too).
+db_coverage() {  # db_coverage N CSV → module names
+    printf '%s' "$2" | grep -Eq '^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$' || return 0
+    db_sql "$1" "WITH RECURSIVE dep AS (
+          SELECT m.name AS module, d.name AS parent
+            FROM ir_module_module m JOIN ir_module_module_dependency d ON d.module_id = m.id
+           WHERE m.state IN ('installed', 'to upgrade')),
+        picks(name) AS (SELECT unnest(string_to_array('$2', ','))),
+        cov(name) AS (
+          SELECT p.name FROM picks p
+            JOIN ir_module_module m ON m.name = p.name AND m.state IN ('installed', 'to upgrade')
+          UNION
+          SELECT dep.module FROM dep JOIN cov ON dep.parent = cov.name)
+        SELECT name FROM cov ORDER BY name"
+}
+
+# After a successful run: the database records the code it now runs, for
+# every module Odoo updated (the picks and what depends on them).
+record_state() {  # record_state N CSV
+    local n="$1" values
+    module_fps "$n"
+    values="$(awk 'FILENAME == ARGV[1] && NF == 2 { fp[$1] = $2; next }
+                   NF == 1 && ($1 in fp) && $1 ~ /^[A-Za-z0-9_]+$/ && fp[$1] ~ /^[0-9a-f]{40}$/ {
+                       printf ",(\x27%s\x27,\x27%s\x27)", $1, fp[$1] }' \
+        <(printf '%s\n' "$FPS") <(db_coverage "$n" "$2"))"
+    [ -n "$values" ] || return 0
+    db_sql "$n" "CREATE TABLE IF NOT EXISTS ephem_update_state (
+            module varchar PRIMARY KEY, fingerprint varchar NOT NULL,
+            updated_on timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'UTC'));
+        INSERT INTO ephem_update_state (module, fingerprint) VALUES ${values#,}
+        ON CONFLICT (module) DO UPDATE SET fingerprint = EXCLUDED.fingerprint,
+            updated_on = now() AT TIME ZONE 'UTC'" >/dev/null
+}
+
+# What --changed would update, in words. Sets CHANGED (comma-separated).
+CHANGED=""
+plan_changed() {  # plan_changed N
+    local n="$1" db count cov
+    db="$(inst_db "$n")"
+    CHANGED="$(changed_modules "$n" | paste -sd, -)"
+    if [ -z "$CHANGED" ]; then
+        ok "$db: nothing changed since its last update."
+        return 0
+    fi
+    count="$(printf '%s' "$CHANGED" | tr ',' '\n' | grep -c .)"
+    if ! has_update_state "$n"; then
+        echo -e "  ${BOLD}$db${NC}: no record of an earlier update yet: all $count installed modules of odca$n this once (it starts the record)."
+    else
+        echo -e "  ${BOLD}$db${NC}: $count changed since its last update: $(printf '%s' "$CHANGED" | sed 's/,/, /g')"
+        cov="$(db_coverage "$n" "$CHANGED" | grep -c . || true)"
+        [ "$cov" -le "$count" ] || echo "    Odoo also updates the installed modules that depend on them: $cov in all."
+    fi
+}
+
+cmd_changed() {
+    need_install; need_pg
+    need_instance "${1:-}" changed
+    db_exists "$(inst_db "$1")" || die "Database $(inst_db "$1") does not exist yet: $ME initdb $1"
+    plan_changed "$1"
+}
+
 # update N [MODULES] (-u) and install N MODULES (-i): stop the instance, one
 # odoo-bin run on its database, start it again if it was running.
 modules_run() {  # modules_run -u|-i N MODULES
@@ -567,7 +708,12 @@ modules_run() {  # modules_run -u|-i N MODULES
     [ -n "$was" ] && stop_one "$n"
     step "$word on $db: $mods"
     run_once "$n" -d "$db" "$flag" "$mods" || rc=$?
-    if [ "$rc" -eq 0 ]; then ok "$word finished"; else err "$word failed (exit $rc): see the output above (also in $(inst_log "$n"))"; fi
+    if [ "$rc" -eq 0 ]; then
+        ok "$word finished"
+        record_state "$n" "$mods" || warn "Could not record what was updated (ephem_update_state): the next 'only what changed' may do more than needed."
+    else
+        err "$word failed (exit $rc): see the output above (also in $(inst_log "$n"))"
+    fi
     if [ -n "$was" ]; then start_one "$n" || rc=1; else echo "  Instance $n was not running and is left stopped: $ME start $n"; fi
     return "$rc"
 }
@@ -576,6 +722,12 @@ cmd_update() {
     need_install; need_pg
     need_instance "${1:-}" update
     local mods="${2:-}"
+    if [ "$mods" = --changed ]; then
+        db_exists "$(inst_db "$1")" || die "Database $(inst_db "$1") does not exist yet: $ME initdb $1"
+        plan_changed "$1"
+        [ -n "$CHANGED" ] || return 0
+        mods="$CHANGED"
+    fi
     [ -n "$mods" ] || mods="$(default_modules "$1")"
     [ -n "$mods" ] || die "No ePHEM module found in $(inst_dir "$1")/."
     modules_run -u "$1" "$mods"
@@ -1338,7 +1490,8 @@ cmd_help() {
   start | stop | restart  N…|all
   status               ports, databases, branches, health
   logs N               follow the log (Ctrl+C to leave)
-  update N [MODULES]   update modules, then start again
+  update N [MODULES]   update modules, then start again (--changed: only what changed)
+  changed N            the modules whose code changed since ephem_N last updated them
   install N MODULES    install modules, then start again
   shell N              Odoo shell
   switch N BRANCH      move the instance's $CORE_NAME to another branch
@@ -1432,6 +1585,7 @@ dispatch() {
         list)    cmd_list ;;
         logs)    cmd_logs "$@" ;;
         update)  cmd_update "$@" ;;
+        changed) cmd_changed "$@" ;;
         install) cmd_install "$@" ;;
         shell)   cmd_shell "$@" ;;
         switch)  cmd_switch "$@" ;;

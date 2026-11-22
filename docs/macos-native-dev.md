@@ -245,6 +245,8 @@ bash scripts/macos/dev.sh logs 2                 # follow the log, Ctrl+C to lea
 bash scripts/macos/dev.sh install 2 eoc_base     # stop, -i eoc_base on ephem_2, start again
 bash scripts/macos/dev.sh update 2 eoc_base      # the same with -u
 bash scripts/macos/dev.sh update 2               # every eoc_*, ephem_* and cmp_* module of odca2/
+bash scripts/macos/dev.sh update 2 --changed     # only the modules whose code changed since ephem_2 last updated them
+bash scripts/macos/dev.sh changed 2              # which those are (nothing runs)
 bash scripts/macos/dev.sh shell 2                # Odoo shell on ephem_2
 bash scripts/macos/dev.sh fetch                  # fetch every branch from origin, once for all instances
 bash scripts/macos/dev.sh switch 2 18_national_main
@@ -256,6 +258,19 @@ bash scripts/macos/dev.sh create 4               # the same without questions: a
 bash scripts/macos/dev.sh create 5 18_emt_v2     # a fifth on another branch
 bash scripts/macos/dev.sh initdb 4               # its empty database
 ```
+
+**Only what changed.** In the menu, Update modules (`u`) offers it first (Enter),
+and shows the list before you choose. As on the server (`scripts/update-modules.sh
+--changed`), each database keeps a table, `ephem_update_state`, with a
+fingerprint of each module's code as it was when that database last updated
+it: git's own hash of the module folder, or a hash of its files when it has
+uncommitted changes. "Only what changed" updates the installed modules whose
+fingerprint differs; Odoo also updates the installed modules that depend on
+them. Every successful update or install records what Odoo ran, whichever
+option was chosen. A database with no record yet updates every installed
+module of the instance's folders once, which starts the record. The table and
+the fingerprints are the same as in the Docker and server stacks, so a
+database brought over from Docker keeps its record.
 
 To type less, an alias in `~/.zshrc` (yours to add; the scripts never edit it):
 `alias edev='bash ~/Developer/ephem_deployment_docker/scripts/macos/dev.sh'`,
