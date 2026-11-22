@@ -10,6 +10,7 @@ developer mode is the Docker stack described in the [README](../README.md#mode-3
 
 - [What you get](#what-you-get)
 - [Install](#install)
+- [Moving from the Docker developer stack](#moving-from-the-docker-developer-stack)
 - [Layout](#layout)
 - [Daily commands](#daily-commands)
 - [Branches and worktrees](#branches-and-worktrees)
@@ -79,6 +80,58 @@ scripts find Homebrew in `/opt/homebrew` by themselves.
 Docker menu need bash 4, so on a Mac `setup.sh` first looks for Homebrew's bash
 and offers to install it (`brew install bash`); your Terminal's own shell is not
 changed.
+
+## Moving from the Docker developer stack
+
+A Mac that already runs the developer instances in Docker (developer or
+multi-instance mode) is offered the move when `bash manage.sh` opens:
+
+```
+y       Move to native now
+n       Not now: the Docker menu (asked again next time)
+never   Don't ask again on this Mac (later: bash scripts/macos/from-docker.sh)
+```
+
+The same move, run by hand:
+
+```bash
+bash scripts/macos/from-docker.sh --plan    # what would move, changes nothing
+bash scripts/macos/from-docker.sh           # asks where, then moves
+bash scripts/macos/from-docker.sh --home ~/work/ephem --yes
+```
+
+Docker instance `odcaX/` becomes native instance N: X itself when it is 1 to 9,
+otherwise the first free number (the single-instance `addons/` becomes 1).
+
+| What | Becomes |
+|---|---|
+| `odcaX/ePHEM-core` | a worktree of the native `ePHEM/` clone, on the same commit. Every local branch comes over as `odcaN/<branch>` (upstreams kept), with the commits never pushed, and the working files as they are: changed, staged, new, deleted, ignored. |
+| other repositories in `odcaX/` | copied as they are (remote, branch, changes) |
+| stashes | stay in the Docker copy (`git -C odcaX/ePHEM-core stash list`) |
+| database `ephem_X` and its filestore | restored into `ephem_N` (`dev.sh restore`). When `ephem_N` already exists on the Mac you are asked first (default: keep it). |
+| every other database in Docker | copied out and kept as a backup in `backups/from-docker/<name>/`: `bash scripts/macos/dev.sh restore N backups/from-docker/<name>` |
+| the containers, volumes and images | stopped, not removed; removing them is offered once everything is done |
+
+In single-instance mode with several databases, the move asks which one becomes
+`ephem_1`; the others are kept as backups.
+
+How the databases come out: `docker compose stop` stops the stack (the instance
+ports are then free for the native ones), Postgres (`ephem-db`) alone is started
+again, and each database is dumped with `pg_dump -Fc` and its filestore read off
+the Odoo volume, into `backups/from-docker/<name>/` in the format of `dev.sh
+backup`. Docker Desktop is started when it is not running (asked first); say no
+and the databases stay in Docker, where running `from-docker.sh` again later
+picks them up. The last question removes the stack
+(`docker compose … down -v --rmi all`); it defaults to no, and says so when a
+database could not be copied.
+
+The native `ePHEM/` clone is made from a Docker clone (no full download, same
+remote URL), then fetched from origin. The Docker folders are only read: they
+stay where they are as a copy until you delete them. A move that stops halfway
+(a failed download, Ctrl+C) leaves `.macos-from-docker` in the deployment repo;
+`bash manage.sh` then offers to carry on, and every step that was done is
+skipped (a database already copied out, or already restored, is not done
+again). `MACOS_NATIVE_OFFER=never` in `.env` is what "never" writes.
 
 ## Layout
 

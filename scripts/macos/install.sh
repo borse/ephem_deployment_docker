@@ -276,8 +276,11 @@ fi
 
 DEV="$MAC_DIR/dev.sh"
 if [ "$OPT_NO_INSTANCES" = 1 ]; then
-    echo ""
-    echo "No instance created (--no-instances). Later: bash scripts/macos/dev.sh create 1"
+    # from-docker.sh makes the instances itself, from the Docker folders.
+    if [ "${EPHEM_FROM_DOCKER:-}" != 1 ]; then
+        echo ""
+        echo "No instance created (--no-instances). Later: bash scripts/macos/dev.sh create 1"
+    fi
     exit 0
 fi
 

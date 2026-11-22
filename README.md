@@ -401,6 +401,8 @@ bash scripts/macos/dev.sh switch 2 18_national_main
 bash scripts/macos/dev.sh backup 2           # and: restore 2
 ```
 
+Already on the Docker developer stack? `bash manage.sh` offers the move to native when it opens (or `bash scripts/macos/from-docker.sh`): your repositories, branches, uncommitted work and databases (with their filestores) come along, and removing the Docker stack is offered at the end.
+
 Full guide (layout, branches and merging back, PyCharm, restoring a database from another machine, differences from the image): **[docs/macos-native-dev.md](docs/macos-native-dev.md)**.
 
 **Docker (as before)** continues with the rest of this section, unchanged. Everything below describes the Docker developer setup, which is the only one on Linux and Windows (WSL).

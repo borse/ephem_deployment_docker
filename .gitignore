@@ -64,6 +64,8 @@ odoo-*.conf
 
 # Native macOS developer setup (scripts/macos/install.sh): where its home is
 /.macos-native
+# A move from the Docker stack to it that has not finished (scripts/macos/from-docker.sh)
+/.macos-from-docker
 
 # local documentation artifacts (handbook PDFs, presentation decks), except
 # the developer framework skill that partners install from here

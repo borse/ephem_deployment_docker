@@ -40,10 +40,25 @@ V2_ROOT="$(cd "$(dirname "$0")" && pwd)"
 # .macos-native here. With it, the instances are processes on the Mac, not
 # containers, and this menu is theirs: scripts/macos/dev.sh menu.
 #     bash manage.sh --docker     the Docker menu below, as on any machine
+# Without it, a Mac whose developer instances run in Docker is offered the
+# move to native first (scripts/macos/from-docker.sh: the repositories come
+# along, the containers do not). "never" there stops the question
+# (MACOS_NATIVE_OFFER=never in .env). A move that stopped halfway
+# (.macos-from-docker) is offered again before either menu opens.
 # Nothing in this block runs on Linux or under WSL.
 if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    if [ "${1:-}" != "--docker" ] && [ -f "$V2_ROOT/.macos-native" ]; then
-        exec bash "$V2_ROOT/scripts/macos/dev.sh" menu "$@"
+    if [ "${1:-}" != "--docker" ]; then
+        if [ -z "${V2_NATIVE_ASKED:-}" ] && { [ -f "$V2_ROOT/.macos-from-docker" ] || [ ! -f "$V2_ROOT/.macos-native" ]; } \
+           && [ -f "$V2_ROOT/scripts/macos/from-docker.sh" ]; then
+            export V2_NATIVE_ASKED=1      # once, also across the bash 4 re-exec below
+            bash "$V2_ROOT/scripts/macos/from-docker.sh" offer
+            V2_RC=$?
+            # 0: moved, the native menu below; 3: staying with Docker.
+            if [ "$V2_RC" != 0 ] && [ "$V2_RC" != 3 ]; then exit "$V2_RC"; fi
+        fi
+        if [ -f "$V2_ROOT/.macos-native" ]; then
+            exec bash "$V2_ROOT/scripts/macos/dev.sh" menu "$@"
+        fi
     fi
     # The Docker menu loads scripts/stack-lib.sh, which needs bash 4; macOS
     # ships 3.2. Go on under Homebrew's bash when it is installed.
