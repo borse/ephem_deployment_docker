@@ -293,6 +293,44 @@ db_idle_guard() {  # db_idle_guard N
         || warn "Could not set idle_in_transaction_session_timeout on $db (is the app role its owner?)."
 }
 
+# The instance's own URLs, pinned in its database. Odoo rewrites web.base.url
+# whenever an administrator logs in, from whatever address the browser used:
+# a login through another port (a second server started on the same
+# database, a tunnel, a LAN address) left it pointing elsewhere. wkhtmltopdf
+# loads every PDF report's stylesheets from that address and, when nothing
+# answers there, waits forever: the report hangs, its transaction stays open
+# with its locks, and the crons time out behind it (seen on ephem_1: a demo
+# reset stuck 2 h 30 on a dead port).
+#   report.url          http://127.0.0.1:PORT, always: what wkhtmltopdf
+#                       fetches from (same Mac; 127.0.0.1, not localhost,
+#                       which may resolve to IPv6 while Odoo listens on IPv4).
+#   web.base.url        BASE_URL_N from conf/native.env when set, else the
+#                       instance URL when it listens on this Mac only; a LAN
+#                       instance keeps the address its developer gave it.
+#   web.base.url.freeze True, so no login rewrites it again.
+# Applies at the next start (a running server caches these). Run before every
+# launch.
+db_url_guard() {  # db_url_guard N
+    local n="$1" db port base
+    db="$(inst_db "$n")"; port="$(inst_port "$n")"
+    db_exists "$db" || return 0
+    [ "$("$PG_BIN/psql" -X -d "$db" -Atc "SELECT to_regclass('ir_config_parameter') IS NOT NULL" 2>/dev/null)" = t ] || return 0
+    base="$(nenv_get "BASE_URL_$n")"
+    if [ -z "$base" ] && [ "$(bind_host)" = 127.0.0.1 ]; then base="$(inst_url "$n")"; fi
+    case "$base" in *"'"*) warn "BASE_URL_$n contains a quote: ignored."; base="" ;; esac
+    local sql="
+        INSERT INTO ir_config_parameter (key, value, create_uid, write_uid, create_date, write_date)
+        VALUES ('report.url', 'http://127.0.0.1:$port', 1, 1, now() AT TIME ZONE 'utc', now() AT TIME ZONE 'utc'),
+               ('web.base.url.freeze', 'True', 1, 1, now() AT TIME ZONE 'utc', now() AT TIME ZONE 'utc')"
+    [ -n "$base" ] && sql="$sql,
+               ('web.base.url', '$base', 1, 1, now() AT TIME ZONE 'utc', now() AT TIME ZONE 'utc')"
+    sql="$sql
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, write_date = EXCLUDED.write_date
+        WHERE ir_config_parameter.value IS DISTINCT FROM EXCLUDED.value"
+    "$PG_BIN/psql" -X -q -d "$db" -c "$sql" >/dev/null 2>&1 \
+        || warn "Could not pin web.base.url / report.url on $db."
+}
+
 # A config written before bin_path existed gets it, without rewriting the rest
 # of the file (a developer may have edited it). Run before every launch.
 conf_bin_path() {  # conf_bin_path N
@@ -421,7 +459,7 @@ odoo_env() {
 
 odoo_bin() {  # odoo_bin N ARGS…   (foreground)
     local n="$1"; shift
-    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"; db_url_guard "$n"
     "$PY" "$ODOO_SRC/odoo-bin" "$@" -c "$(inst_conf "$n")"
 }
 
@@ -440,7 +478,7 @@ start_one() {
     done
     db_exists "$(inst_db "$n")" || warn "database $(inst_db "$n") does not exist yet: $ME initdb $n  (or create it in the browser)"
     mkdir -p "$LOG_DIR" "$RUN_DIR"
-    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"; db_url_guard "$n"
     # A session of its own, so closing the terminal does not take Odoo with
     # it. Python does it (os.setsid, then exec): no nohup in between, which
     # would drop DYLD_FALLBACK_LIBRARY_PATH (see lib.sh). The pid stays the
@@ -793,7 +831,7 @@ cmd_shell() {
     need_install; need_pg
     need_instance "${1:-}" shell
     local n="$1"; shift
-    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"; db_url_guard "$n"
     exec "$PY" "$ODOO_SRC/odoo-bin" shell -c "$(inst_conf "$n")" -d "$(inst_db "$n")" --no-http --logfile= "$@"
 }
 

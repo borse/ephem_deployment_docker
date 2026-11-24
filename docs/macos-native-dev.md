@@ -571,6 +571,16 @@ ends such a transaction on its own. To see who is waiting on whom:
 rolled back). In a shell, end what you did with `env.cr.commit()` or
 `env.cr.rollback()` before leaving it open.
 
+**A PDF report never finishes (wkhtmltopdf runs for minutes), crons time out behind it**:
+wkhtmltopdf loads the report's stylesheets from `report.url` (else
+`web.base.url`), and Odoo rewrites `web.base.url` whenever an administrator
+logs in, from whatever address the browser used: a login through another port
+left it pointing at nothing. `dev.sh` pins, before every start, update or
+shell: `report.url = http://127.0.0.1:PORT`, `web.base.url` (the instance URL
+when it listens on this Mac only, or `BASE_URL_N` from `conf/native.env`) and
+`web.base.url.freeze = True`. Kill a hung `wkhtmltopdf` with `pkill -f
+wkhtmltopdf`, then restart the instance.
+
 **"Unable to find Wkhtmltopdf on this system", the report shown in HTML**:
 the instance's config has no `bin_path` (written before it existed) and the
 server was started where `tools/wkhtmltox/bin` is not on PATH (PyCharm).
