@@ -270,6 +270,29 @@ inst_bin_path() {
     echo "$TOOLS/wkhtmltox/bin:$TOOLS/node/node_modules/.bin"
 }
 
+# A transaction left open and idle (an Odoo shell or a script that rendered a
+# report and never committed, a debugger left on a breakpoint) keeps its row
+# locks, and every later write to those rows waits behind it: scheduled jobs
+# then run into Odoo's real time limit (120 s) and the server reloads, over and
+# over, for as long as the forgotten session stays open (seen on ephem_1: a
+# shell idle 1 h 46 min held eoc_signal rows). PostgreSQL ends such a
+# transaction after IDLE_TX_TIMEOUT (conf/native.env, default 30min; 0 turns
+# it off). Normal requests and jobs commit within seconds and never reach it.
+# Per database, so each instance sets its own; applies to new connections, so
+# a running server takes it on its next start. Run before every launch.
+db_idle_guard() {  # db_idle_guard N
+    local db timeout
+    db="$(inst_db "$1")"
+    timeout="$(nenv_get IDLE_TX_TIMEOUT)"; timeout="${timeout:-30min}"
+    case "$timeout" in *[!0-9a-zA-Z]*) warn "IDLE_TX_TIMEOUT='$timeout' is not a duration (e.g. 30min): ignored."; return 0 ;; esac
+    db_exists "$db" || return 0
+    [ "$("$PG_BIN/psql" -X -d "$db" -Atc "SELECT setting FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase,
+           unnest(s.setconfig) AS setting WHERE d.datname = current_database() AND s.setrole = 0
+           AND setting = 'idle_in_transaction_session_timeout=$timeout'" 2>/dev/null)" ] && return 0
+    "$PG_BIN/psql" -X -q -d "$db" -c "ALTER DATABASE \"$db\" SET idle_in_transaction_session_timeout = '$timeout'" >/dev/null 2>&1 \
+        || warn "Could not set idle_in_transaction_session_timeout on $db (is the app role its owner?)."
+}
+
 # A config written before bin_path existed gets it, without rewriting the rest
 # of the file (a developer may have edited it). Run before every launch.
 conf_bin_path() {  # conf_bin_path N
@@ -398,7 +421,7 @@ odoo_env() {
 
 odoo_bin() {  # odoo_bin N ARGS…   (foreground)
     local n="$1"; shift
-    odoo_env; conf_bin_path "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
     "$PY" "$ODOO_SRC/odoo-bin" "$@" -c "$(inst_conf "$n")"
 }
 
@@ -417,7 +440,7 @@ start_one() {
     done
     db_exists "$(inst_db "$n")" || warn "database $(inst_db "$n") does not exist yet: $ME initdb $n  (or create it in the browser)"
     mkdir -p "$LOG_DIR" "$RUN_DIR"
-    odoo_env; conf_bin_path "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
     # A session of its own, so closing the terminal does not take Odoo with
     # it. Python does it (os.setsid, then exec): no nohup in between, which
     # would drop DYLD_FALLBACK_LIBRARY_PATH (see lib.sh). The pid stays the
@@ -770,7 +793,7 @@ cmd_shell() {
     need_install; need_pg
     need_instance "${1:-}" shell
     local n="$1"; shift
-    odoo_env; conf_bin_path "$n"
+    odoo_env; conf_bin_path "$n"; db_idle_guard "$n"
     exec "$PY" "$ODOO_SRC/odoo-bin" shell -c "$(inst_conf "$n")" -d "$(inst_db "$n")" --no-http --logfile= "$@"
 }
 

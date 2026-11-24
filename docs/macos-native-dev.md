@@ -559,6 +559,18 @@ its log. The whole log: `logs/odoo-N.log`.
 `brew services info postgresql@16`. Its log:
 `/opt/homebrew/var/log/postgresql@16.log`.
 
+**"virtual real time limit (…/120s) reached" on a cron, then "Initiating server reload", again and again**:
+a transaction was left open and idle (an Odoo shell, a script that rendered a
+report and never committed, a debugger left on a breakpoint) and holds row
+locks the job needs. `dev.sh` sets `idle_in_transaction_session_timeout`
+(30 minutes, `IDLE_TX_TIMEOUT` in `conf/native.env`, `0` to turn it off) on
+the instance's database before every start, update or shell, so PostgreSQL
+ends such a transaction on its own. To see who is waiting on whom:
+`psql -d ephem_N -c "select pid, state, now()-xact_start, pg_blocking_pids(pid), application_name from pg_stat_activity where datname = current_database()"`;
+`select pg_terminate_backend(PID)` ends the idle one (its uncommitted work is
+rolled back). In a shell, end what you did with `env.cr.commit()` or
+`env.cr.rollback()` before leaving it open.
+
 **"Unable to find Wkhtmltopdf on this system", the report shown in HTML**:
 the instance's config has no `bin_path` (written before it existed) and the
 server was started where `tools/wkhtmltox/bin` is not on PATH (PyCharm).
