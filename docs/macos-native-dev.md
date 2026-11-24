@@ -416,8 +416,11 @@ never overwritten.
   `~/Developer/ephem/odoo/odoo-bin`, parameters
   `-c ~/Developer/ephem/conf/odoo-2.conf --dev=xml`, after
   `bash scripts/macos/dev.sh stop 2` (the port must be free). Leave `reload`
-  out under the debugger. For PDF reports from such a run, add
-  `~/Developer/ephem/tools/wkhtmltox/bin` to the configuration's `PATH`.
+  out under the debugger. PDF reports and Arabic stylesheets work from such
+  a run with nothing to add: the instance's config carries `bin_path`
+  (`tools/wkhtmltox/bin` and `tools/node/node_modules/.bin`), which Odoo
+  searches whatever PATH PyCharm builds (it rebuilds PATH when it activates
+  the virtualenv, so `conf/pycharm.env`'s PATH does not survive).
 - Or a Shell Script configuration: `scripts/macos/dev.sh`, options `restart 2`.
 
 ## Databases: create, back up, restore
@@ -555,6 +558,12 @@ its log. The whole log: `logs/odoo-N.log`.
 **`Postgres does not answer`**: `brew services start postgresql@16`, then
 `brew services info postgresql@16`. Its log:
 `/opt/homebrew/var/log/postgresql@16.log`.
+
+**"Unable to find Wkhtmltopdf on this system", the report shown in HTML**:
+the instance's config has no `bin_path` (written before it existed) and the
+server was started where `tools/wkhtmltox/bin` is not on PATH (PyCharm).
+Start, update or open a shell on the instance once through `dev.sh` (that
+adds `bin_path` to `conf/odoo-N.conf`), or `dev.sh conf N`, then restart it.
 
 **PDF reports fail or have no header/footer**: check
 `~/Developer/ephem/tools/wkhtmltox/bin/wkhtmltopdf --version` prints

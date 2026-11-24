@@ -258,6 +258,28 @@ EOF
 }
 
 # ── Config ────────────────────────────────────
+# Where Odoo looks for wkhtmltopdf (PDF reports) and rtlcss (right to left
+# stylesheets, for Arabic): this installation's tools/, whatever the launcher.
+# The PATH that lib.sh exports is not enough on its own: PyCharm rebuilds PATH
+# when it activates the virtualenv, so a run started from PyCharm loses
+# tools/wkhtmltox/bin and every PDF falls back to HTML ("Unable to find
+# Wkhtmltopdf on this system"). Odoo appends bin_path to PATH when it looks a
+# program up (odoo.tools.misc.find_in_path), so two folders joined with ':'
+# both count.
+inst_bin_path() {
+    echo "$TOOLS/wkhtmltox/bin:$TOOLS/node/node_modules/.bin"
+}
+
+# A config written before bin_path existed gets it, without rewriting the rest
+# of the file (a developer may have edited it). Run before every launch.
+conf_bin_path() {  # conf_bin_path N
+    local conf; conf="$(inst_conf "$1")"
+    [ -f "$conf" ] || return 0
+    grep -q '^bin_path *=' "$conf" && return 0
+    printf '\n; wkhtmltopdf and rtlcss of this installation, whatever the launcher (PyCharm too).\nbin_path = %s\n' \
+        "$(inst_bin_path)" >> "$conf"
+}
+
 write_conf() {  # write_conf N
     local n="$1" conf
     conf="$(inst_conf "$n")"
@@ -274,6 +296,10 @@ admin_passwd = $(admin_passwd)
 ; extra-addons/*, then Odoo's own addons. dev.sh repo add/remove rewrites it.
 addons_path = $(inst_addons_path "$n")
 data_dir = $(inst_data "$n")
+
+; wkhtmltopdf and rtlcss of this installation, whatever the launcher (PyCharm
+; rebuilds PATH, so PATH alone is not enough).
+bin_path = $(inst_bin_path)
 
 ; Listens on this Mac only. For the LAN: BIND_HOST=0.0.0.0 in conf/native.env,
 ; then $ME conf $n and restart.
@@ -372,7 +398,7 @@ odoo_env() {
 
 odoo_bin() {  # odoo_bin N ARGS…   (foreground)
     local n="$1"; shift
-    odoo_env
+    odoo_env; conf_bin_path "$n"
     "$PY" "$ODOO_SRC/odoo-bin" "$@" -c "$(inst_conf "$n")"
 }
 
@@ -391,7 +417,7 @@ start_one() {
     done
     db_exists "$(inst_db "$n")" || warn "database $(inst_db "$n") does not exist yet: $ME initdb $n  (or create it in the browser)"
     mkdir -p "$LOG_DIR" "$RUN_DIR"
-    odoo_env
+    odoo_env; conf_bin_path "$n"
     # A session of its own, so closing the terminal does not take Odoo with
     # it. Python does it (os.setsid, then exec): no nohup in between, which
     # would drop DYLD_FALLBACK_LIBRARY_PATH (see lib.sh). The pid stays the
@@ -744,7 +770,7 @@ cmd_shell() {
     need_install; need_pg
     need_instance "${1:-}" shell
     local n="$1"; shift
-    odoo_env
+    odoo_env; conf_bin_path "$n"
     exec "$PY" "$ODOO_SRC/odoo-bin" shell -c "$(inst_conf "$n")" -d "$(inst_db "$n")" --no-http --logfile= "$@"
 }
 
