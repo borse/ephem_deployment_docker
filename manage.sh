@@ -2103,12 +2103,25 @@ v2_status_body() {
     fi
 }
 
+# scripts/timeout-check.sh: what held Odoo when nginx answered 504. It reads
+# the logs, which a restart or a reboot keeps, so it works after the fact.
+v2_timeout_check() {
+    local since
+    v2_title "Timeouts" "reads the logs only: safe at any time"
+    echo "  How far back? 30m, 6h, 2d, or a time such as 2026-11-26T06:00 (UTC)."
+    v2_ask "  Look back [24h]: "
+    since="${V2_ANS:-24h}"
+    echo -e "  ${CYAN}→${NC} bash scripts/timeout-check.sh --since $since${EPHEM_INSTANCE:+ --instance $EPHEM_INSTANCE}"
+    bash scripts/timeout-check.sh --since "$since" ${EPHEM_INSTANCE:+--instance "$EPHEM_INSTANCE"}
+}
+
 v2_status() {
     while true; do
         v2_title "Status and checks" "$(ephem_mode_label)"
         v2_status_body
         v2_head "Checks"
         v2_opt d "Doctor: prerequisites, then scan the log for known errors"
+        v2_opt t "Timeouts: why users met \"504 Gateway Time-out\" (reads the logs only)"
         [ "$EPHEM_MODE" = server ] && v2_opt c "Security check"
         v2_nav
         v2_prompt
@@ -2116,6 +2129,7 @@ v2_status() {
             ""|b|B) return 0 ;;
             x|X)    v2_bye ;;
             d|D)    if v2_pick_instance "Doctor: scan which instance"; then v2_do menu_doctor_local; fi ;;
+            t|T)    if v2_pick_instance "Timeouts: which instance"; then v2_do v2_timeout_check; fi ;;
             c|C)    if [ "$EPHEM_MODE" = server ]; then v2_do menu_security; else v2_bad; fi ;;
             *)      v2_bad ;;
         esac
