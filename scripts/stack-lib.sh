@@ -393,6 +393,15 @@ running_image_version() {
     esac
 }
 
+# The newest app image releases on Docker Hub, newest first, at most $1 (5):
+# version numbers only, so latest and the per-architecture tags stay out.
+# Prints nothing when Docker Hub cannot be reached.
+image_releases() {
+    curl -fsS --max-time 10 "https://hub.docker.com/v2/repositories/borrs/ephem/tags?page_size=100" 2>/dev/null \
+        | grep -o '"name":"[^"]*"' | sed 's/^"name":"//; s/"$//' \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1nr -k2,2nr -k3,3nr | head -n "${1:-5}"
+}
+
 # "running 1.0.6", plus a warning when it is not the pinned tag (the container
 # was not recreated after the pin, or the pull failed).
 running_image_text() {

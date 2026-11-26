@@ -973,10 +973,46 @@ menu_update_app() {
     echo -e "${CYAN}${BOLD}Update the ePHEM app image${NC}"
     echo ""
     local TAG; TAG=$(env_get EPHEM_IMAGE_TAG)
+    local RUN; RUN=$(running_image_version)
     echo "  Pinned version: ${TAG:-'(none — tracking latest; pin one on production!)'}"
-    echo "  Released versions: https://hub.docker.com/r/borrs/ephem/tags"
-    echo ""
-    read -r -p "  New version to pin (e.g. 1.0.3), empty to keep '$TAG': " NEWTAG
+    echo "  Running now:    ${RUN:-not running}"
+    # The newest releases, numbered: Docker Hub's tag list, version numbers only
+    # (latest and the per-architecture tags left out), newest first.
+    local -a RELEASES=()
+    mapfile -t RELEASES < <(image_releases 5)
+    if [ "${#RELEASES[@]}" -gt 0 ]; then
+        echo "  Newest release: ${RELEASES[0]}"
+        echo ""
+        echo "  Releases, newest first:"
+        local i mark
+        for i in "${!RELEASES[@]}"; do
+            mark=()
+            [ "$i" -eq 0 ] && mark+=("newest")
+            [ "${RELEASES[$i]}" = "$TAG" ] && mark+=("pinned")
+            [ "${RELEASES[$i]}" = "$RUN" ] && mark+=("running")
+            printf "    %d) %-8s %s\n" "$((i + 1))" "${RELEASES[$i]}" "$(IFS=,; echo "${mark[*]}" | sed 's/,/, /g')"
+        done
+        echo ""
+        read -r -p "  Choose 1 to ${#RELEASES[@]}, or type a version, or Enter to keep '${TAG:-latest}': " NEWTAG
+        if [[ "${NEWTAG:-}" =~ ^[0-9]+$ ]]; then
+            if [ "$NEWTAG" -ge 1 ] && [ "$NEWTAG" -le "${#RELEASES[@]}" ]; then
+                NEWTAG="${RELEASES[$((NEWTAG - 1))]}"
+                echo "  Chosen: $NEWTAG"
+            else
+                echo -e "  ${RED}✗${NC} There is no number $NEWTAG in the list. Nothing changed."
+                return 1
+            fi
+        fi
+        if [ -n "${NEWTAG:-}" ] && [ "$NEWTAG" = "$TAG" ]; then
+            echo "  $NEWTAG is already pinned: the pull below only refreshes it."
+            NEWTAG=""
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} Could not read the release list from Docker Hub (no internet here?)."
+        echo "  Released versions: https://hub.docker.com/r/borrs/ephem/tags"
+        echo ""
+        read -r -p "  New version to pin (e.g. 1.0.6), empty to keep '$TAG': " NEWTAG
+    fi
     if [ -n "${NEWTAG:-}" ]; then
         # A tag that does not exist would be written to .env and break the
         # next `docker compose up`. Check the registry first (a typo, or a
