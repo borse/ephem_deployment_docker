@@ -378,6 +378,35 @@ stack_image() {
     echo "borrs/ephem:${t:-latest}"
 }
 
+# The release the Odoo container actually runs, read from the image label the
+# build stamps (org.opencontainers.image.version, since 1.0.5). Not .env: a tag
+# can be pinned and never pulled, or "latest" can be any release. Prints
+# "1.0.6", "before 1.0.5" (older images carry Ubuntu's own label), "a local
+# build", or nothing when the container does not exist.
+running_image_version() {
+    local v
+    v=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "${1:-$ODOO_CTN}" 2>/dev/null) || return 0
+    case "$v" in
+        [0-9]*.[0-9]*.[0-9]*) echo "$v" ;;
+        dev)                  echo "a local build" ;;
+        *)                    echo "before 1.0.5" ;;
+    esac
+}
+
+# "running 1.0.6", plus a warning when it is not the pinned tag (the container
+# was not recreated after the pin, or the pull failed).
+running_image_text() {
+    local run pin
+    run=$(running_image_version "$1")
+    [ -n "$run" ] || { echo "not running"; return 0; }
+    pin=$(env_get EPHEM_IMAGE_TAG)
+    if [ -n "$pin" ] && [ "$run" != "$pin" ]; then
+        echo -e "${YELLOW}running $run, not the pinned $pin: Update, then the app image${NC}"
+    else
+        echo "running $run"
+    fi
+}
+
 # ── App image: architecture and pulls ─────────
 # Shared by setup.sh (install) and manage.sh (Update the app image).
 

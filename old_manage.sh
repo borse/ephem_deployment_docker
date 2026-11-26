@@ -753,7 +753,7 @@ menu_status() {
     local dbs; dbs=$(list_dbs)
     if [ -n "$dbs" ]; then echo "$dbs" | sed 's/^/  • /'; else echo "  (none, or database not running)"; fi
     echo ""
-    echo -e "${BOLD}App image:${NC}  borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest  (! unpinned — set EPHEM_IMAGE_TAG in .env on production)')"
+    echo -e "${BOLD}App image:${NC}  borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest  (! unpinned — set EPHEM_IMAGE_TAG in .env on production)'), $(running_image_text)"
     if office_converter_on; then
         echo -e "${BOLD}Office image:${NC} borrs/ephem-office:$(env_get EPHEM_OFFICE_TAG | grep . || env_get EPHEM_IMAGE_TAG | grep . || echo latest)"
     else

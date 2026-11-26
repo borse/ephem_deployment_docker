@@ -2069,6 +2069,7 @@ v2_status_body() {
     v2_t_add "Databases" "$dbs, listed under Databases (d)"
     if local_mode; then
         v2_t_add "App image" "$(stack_image)  $(image_summary)"
+        [ "$EPHEM_MODE" = dev-multi ] || v2_t_add "Running" "$(running_image_text)"
     else
         access=$(server_access)
         case "$access" in
@@ -2076,7 +2077,7 @@ v2_status_body() {
             proxy)  v2_t_add "Access" "behind the nginx on $(env_get PROXY_FROM), https://$(env_get PROXY_DOMAIN)" ;;
             *)      v2_t_add "Access" "nginx on this server" ;;
         esac
-        v2_t_add "App image" "borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest (not pinned)')"
+        v2_t_add "App image" "borrs/ephem:$(env_get EPHEM_IMAGE_TAG | grep . || echo 'latest (not pinned)'), $(running_image_text)"
         if office_converter_on; then
             v2_t_add "Office image" "borrs/ephem-office:$(env_get EPHEM_OFFICE_TAG | grep . || env_get EPHEM_IMAGE_TAG | grep . || echo latest)"
         else
